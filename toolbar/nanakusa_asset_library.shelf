@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <shelfDocument>
-  <toolshelf name="nanakusa_asset_library" label="Asset Library">
+  <toolshelf name="nanakusa_asset_library" label="NanakusaAssetLibrary">
     <memberTool name="nanakusa_asset_library_open"/>
   </toolshelf>
-  <tool name="nanakusa_asset_library_open" label="Asset Library" icon="LOP_materiallibrary">
+  <tool name="nanakusa_asset_library_open" label="NanakusaAssetLibrary" icon="LOP_materiallibrary">
     <script scriptType="python"><![CDATA[
 import nanakusa_asset_library
 nanakusa_asset_library.show()

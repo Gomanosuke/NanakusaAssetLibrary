@@ -253,7 +253,9 @@ class LibraryWidget(QtWidgets.QWidget):
         self._button('表示対象の不足サムネイルを生成',self.generate_missing_thumbnails,db)
         self._button('サムネイル生成を中止',self.cancel_thumbnails,db)
         self._button('フォルダーを開く',self.reveal,db)
-        db.addStretch(); split.addWidget(details); split.setSizes([230,600,270])
+        db.addStretch()
+        detail_scroll=QtWidgets.QScrollArea();detail_scroll.setWidgetResizable(True);detail_scroll.setWidget(details)
+        split.addWidget(detail_scroll); split.setSizes([230,600,270])
         destrow=QtWidgets.QHBoxLayout()
         destrow.addWidget(QtWidgets.QLabel('読み込み先'))
         self.target=QtWidgets.QLineEdit('/stage'); destrow.addWidget(self.target,1)
@@ -322,7 +324,7 @@ class LibraryWidget(QtWidgets.QWidget):
         candidates=[Path(row['thumbnail'])] if row['thumbnail'] else []
         candidates += [p.with_suffix('.preview.jpg'),p.parent/'thumbnail.jpg',p.parent/'thumbnail.png',p.parent/'preview.jpg']
         cached=self.cache_path(row)
-        if cached.is_file():candidates.insert(0,cached)
+        if cached.is_file():candidates.insert(1 if row['thumbnail'] else 0,cached)
         if p.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tga'}:candidates.append(p)
         return next((x for x in candidates if x.is_file()),None)
 
