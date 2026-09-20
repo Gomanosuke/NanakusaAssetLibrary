@@ -3,6 +3,8 @@
 Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
 Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
+現在のバージョンは **0.3.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+
 ## コードとデータの分離
 
 このGitリポジトリーはコード、ドキュメント、合成データを使うテストだけを含みます。
@@ -11,6 +13,19 @@ PC固有の設定、SQLiteインデックス、タグ、画像素材の縮小キ
 モデルとUSDのサムネイルは素材と一緒に共有できるよう、素材の隣に保存します。
 `NAL_DATA_DIR` で保存先、`NAL_ASSET_ROOT` で初回のアセットルートを指定することもできます。
 これらのデータと素材はGitに含めません。
+
+推奨する配置例です。コードのclone先と素材の保存先は独立させてください。
+
+```text
+<code-location>/NanakusaAssetLibrary/    # Git管理する本体
+<library-location>/
+  asset/                              # USD / Texture / 3DModel
+  data/                               # settings.json、library.sqlite3、thumbnails/
+  backups/                            # 移行・変更前の保全
+```
+
+`data`のSQLiteは各PCのローカルディスクで管理し、複数PCから同じDBへ同時に書き込まないでください。
+素材と素材の隣のサムネイルは共有できます。
 
 ## インストール・別PCでの開発
 
@@ -39,6 +54,21 @@ nanakusa_asset_library.show()
 コード変更はGitでcommit/pushし、別PCでpull後にHoudiniを再起動します。
 旧版の `packages/solaris_asset_library.json` がある場合は、バックアップして無効化してください。
 
+### 既存環境の移行
+
+1. Houdiniを保存して終了し、コード・package JSON・既存dataをバックアップします。
+2. 本体フォルダー名を変更する場合は`.git`を含むフォルダー全体を移動します。
+3. dataを移す場合は、`settings.json`・`library.sqlite3`・キャッシュをまとめて移します。
+   インストーラーは既存dataの自動移動を行いません。
+4. 既存インデックスを引き継ぐ場合は、新しい本体から`--prefs`と移動先の`--data`だけを指定してインストーラーを再実行します。
+   この段階では`--library`で移動先を追加登録しないでください。
+5. Houdiniを起動し、素材ルートを移した場合は既存の登録を「設定 → ルートの場所を変更」で再リンクします。
+   同じ素材を追加登録するだけでは、旧登録のタグやお気に入りは引き継がれません。
+6. 再スキャンして素材と保存先を確認します。GitHub Desktopで本体が見つからない場合はLocateで新しいclone先を指定します。
+
+package JSONの`path`が本体、`env`の`NAL_DATA_DIR`がdataの指定です。
+古い場所を参照していないことを確認してから、旧フォルダーを整理してください。
+
 ## 固定の分類とフォルダー
 
 ルート直下のアセット分類は次の3つに固定です。それぞれの下に整理用フォルダーを作れます。
@@ -49,6 +79,7 @@ nanakusa_asset_library.show()
     Props/
       Chair/
         Chair.usd
+        thumbnail.png
         payload.usdc
         textures/
   Texture/
@@ -58,6 +89,7 @@ nanakusa_asset_library.show()
   3DModel/
     Props/
       Mesh.fbx
+      Mesh_thumbnail.png
 ```
 
 - **USD**: フォルダーと同名の `.usd` / `.usdc` / `.usda` / `.usdz` を入口として検出し、
@@ -127,6 +159,7 @@ USDを選択して「USDをCatalogへ登録」でHoudini Asset Catalogのデー�
 
 ```text
 python -m unittest discover -s tests -p test_core.py
+python -m unittest discover -s tests -p test_storage.py
 ```
 
 Houdini 22のhython（作業シーンとは別プロセス）:
@@ -134,3 +167,21 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 ```text
 hython -m unittest discover -s tests
 ```
+
+0.3.0ではHoudini 22.0.447 / Windowsで28件のテストが通過しました。
+保存先の分離、モデル・USDの隣への出力、縦横比の維持、画像変換時の黒帯防止を検証しています。
+検証結果はこのバージョン時点の記録です。変更後は影響するテストと実際の利用経路を確認してください。
+
+## 実装の構成
+
+| ファイル | 担当 |
+|---|---|
+| `install.py` | package JSONと保存先の設定 |
+| `core.py` | 固定分類の走査、SQLite、メタデータ |
+| `storage.py` | dataの決定、サムネイルの保存先・検出 |
+| `ui.py` | パネル、正方形プレビュー、生成キュー |
+| `dragdrop.py` | D&Dの形式と読み込み先判定 |
+| `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
+| `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成 |
+
+モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。
