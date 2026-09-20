@@ -1,195 +1,124 @@
-# Solaris Asset Library
+# NanakusaAssetLibrary
 
-Houdini 22 / Karma XPU向けの、プロジェクト共通アセットブラウザーです。
-Python Panelとしてドッキングでき、複数ライブラリーのフォルダー階層、検索、種類、タグ、お気に入りから素材を探せます。
-OD Toolsの公開機能説明を参考にした独立実装です。OD Toolsのコード・素材は含みません。
+Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
+Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
-## コードとアセットを分離
+## コードとデータの分離
 
-このリポジトリーに保存するのはコード・テスト・ドキュメントだけです。
+このGitリポジトリーはコード、ドキュメント、合成データを使うテストだけを含みます。
+アセットは独立した任意のフォルダーに置き、画面またはインストーラーから指定します。
+PC固有の設定、SQLiteインデックス、タグ、サムネイルは
+`$HOUDINI_USER_PREF_DIR/nanakusa_asset_library_data` に保存します。
+`NAL_DATA_DIR` で保存先、`NAL_ASSET_ROOT` で初回のアセットルートを指定することもできます。
+これらのデータと素材はGitに含めません。
 
-| 保存場所 | 内容 | Git管理 |
-|---|---|---|
-| このリポジトリー | Python、Python Panel、Shelf、説明書 | 対象 |
-| ユーザーが指定するライブラリー | モデル、画像、USD、PBRセット定義など | 対象外 |
-| `$HOUDINI_USER_PREF_DIR/solaris_asset_library/` | 検索インデックス、タグ、お気に入り、設定、サムネイルキャッシュ | 対象外 |
-| `$HOUDINI_USER_PREF_DIR/packages/solaris_asset_library.json` | コードの場所を指すローカル設定 | 対象外 |
+## インストール・別PCでの開発
 
-ライブラリーの実パスはユーザー設定に保存します。コードに個人の保存先は埋め込みません。
-リポジトリーを任意の場所へcloneし、インストーラーにコードと独立した素材フォルダーを渡してください。
-Gitに含めない拡張子を`.gitignore`でも定義していますが、push前に`git diff --cached`を確認してください。
-
-## インストール
-
-Houdiniの作業を保存してから、Houdini 22のhython、またはPython 3.10以上で実行します。
+1. このリポジトリーを任意の場所にcloneします。
+2. Houdiniの作業を保存してから、Python 3.10以上またはHoudini 22のhythonで実行します。
 
 ```text
-python install.py --prefs "<Houdini 22のユーザー設定フォルダー>" --library "<共通アセットフォルダー>"
+python install.py --prefs "<Houdiniのユーザー設定フォルダー>" --library "<アセットルート>"
 ```
 
-`--library`は省略可能です。その場合は画面の「ライブラリー追加」から指定します。
-既存のパッケージ設定・ユーザー設定がある場合、インストーラーは日時付きでバックアップします。
-アセットをコードフォルダーにコピーする処理はありません。
-
-Houdiniを再起動し、Python Panelのメニューから **Solaris Asset Library** を開きます。
-またはAsset Libraryシェルフを表示し、ボタンからフローティングウィンドウを開けます。
+3. Houdiniを再起動し、Python Panelのメニューから **NanakusaAssetLibrary** を開きます。
+   Shelfのボタン、または以下でも開けます。
 
 ```python
-import solaris_asset_library
-solaris_asset_library.show()
+import nanakusa_asset_library
+nanakusa_asset_library.show()
 ```
 
-アップデートはコードを更新してパネルを再起動（モジュール変更時はHoudiniを再起動）してください。
-コードフォルダーを移動した場合はインストーラーを再実行します。
-アンインストールは上記のpackage JSONを削除してHoudiniを再起動します。素材や検索データは保持されます。
+`--library`を省略して画面から登録することもできます。インストーラーはコードの場所を指す
+`packages/nanakusa_asset_library.json` を作成します。既存設定は日時付きでバックアップします。
+コードを移動した場合は再インストールしてください。
+別PCではそのPCの素材ルートを指定します。同じ素材階層を共有しても、インデックスは各PCで保持できます。
+コード変更はGitでcommit/pushし、別PCでpull後にHoudiniを再起動します。
+旧版の `packages/solaris_asset_library.json` がある場合は、バックアップして無効化してください。
 
-## フォルダー整理
+## 固定の分類とフォルダー
 
-分類は固定ではありません。使い慣れた階層をそのまま登録できます。
-新規ライブラリーの例:
+ルート直下のアセット分類は次の3つに固定です。それぞれの下に整理用フォルダーを作れます。
 
 ```text
-<library-root>/
-  Models/
-    Nature/Rocks/
-    Architecture/
-    Props/
-  Materials/
-    Wood/
-    Metal/
-  Textures/
-  HDRI/
-    Outdoor/
-    Studio/
-  Decals/
-    Signs/
-    Dirt/
+<asset-root>/
   USD/
-  _catalog/
+    Props/
+      Chair/
+        Chair.usd
+        payload.usdc
+        textures/
+  Texture/
+    HDR/
+    PBR/
+    Decal/
+  3DModel/
+    Props/
+      Mesh.fbx
 ```
 
-最初にルートを登録して「再スキャン」を押します。スキャンはバックグラウンドで実行し、元ファイルを変更しません。
-左側でフォルダーを選択すると、そのフォルダー以下だけを表示します。「下位フォルダーを含む」をOFFにすると直下だけを表示します。
-検索は選択フォルダー・種類・お気に入りの条件と組み合わせられます。
-画像1枚ずつとセット定義の両方を表示するので、PBRセットだけを探す場合は種類を絞ってください。
-表示は200件ずつのページ方式です。シーケンス・UDIMタイルの自動グループ化は行いません。
+- **USD**: フォルダーと同名の `.usd` / `.usdc` / `.usda` / `.usdz` を入口として検出し、
+  パッケージの親フォルダーを1件表示します。内部のUSDレイヤーやテクスチャは表示しません。
+  複数の入口がある場合は上記の拡張子順です。同名の入口がないフォルダーは整理用フォルダーとして走査します。
+- **3DModel**: `.obj`, `.fbx`, `.vdb`, `.bgeo`, `.bgeo.sc`, `.geo`, `.geo.sc`, `.abc`, `.glb`, `.stl`, `.ply`。
+  形状を単一ファイルから読める形式が対象です。FBXの外部画像や元の材質は再構築しません。
+- **Texture**: PNG、JPEG、TIFF、HDR、EXRなどの画像。HDRやデカールもこの分類に置きます。
 
-「新規フォルダー」で下位階層を作れます。既存素材の自動移動・自動改名・削除は行いません。
-ライブラリー登録解除はインデックスの登録だけを削除します。元ファイルは残ります。
-移動したライブラリーは「設定 → ルートの場所を変更」で再リンクすると、タグやお気に入りを維持できます。
-再リンクはブラウザーの参照先を変更します。既存HIPや公開済みUSD内のパスを書き換えるものではありません。
+素材を追加したら「再スキャン」を押してください。元ファイルの移動・改名・削除はしません。
+USDのパッケージ内は「新規フォルダー」の対象外です。UDIM・シーケンスの自動集約はありません。
+ルート移動後は「設定 → ルートの場所を変更」で再リンクできます。HIP内の既存パスは書き換えません。
 
-## 読み込み
+## D&D
 
-読み込み先は`/stage`などのLOPネットワークを指定します。
-「選択LOPの後に接続」がONなら、同じネットワーク内で選択した1つのLOPに接続します。
-既存の下流接続は差し替えません。新しいノードを選択・表示し、Undoグループにまとめます。
+| 素材 | ドロップ先 | 動作 |
+|---|---|---|
+| 3DModel | stage / LOPネットワーク | SOP Createと形式別の読み込みSOP |
+| 3DModel | obj / SOPネットワーク | Geometry内の読み込みSOP、または読み込みSOP |
+| USD | stage / LOPネットワーク | Reference LOP |
+| USD | obj / SOPネットワーク | USD Import SOP |
+| Texture | テキスト入力欄 | ファイルパスを入力 |
+| Texture | Material Library / MaterialX Builderなどの材質階層 | UVを明示接続したMaterialX ImageとStandard Surface |
 
-| 素材 | 動作 |
-|---|---|
-| USD / USDA / USDC / USDZ | Reference。シーン全体はSublayerモードも選択可 |
-| OBJ / BGEO / GEO / STL / PLY | SOP Create内にFile SOPを作成 |
-| ABC | SOP Create内にAlembic SOPを作成 |
-| FBX | FBX Skin Importで静的な形状を読み込み |
-| glTF / GLB | glTF SOPから形状を読み込み |
-| HDRI | Dome Lightを作成し画像を設定 |
-| 単体テクスチャ | Base Colorに画像を接続したMaterialXを作成 |
-| `.pbr.json` | 指定した画像群からMaterialXを作成 |
-| `.mtlx` | HoudiniのUSD/MaterialXプラグイン経由でReference / Sublayer |
-| デカール画像 / `.decal.json` | UV付きカードとMaterialXを作成。表面への自動投影ではない |
+Textureを通常のstageやobjへ落としてもノードは作りません。
+既存Builder内では新しいSurfaceを作成し、既存の出力接続は保持します。必要に応じて新しいSurfaceを出力へ接続してください。
+普通の画像はsRGB、HDR/EXRはlinear Rec.709として設定します。ノーマル等のデータ画像は用途に合わせてRawと接続先を調整してください。
+FBXはFBX Skin Import、ABCはAlembic、GLBはglTF、VDB等はFile SOPで読み込みます。
 
-FBX/glTFの元シェーダー、スケルトンやアニメーションを完全に再現するインポーターではありません。
-必要に応じてPBRセットを作成し、材質を明示的に割り当ててください。
-`.mtlx`はファイル構造・Houdiniの対応範囲に依存します。複数ルートでdefaultPrimがない場合はSublayerを使用します。
-単体のRoughnessなどを「テクスチャ」として読み込むとBase Colorになります。用途別マップはPBRセットで指定してください。
-マテリアルの「割当先Prim」には対象Primパターンを指定できます。空欄なら材質作成のみです。
+## プレビューとサムネイル
 
-EXRはデータマップにも使用するため、拡張子だけでHDRIとは判定しません。
-HDRI/HDRIsフォルダーに置くか、詳細の「種類」をHDRIに変更してください。
-同様にデカール画像はDecal/Decalsフォルダー、または種類の手動指定を使用できます。
+TIFF・HDR・EXRはHoudini付属の画像変換ツールで縮小し、PCごとのキャッシュへ保存します。
+画像表示は近似色です。元画像を書き換えません。
 
-## PBR / デカールセット
+USD・3DModelは「選択素材のサムネイルを生成」で作成できます。
+「表示対象の不足サムネイルを生成」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
+既存サムネイルがある素材は一括生成でスキップします。「サムネイル生成を中止」で待機分を解除できます。
 
-対象フォルダーまたは素材を選択し「PBR / Decalセット作成」を押します。
-ファイル名からマップ候補を提示しますが、**保存前に各マップを確認してください**。
-同じフォルダーに複数素材が混在する場合、候補が意図したセットとは限りません。
-セット定義は画像と同じフォルダーへ新規JSONとして保存し、画像は複製・変更しません。
+形状のサムネイルは別プロセスのhythonとKarma CPUで512×320にレンダリングします。
+形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
+GPUを占有せず4 CPUスレッドを使います。Houdini / Karmaの利用可能なライセンスが必要です。
+USDの材質と依存ファイルを参照し、最初のフレームを描画します。欠落した依存ファイルや読み込み不能な形状はエラーとして表示します。
+ボリュームの見た目は元データの密度・材質に依存します。任意の画像を「サムネイル指定」で割り当てることもできます。
+元ファイル更新後は再スキャンして生成してください。USD内の依存画像だけを更新した場合は選択素材を再生成してください。
 
-対応マップ: Base Color、Roughness、Metalness、Normal、Opacity、Displacement、Emission。
-カラー画像の初期値は`sRGB texture`、データマップはRawです。カラーEXRなどは色空間を明示してください。
-NormalはOpenGL形式を想定。DirectXのY反転、ORMのチャンネル分離、Glossiness反転は自動処理しません。
-UDIMを使用する場合は画像パスのタイル番号を`<UDIM>`へ置き換えて指定できます。
-デカールにOpacity画像がない場合、Base Colorのアルファを使用します。
+## USD / Asset Catalog
 
-マニフェスト例（実ファイルはライブラリー側に保存）:
+USDを選択して「USDをCatalogへ登録」でHoudini Asset Catalogのデータベースへ登録できます。
+同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `_catalog` に保存します（素材分類としては表示しません）。
+「素材を静的USD化」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
+外部依存を持つUSDを他PCへ渡すときは、その依存ファイルと相対パスも保ってください。
 
-```json
-{
-  "schema": 1,
-  "maps": {
-    "base_color": "wood_basecolor.png",
-    "roughness": "wood_roughness.png",
-    "normal": "wood_normal.png"
-  },
-  "color_space": "srgb_texture",
-  "displacement_scale": 0.01
-}
-```
+## 検証
 
-## サムネイル
-
-画像素材は直接表示します。素材の隣に`thumbnail.jpg`、`thumbnail.png`、`preview.jpg`、または`<stem>.preview.jpg`があれば優先します。
-モデルなどは既存のプレビューを「サムネイル指定」で割り当てられます。
-HDR/EXR/RATなどは「画像からサムネイル生成」を使います。Houdiniのiconvertを別プロセスで実行します。
-生成画像はユーザー設定側のキャッシュに保存します。表示色は近似で、Karmaの厳密なルック検証画像ではありません。
-モデルを自動レンダリングしてサムネイルにする機能は、この版にはありません。
-
-## USD出力と標準Asset Catalog
-
-「素材を静的USD化」は、その素材だけを一時的なLOPネットワークで構築し、合成済みUSDを書き出します。
-現在のショット全体を出力する処理ではありません。複数ルートは参照可能な一つのルートにまとめます。
-既存ファイルは上書きしません。変更時は新しいバージョン名で保存してください。
-
-**このUSD化は現在フレームの静的スナップショットです。** アニメーションのフレーム範囲書き出しは行いません。
-USDをFlattenするため、レイヤー分割・Payload構造・未選択Variantを保持する出版処理ではありません。
-既に適切に構成されたUSDは、USD化せずそのまま登録してください。
-外部画像は共有ライブラリー内の元パスを参照し、コピーしません。別PCでは同じ参照先が必要です。
-
-「USDをCatalogへ登録」はHoudiniの公開APIを使い、同じUSDの重複登録を防ぎます。
-登録先は選択した公開用ライブラリーの`_catalog/solaris_assets.db`です。既存DBは変更前にバックアップします。
-「Catalogを開く」で標準Asset Catalogを表示できます。Referenceで読み込めるdefaultPrimまたは単一ルートが必要です。
-非USD素材は、先にUSD化してから登録します。
-公開先ライブラリーは「設定 → このライブラリーをUSD / Catalogの保存先にする」で変更できます。
-
-## 設定と共有
-
-ライブラリーは複数登録可能です。重複したルート・親子関係のルートは登録しません。
-設定の`publish_root`がUSD/Catalogの既定保存先です。
-`SAL_ASSET_ROOT`環境変数で既定ライブラリー、`SAL_DATA_DIR`でユーザー設定/インデックスの場所を上書きできます。
-インデックスのSQLiteはローカルディスクに配置してください。素材は共有ストレージにも置けます。
-複数人が同一Catalogへ同時書き込みする運用や、ストレージ切断中の書き込みは未検証です。
-
-## 開発・テスト
-
-標準Pythonだけで実行できるインデックスのテスト:
+標準Python:
 
 ```text
-python -m unittest discover -s tests -p test_core.py -v
+python -m unittest discover -s tests -p test_core.py
 ```
 
-Houdini 22の新規hythonプロセスで実行する統合テスト:
+Houdini 22のhython（作業シーンとは別プロセス）:
 
 ```text
-hython -m unittest discover -s tests -v
+hython -m unittest discover -s tests
 ```
 
-テスト用モデルや画像は実行時に一時ディレクトリーへ生成します。実ユーザーの素材・HIPは使いません。
-検証対象はHoudini 22.0.447 / Python 3.13 / PySide6です。
-MaterialX Builderの生成には同梱`voptoolutils`のヘルパーを使用しているため、将来のHoudini更新時は統合テストを実行してください。
-
-## 参考資料
-
-- [OD Tools Asset Library](https://odtools.notion.site/Asset-Library-11df5330bf9345ee9de0da6a24a5f428)
-- [Houdini Asset Catalog](https://www.sidefx.com/docs/houdini/ref/panes/assetgallery.html)
-- [AssetGalleryDataSource API](https://www.sidefx.com/docs/houdini/hom/hou/AssetGalleryDataSource.html)
-- [Python Panel](https://www.sidefx.com/docs/houdini/ref/panes/pythonpanel)
+実機検証対象はHoudini 22.0.447 / Windowsです。OD Toolsとは独立した実装です。

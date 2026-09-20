@@ -8,7 +8,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 import hou
 from pxr import Usd, UsdGeom, UsdShade
 from hutil.PySide import QtGui
-from solaris_asset_library import houdini_ops as ops
+from nanakusa_asset_library import houdini_ops as ops
 
 class HoudiniTests(unittest.TestCase):
     def setUp(self):

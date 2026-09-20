@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <pythonPanelDocument>
-  <interface name="solaris_asset_library" label="Solaris Asset Library" icon="LOP_materiallibrary" showNetworkNavigationBar="false">
+  <interface name="nanakusa_asset_library" label="NanakusaAssetLibrary" icon="LOP_materiallibrary" showNetworkNavigationBar="false">
     <script><![CDATA[
 def onCreateInterface():
-    from solaris_asset_library.ui import LibraryWidget
+    from nanakusa_asset_library.ui import LibraryWidget
     return LibraryWidget()
 ]]></script>
     <includeInPaneTabMenu menu_position="605" create_separator="false"/>

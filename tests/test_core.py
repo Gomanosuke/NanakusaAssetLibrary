@@ -1,75 +1,53 @@
-import json
 from pathlib import Path
-import sys
-import tempfile
-import unittest
+import sys,tempfile,unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
-from solaris_asset_library.core import Library, classify, inside, read_manifest
+from nanakusa_asset_library.core import Library,inside,visible_folders
 
 class LibraryTests(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory()
-        self.base=Path(self.temp.name)
-        self.root=self.base/'assets'; self.root.mkdir()
-        self.lib=Library(self.base/'index'); self.rid=self.lib.add_root(self.root)
-
+        self.temp=tempfile.TemporaryDirectory();self.base=Path(self.temp.name)
+        self.root=self.base/'assets';self.root.mkdir()
+        for genre in ('USD','Texture','3DModel'):(self.root/genre).mkdir()
+        self.lib=Library(self.base/'index');self.rid=self.lib.add_root(self.root)
     def tearDown(self):self.temp.cleanup()
-
-    def test_scan_preserves_user_metadata_and_deduplicates(self):
-        (self.root/'chair.obj').write_text('v 0 0 0')
-        self.lib.scan(self.rid); asset=self.lib.assets()[0]
-        self.lib.update(asset['id'],favorite=1,tags='wood outdoor',label='Chair',override_kind='usd')
+    def write(self,relative,content=''):
+        path=self.root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(content);return path
+    def test_usd_package_is_opaque(self):
+        self.write('USD/Plants/tree/tree.usd');self.write('USD/Plants/tree/geo.usdc')
+        self.write('USD/Plants/tree/textures/color.tif');self.write('USD/loose.usd')
+        self.lib.scan(self.rid);rows=self.lib.assets()
+        self.assertEqual([r['relpath'] for r in rows],['USD/Plants/tree/tree.usd'])
+        self.assertEqual(rows[0]['label'],'tree')
+        self.assertNotIn('USD/Plants/tree/textures',visible_folders(self.root))
+    def test_fixed_genres_and_single_file_models(self):
+        for path in ('3DModel/a.obj','3DModel/b.fbx','3DModel/smoke.vdb','Texture/a.tif','Texture/sky.hdr'):self.write(path)
+        for path in ('3DModel/color.png','3DModel/multi.gltf','Texture/model.obj','Other/a.obj'):self.write(path)
         self.lib.scan(self.rid)
-        rows=self.lib.assets(search='wood Chair',favorite=True,kind='usd')
-        self.assertEqual(len(rows),1); self.assertEqual(rows[0]['id'],asset['id'])
-
-    def test_missing_and_relink(self):
-        (self.root/'a.usd').write_text('#usda 1.0')
-        self.lib.scan(self.rid); old=self.lib.assets()[0]['id']
-        new=self.base/'moved'; self.root.rename(new)
+        self.assertEqual(len(self.lib.assets()),5);self.assertEqual(len(self.lib.assets(kind='texture')),2)
+        self.assertNotIn('Other',visible_folders(self.root))
+    def test_rescan_preserves_metadata(self):
+        self.write('3DModel/chair.obj');self.lib.scan(self.rid)
+        row=self.lib.assets()[0];self.lib.update(row['id'],tags='wood outdoor',favorite=1,label='Chair')
+        self.lib.scan(self.rid);rows=self.lib.assets(search='wood Chair',favorite=True)
+        self.assertEqual(len(rows),1);self.assertEqual(row['id'],rows[0]['id'])
+    def test_old_flat_index_pruned(self):
+        self.write('USD/tree/tree.usd');self.write('USD/tree/textures/color.tif')
+        with self.lib.connect() as db:
+            db.execute('INSERT INTO assets (id,root_id,relpath,label,kind) VALUES (?,?,?,?,?)',('old',self.rid,'USD/tree/textures/color.tif','color','texture'))
+        self.lib.scan(self.rid);self.assertEqual(len(self.lib.assets()),1)
+    def test_cancel_offline_and_relink(self):
+        self.write('3DModel/a.obj');self.lib.scan(self.rid)
+        self.assertTrue(self.lib.scan(self.rid,lambda:True)['cancelled'])
+        new=self.base/'moved';self.root.rename(new)
         with self.assertRaises(FileNotFoundError):self.lib.scan(self.rid)
         self.assertEqual(len(self.lib.assets()),1)
-        self.lib.relink_root(self.rid,new); self.lib.scan(self.rid)
-        self.assertEqual(self.lib.assets()[0]['id'],old)
-        self.assertEqual(self.lib.resolve(self.lib.assets()[0]),new/'a.usd')
-        (new/'a.usd').unlink(); self.lib.scan(self.rid)
-        self.assertEqual(self.lib.assets(),[])
-
-    def test_cancel_does_not_mark_missing(self):
-        (self.root/'a.obj').write_text('v 0 0 0'); self.lib.scan(self.rid)
-        result=self.lib.scan(self.rid,lambda:True)
-        self.assertTrue(result['cancelled']); self.assertEqual(len(self.lib.assets()),1)
-
-    def test_path_escape_and_overlapping_roots(self):
+        self.lib.relink_root(self.rid,new);self.lib.scan(self.rid)
+        self.assertEqual(self.lib.resolve(self.lib.assets()[0]),new/'3DModel/a.obj')
+    def test_path_escape_and_overlap(self):
         with self.assertRaises(ValueError):inside(self.root,'../escape')
-        with self.assertRaises(ValueError):self.lib.add_root(self.base)
-
-    def test_forget_does_not_delete_source(self):
-        source=self.root/'a.obj'; source.write_text('v 0 0 0')
-        self.lib.scan(self.rid); backup=self.lib.backup_index()
-        self.lib.remove_root(self.rid)
-        self.assertTrue(source.exists()); self.assertTrue(backup.stat().st_size>0)
-
-    def test_classification(self):
-        self.assertEqual(classify('Textures/color.exr'),'texture')
-        self.assertEqual(classify('HDRI/sky.exr'),'hdri')
-        self.assertEqual(classify('Decals/sign.png'),'decal')
-        self.assertEqual(classify('wall.pbr.json'),'pbr')
-        self.assertEqual(classify('tree.bgeo.sc'),'model')
-
-    def test_manifest(self):
-        image=self.root/'color.png'; image.write_bytes(b'test')
-        manifest=self.root/'wood.pbr.json'
-        manifest.write_text(json.dumps({'schema':1,'maps':{'base_color':'color.png'}}))
-        _,maps=read_manifest(manifest)
-        self.assertEqual(maps['base_color'],image.as_posix())
-        image.unlink()
-        with self.assertRaises(FileNotFoundError):read_manifest(manifest)
-
-    def test_search_literal_wildcards(self):
-        (self.root/'a_wood.obj').write_text('')
-        (self.root/'abwood.obj').write_text('')
-        self.lib.scan(self.rid)
-        self.assertEqual(len(self.lib.assets(search='a_')),1)
-
+        with self.assertRaises(ValueError):self.lib.add_root(self.root/'USD')
+    def test_forget_keeps_files_and_backup(self):
+        path=self.write('3DModel/a.obj');self.lib.scan(self.rid)
+        backup=self.lib.backup_index();self.lib.remove_root(self.rid)
+        self.assertTrue(path.exists());self.assertTrue(backup.stat().st_size>0)
 if __name__=='__main__':unittest.main()

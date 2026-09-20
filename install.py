@@ -20,10 +20,10 @@ def install(prefs, library=None):
             raise ValueError('Source code and asset library must be independent folders')
         root.mkdir(parents=True,exist_ok=True)
     else:root=None
-    data=prefs/'solaris_asset_library'
+    data=prefs/'nanakusa_asset_library_data'
     data.mkdir(parents=True,exist_ok=True)
     packages=prefs/'packages'; packages.mkdir(parents=True,exist_ok=True)
-    package=packages/'solaris_asset_library.json'
+    package=packages/'nanakusa_asset_library.json'
     settings=data/'settings.json'
     stamp=datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     for path in (package,settings):
@@ -35,17 +35,19 @@ def install(prefs, library=None):
     package.write_text(json.dumps({'path':source.as_posix()},indent=2),encoding='utf-8')
     config=json.loads(settings.read_text(encoding='utf-8-sig')) if settings.exists() else {}
     if root:
+        for genre in ('USD','Texture','3DModel'):
+            (root/genre).mkdir(exist_ok=True)
         config['publish_root']=root.as_posix()
         settings.write_text(json.dumps(config,indent=2,ensure_ascii=False),encoding='utf-8')
         sys.path.insert(0,str(source/'python3.13libs'))
-        from solaris_asset_library.core import Library
+        from nanakusa_asset_library.core import Library
         index=Library(data)
         if index.roots():index.backup_index()
         index.add_root(root)
     print('Installed package:',package)
     print('Source:',source)
     print('User settings/index:',data)
-    print('Restart Houdini, then open Solaris Asset Library from the Python Panel menu.')
+    print('Restart Houdini, then open NanakusaAssetLibrary from the Python Panel menu.')
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)

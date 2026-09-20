@@ -3,14 +3,15 @@ from pathlib import Path
 import json
 import os
 import subprocess
+import tempfile
+import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops
+from . import core, houdini_ops as ops, dragdrop
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
-KINDS = {'': 'すべての種類', 'usd': 'USD', 'model': 'モデル', 'material': 'MaterialX',
-         'pbr': 'PBRマテリアル', 'texture': 'テクスチャ', 'hdri': 'HDRI', 'decal': 'デカール'}
+KINDS = {'': 'すべての種類', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'}
 _windows = []
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
 
@@ -38,12 +39,16 @@ class ThumbnailJob(QtCore.QThread):
         super().__init__()
         self.asset_id = asset_id
         self.source, self.dest = str(source), str(dest)
-        self.exe = str(Path(hou.getenv('HFS')) / 'bin' / ('iconvert.exe' if os.name == 'nt' else 'iconvert'))
+        self.exe = str(Path(hou.getenv('HFS')) / 'bin' / ('hoiiotool.exe' if os.name == 'nt' else 'hoiiotool'))
 
     def run(self):
         try:
             # Run image decoding outside Houdini's UI thread; no shell interpolation.
-            result = subprocess.run([self.exe, '-d', '8', '-g', 'auto', self.source, self.dest],
+            args=[self.exe,'--threads','4',self.source,'--fit','512x320']
+            if Path(self.source).suffix.lower() in ('.hdr','.exr'):
+                args += ['--colorconvert','lin_rec709','srgb_texture']
+            args += ['-d','uint8','-o',self.dest]
+            result = subprocess.run(args,
                 capture_output=True, timeout=120, creationflags=(subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0))
             if result.returncode:
                 raise RuntimeError(result.stderr.decode(errors='replace')[-1500:])
@@ -53,6 +58,57 @@ class ThumbnailJob(QtCore.QThread):
             image = image.scaled(512, 320, QtCore.Qt.AspectRatioMode.KeepAspectRatio, QtCore.Qt.TransformationMode.SmoothTransformation)
             image.save(self.dest)
             self.done.emit(self.asset_id, self.dest, '')
+        except Exception as exc:
+            self.done.emit(self.asset_id, '', str(exc))
+
+class GeometryThumbnailJob(QtCore.QThread):
+    done = QtCore.Signal(str, str, str)
+    def __init__(self, asset_id, source, kind, dest):
+        super().__init__()
+        self.asset_id, self.source, self.kind, self.dest = asset_id, str(source), kind, Path(dest)
+        self.bin = Path(hou.getenv('HFS'))/'bin'
+
+    def execute(self, args, log):
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        with log.open('wb') as stream:
+            process = subprocess.Popen(args, stdout=stream, stderr=stream, creationflags=flags)
+            started = time.monotonic()
+            try:
+                while process.poll() is None:
+                    if self.isInterruptionRequested():
+                        raise RuntimeError('生成を中止しました')
+                    if time.monotonic()-started > 240:
+                        raise RuntimeError('サムネイル処理が制限時間を超えました')
+                    self.msleep(100)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try: process.wait(timeout=5)
+                    except subprocess.TimeoutExpired: process.kill(); process.wait()
+        if process.returncode:
+            raise RuntimeError(log.read_text(encoding='utf-8', errors='replace')[-2000:])
+
+    def run(self):
+        try:
+            with tempfile.TemporaryDirectory(prefix='nanakusa_preview_') as folder:
+                base = Path(folder)
+                suffix = '.exe' if os.name == 'nt' else ''
+                self.execute([str(self.bin/('hython'+suffix)), str(Path(__file__).with_name('thumbnail_scene.py')),
+                    self.source, self.kind, str(base/'scene.usda'), str(base/'camera.json')], base/'prepare.log')
+                info = json.loads((base/'camera.json').read_text(encoding='utf-8'))
+                self.execute([str(self.bin/('husk'+suffix)), '--renderer', 'BRAY_HdKarma', '--engine', 'cpu',
+                    '--threads', '4', '--pixel-samples', '16', '--res', '512', '320',
+                    '--camera', info['camera'], '--frame', str(info['frame']), '--disable-motionblur',
+                    '--disable-delegate-products', '--disable-slapcomp', '--timelimit', '180',
+                    '--output', str(base/'render.exr'), str(base/'scene.usda')], base/'render.log')
+                self.execute([str(self.bin/('hoiiotool'+suffix)), '--threads', '2', str(base/'render.exr'),
+                    '--colorconvert', 'lin_rec709', 'srgb_texture', '-d', 'uint8', '-o', str(base/'preview.png')], base/'convert.log')
+                if QtGui.QImage(str(base/'preview.png')).isNull():
+                    raise RuntimeError('レンダー結果を画像として読み込めません')
+                temporary = self.dest.with_suffix('.tmp')
+                temporary.write_bytes((base/'preview.png').read_bytes())
+                os.replace(temporary, self.dest)
+            self.done.emit(self.asset_id, str(self.dest), '')
         except Exception as exc:
             self.done.emit(self.asset_id, '', str(exc))
 
@@ -100,17 +156,22 @@ class LibraryWidget(QtWidgets.QWidget):
     PAGE_SIZE = 200
     def __init__(self, parent=None, data_dir=None, initial_root=None):
         super().__init__(parent)
-        self.setObjectName('SolarisAssetLibrary')
-        self.data_dir = Path(data_dir or os.environ.get('SAL_DATA_DIR') or (Path(hou.getenv('HOUDINI_USER_PREF_DIR'))/'solaris_asset_library'))
+        self.setObjectName('NanakusaAssetLibrary')
+        self.data_dir = Path(data_dir or os.environ.get('NAL_DATA_DIR') or (Path(hou.getenv('HOUDINI_USER_PREF_DIR'))/'nanakusa_asset_library_data'))
         self.library = core.Library(self.data_dir)
         config_path = self.data_dir / 'settings.json'
         self.settings = json.loads(config_path.read_text(encoding='utf-8-sig')) if config_path.exists() else {}
-        self.default_root = initial_root or os.environ.get('SAL_ASSET_ROOT') or self.settings.get('publish_root', '')
+        self.default_root = initial_root or os.environ.get('NAL_ASSET_ROOT') or self.settings.get('publish_root', '')
         if self.default_root and not self.library.roots() and Path(self.default_root).is_dir():
             self.library.add_root(self.default_root)
         self.job = None
         self.page = 0
         self.rows = []
+        self.thumb_queue = []
+        self.thumb_pending = set()
+        self.thumb_failed = set()
+        self.thumb_job = None
+        dragdrop.install()
         self._setup()
         self.rebuild_tree()
         self.refresh()
@@ -133,7 +194,7 @@ class LibraryWidget(QtWidgets.QWidget):
     def _setup(self):
         outer = QtWidgets.QVBoxLayout(self)
         heading = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel('ASSET LIBRARY  /  Solaris · Karma XPU')
+        title = QtWidgets.QLabel('NanakusaAssetLibrary  /  Karma XPU')
         title.setStyleSheet('font-size: 17px; font-weight: bold; padding: 6px;')
         heading.addWidget(title); heading.addStretch()
         self._button('ライブラリー追加', self.add_root, heading)
@@ -161,9 +222,11 @@ class LibraryWidget(QtWidgets.QWidget):
         self._button('設定', self.root_menu, folderbuttons); leftbox.addLayout(folderbuttons)
         split.addWidget(left)
         center=QtWidgets.QWidget(); centerbox=QtWidgets.QVBoxLayout(center); centerbox.setContentsMargins(0,0,0,0)
-        self.items = QtWidgets.QListWidget(); self.items.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
+        self.items = dragdrop.AssetList(self.library); self.items.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
         self.items.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
         self.items.setMovement(QtWidgets.QListView.Movement.Static)
+        self.items.setDragEnabled(True)
+        self.items.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
         self.items.setIconSize(QtCore.QSize(144,100)); self.items.setGridSize(QtCore.QSize(168,148))
         self.items.setWordWrap(True); self.items.setSpacing(5)
         self.items.currentItemChanged.connect(self.selection_changed)
@@ -181,14 +244,14 @@ class LibraryWidget(QtWidgets.QWidget):
         form=QtWidgets.QFormLayout(); db.addLayout(form)
         self.label=QtWidgets.QLineEdit(); form.addRow('表示名',self.label)
         self.tags=QtWidgets.QLineEdit(); self.tags.setPlaceholderText('wood outdoor red'); form.addRow('タグ',self.tags)
-        self.override=QtWidgets.QComboBox(); self.override.addItem('自動判定',None)
-        for k,v in KINDS.items():
-            if k:self.override.addItem(v,k)
-        form.addRow('種類',self.override)
+        self.override=QtWidgets.QComboBox(); self.override.addItem('フォルダー分類に従う',None)
+        self.override.setEnabled(False); form.addRow('種類',self.override)
         self.star=QtWidgets.QCheckBox('お気に入り'); form.addRow('',self.star)
         self._button('メタデータ保存',self.save_metadata,db)
         self._button('サムネイル指定',self.choose_thumbnail,db)
-        self._button('画像からサムネイル生成',self.generate_thumbnail,db)
+        self._button('選択素材のサムネイルを生成',self.generate_thumbnail,db)
+        self._button('表示対象の不足サムネイルを生成',self.generate_missing_thumbnails,db)
+        self._button('サムネイル生成を中止',self.cancel_thumbnails,db)
         self._button('フォルダーを開く',self.reveal,db)
         db.addStretch(); split.addWidget(details); split.setSizes([230,600,270])
         destrow=QtWidgets.QHBoxLayout()
@@ -201,12 +264,12 @@ class LibraryWidget(QtWidgets.QWidget):
         self.assign=QtWidgets.QLineEdit(); self.assign.setPlaceholderText('/assets/chair/**'); assignrow.addWidget(self.assign,1); outer.addLayout(assignrow)
         actions=QtWidgets.QHBoxLayout()
         self._button('Solarisへ読み込む',self.import_selected,actions)
-        self._button('PBR / Decalセット作成',self.create_manifest,actions)
+        self._button('パスをコピー',self.copy_path,actions)
         self._button('USDをCatalogへ登録',self.add_catalog,actions)
         self._button('素材を静的USD化',self.publish_asset,actions)
         self._button('Catalogを開く',self.open_catalog,actions)
         outer.addLayout(actions)
-        self.status=QtWidgets.QLabel('ライブラリーを追加し「再スキャン」で一覧を更新します。'); self.status.setWordWrap(True); outer.addWidget(self.status)
+        self.status=QtWidgets.QLabel('D&D: モデル/USD → ネットワーク | Texture → 入力欄（材質階層ではMaterialXを作成）'); self.status.setWordWrap(True); outer.addWidget(self.status)
 
     def current_folder(self):
         item=self.tree.currentItem()
@@ -217,22 +280,9 @@ class LibraryWidget(QtWidgets.QWidget):
         self.tree.blockSignals(True); self.tree.clear()
         allitem=QtWidgets.QTreeWidgetItem(['すべてのライブラリー']); self.tree.addTopLevelItem(allitem)
         chosen=allitem
-        assets=self.library.assets(missing=True)
         for root in self.library.roots():
             top=QtWidgets.QTreeWidgetItem([root['label']]); data=(root['id'],'',root['path']); top.setData(0,ROLE,data); top.setToolTip(0,root['path']); self.tree.addTopLevelItem(top)
-            folders={'' :top}; rels=set()
-            for a in assets:
-                if a['root_id']==root['id']:
-                    parent=Path(a['relpath']).parent
-                    while str(parent)!='.':
-                        rels.add(parent.as_posix()); parent=parent.parent
-            try:
-                for path,dirs,_ in os.walk(root['path']):
-                    dirs[:]=[d for d in dirs if not d.startswith('.') and not (Path(path)/d).is_symlink()]
-                    for d in dirs: rels.add((Path(path)/d).relative_to(root['path']).as_posix())
-                    # Index supplies deep folders; keep empty-folder discovery bounded.
-                    if len(Path(path).relative_to(root['path']).parts)>=2: dirs[:]=[]
-            except OSError: pass
+            folders={'' :top}; rels=set(core.visible_folders(root['path']))
             for rel in sorted(rels, key=lambda x:(len(Path(x).parts),x.lower())):
                 parent=Path(rel).parent.as_posix(); parent='' if parent=='.' else parent
                 item=QtWidgets.QTreeWidgetItem([Path(rel).name]); value=(root['id'],rel,root['path']); item.setData(0,ROLE,value)
@@ -251,7 +301,8 @@ class LibraryWidget(QtWidgets.QWidget):
         if folder:
             rel=folder[1]
             if self.recursive.isChecked(): rows=[r for r in rows if not rel or r['relpath'].startswith(rel+'/')]
-            else: rows=[r for r in rows if (Path(r['relpath']).parent.as_posix().replace('.', '',1) if Path(r['relpath']).parent.as_posix()=='.' else Path(r['relpath']).parent.as_posix())==rel]
+            else:
+                rows=[r for r in rows if (Path(r['relpath']).parent.parent.as_posix() if r['kind']=='usd' else Path(r['relpath']).parent.as_posix())==rel or (r['kind']=='usd' and Path(r['relpath']).parent.as_posix()==rel)]
         self.rows=rows
         pages=max(1,(len(rows)+self.PAGE_SIZE-1)//self.PAGE_SIZE); self.page=min(self.page,pages-1)
         self.items.clear()
@@ -268,14 +319,41 @@ class LibraryWidget(QtWidgets.QWidget):
         p=Path(row['root_path'])/row['relpath']
         candidates=[Path(row['thumbnail'])] if row['thumbnail'] else []
         candidates += [p.with_suffix('.preview.jpg'),p.parent/'thumbnail.jpg',p.parent/'thumbnail.png',p.parent/'preview.jpg']
+        cached=self.cache_path(row)
+        if cached.is_file():candidates.insert(0,cached)
         if p.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tga'}:candidates.append(p)
         return next((x for x in candidates if x.is_file()),None)
+
+    def cache_path(self,row):
+        cache=self.data_dir/'thumbnails';cache.mkdir(exist_ok=True)
+        return cache/(row['id']+'_'+str(int(row['mtime']*1000000))+'_'+str(row['size'])+'.png')
+
+    def queue_thumbnail(self,row,geometry=False):
+        aid=row['id']
+        if (row['kind']!='texture' and not geometry) or aid in self.thumb_pending or aid in self.thumb_failed:return
+        if self.cache_path(row).is_file():return
+        self.thumb_pending.add(aid);self.thumb_queue.append(row)
+        QtCore.QTimer.singleShot(0,self.next_thumbnail)
+
+    def next_thumbnail(self):
+        if self.thumb_job is not None or not self.thumb_queue:return
+        row=self.thumb_queue.pop(0)
+        source=Path(row['root_path'])/row['relpath']
+        self.thumb_job=(ThumbnailJob(row['id'],source,self.cache_path(row)) if row['kind']=='texture' else
+            GeometryThumbnailJob(row['id'],source,row['kind'],self.cache_path(row)))
+        self.thumb_job.done.connect(self.thumbnail_done)
+        self.thumb_job.finished.connect(self.thumbnail_finished)
+        _keep_job(self.thumb_job)
+
+    def thumbnail_finished(self):
+        self.thumb_job=None;self.next_thumbnail()
 
     def icon_for(self,row):
         path=self.thumbnail_path(row)
         if path:
             reader=QtGui.QImageReader(str(path)); reader.setScaledSize(QtCore.QSize(144,100)); image=reader.read()
             if not image.isNull():return QtGui.QIcon(QtGui.QPixmap.fromImage(image))
+        self.queue_thumbnail(row)
         pix=QtGui.QPixmap(144,100); pix.fill(QtGui.QColor({'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}[row['effective_kind']]))
         painter=QtGui.QPainter(pix); painter.setPen(QtGui.QColor('#eeeeee')); painter.drawText(pix.rect(),QtCore.Qt.AlignmentFlag.AlignCenter,row['effective_kind'].upper()); painter.end()
         return QtGui.QIcon(pix)
@@ -290,7 +368,8 @@ class LibraryWidget(QtWidgets.QWidget):
             self.preview.clear(); self.info.clear(); return
         row=self.selected()
         self.preview.setPixmap(self.icon_for(row).pixmap(240,150))
-        self.info.setText(f"{row['root_label']} / {row['relpath']}\n{row['size']/1048576:.2f} MB")
+        display_path=Path(row['relpath']).parent.as_posix() if row['kind']=='usd' else row['relpath']
+        self.info.setText(f"{row['root_label']} / {display_path}\n{row['size']/1048576:.2f} MB")
         self.label.setText(row['label']); self.tags.setText(row['tags']); self.star.setChecked(bool(row['favorite']))
         self.override.setCurrentIndex(max(0,self.override.findData(row['override_kind'])))
 
@@ -338,9 +417,12 @@ class LibraryWidget(QtWidgets.QWidget):
     def new_folder(self):
         folder=self.current_folder()
         if not folder:raise ValueError('親フォルダーを左側で選択してください')
+        if not folder[1]:raise ValueError('最上位は USD / Texture / 3DModel の固定分類です。分類の下を選択してください。')
+        if folder[1].startswith('USD/') and core.package_entry(core.inside(folder[2],folder[1])):
+            raise ValueError('USDパッケージの内部はライブラリーから変更しません')
         name,ok=QtWidgets.QInputDialog.getText(self,'新規フォルダー','名前（/ 区切りで階層も作成できます）')
         if ok and name.strip():
-            path=core.inside(folder[2],str(Path(folder[1])/name.strip())); path.mkdir(parents=True,exist_ok=True)
+            path=core.inside(core.inside(folder[2],folder[1]),name.strip()); path.mkdir(parents=True,exist_ok=True)
             self.rebuild_tree(); self.status.setText('作成: '+str(path))
 
     def root_menu(self):
@@ -393,18 +475,44 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def generate_thumbnail(self):
         row=self.selected(); path=self.library.resolve(row)
-        if path.suffix.lower() not in core.IMAGES:raise ValueError('画像素材用です。モデルには「サムネイル指定」を使用してください。')
-        cache=self.data_dir/'thumbnails'; cache.mkdir(exist_ok=True)
-        job=ThumbnailJob(row['id'],path,cache/(row['id']+'.png'))
-        job.done.connect(self.thumbnail_done)
-        _keep_job(job); self.status.setText('画像サムネイルを生成中…（表示用の近似色）')
+        if row['id'] in self.thumb_pending:return
+        self.thumb_failed.discard(row['id']); self.cache_path(row).unlink(missing_ok=True)
+        self.queue_thumbnail(row,geometry=True); self.status.setText('サムネイル生成を予約しました（形状は別プロセスのKarma CPUで描画）')
+
+    def generate_missing_thumbnails(self):
+        count=0
+        for row in self.rows:
+            if not self.thumbnail_path(row) and row['id'] not in self.thumb_pending:
+                self.thumb_failed.discard(row['id'])
+                self.queue_thumbnail(row,geometry=True); count+=1
+        self.status.setText(f'不足サムネイル {count} 件を予約しました。検索・フォルダーの表示対象全ページを順番に処理します。')
+
+    def cancel_thumbnails(self):
+        for row in self.thumb_queue:self.thumb_pending.discard(row['id'])
+        self.thumb_queue.clear()
+        if self.thumb_job:self.thumb_job.requestInterruption()
+        self.status.setText('中止しました。画像変換中の場合は現在の1件の終了を待ちます。')
 
     def thumbnail_done(self,aid,path,error):
-        if error:self.status.setText('サムネイル生成失敗: '+error)
-        else:self.library.update(aid,thumbnail=path); self.refresh(); self.status.setText('サムネイルを生成しました')
+        self.thumb_pending.discard(aid)
+        if error:
+            self.thumb_failed.add(aid);self.status.setText('サムネイル生成失敗: '+error)
+        else:
+            for i in range(self.items.count()):
+                item=self.items.item(i);row=item.data(ROLE)
+                if row['id']==aid:item.setIcon(self.icon_for(row))
+            self.selection_changed()
+            self.status.setText(f'サムネイル生成完了（残り {len(self.thumb_queue)} 件）')
+
+    def copy_path(self):
+        path=self.library.resolve(self.selected()).as_posix()
+        QtWidgets.QApplication.clipboard().setText(path)
+        self.status.setText('パスをコピーしました: '+path)
 
     def import_selected(self):
         row=self.selected(); source=self.library.resolve(row)
+        if row['kind']=='texture':
+            self.copy_path();self.status.setText('Textureは入力欄へD&Dしてください。材質ネットワークへのD&DではMaterialXを作成します。');return
         upstream=None
         if self.connect_input.isChecked():
             nodes=[n for n in hou.selectedNodes() if n.parent().path()==self.target.text() and n.type().category()==hou.lopNodeTypeCategory()]
@@ -473,7 +581,7 @@ class LibraryWidget(QtWidgets.QWidget):
 def show_window():
     dialog=QtWidgets.QDialog(hou.qt.mainWindow())
     dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-    dialog.setWindowTitle('Solaris Asset Library'); dialog.resize(1250,820)
+    dialog.setWindowTitle('NanakusaAssetLibrary'); dialog.resize(1250,820)
     layout=QtWidgets.QVBoxLayout(dialog); panel=LibraryWidget(); layout.addWidget(panel)
     _windows.append(dialog)
     dialog.destroyed.connect(lambda: _windows.remove(dialog) if dialog in _windows else None)

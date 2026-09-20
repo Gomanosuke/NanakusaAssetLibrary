@@ -14,8 +14,34 @@ import uuid
 
 KINDS = ("usd", "model", "material", "pbr", "texture", "hdri", "decal")
 IMAGES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr", ".hdr", ".rat", ".pic", ".tx", ".bmp", ".tga"}
-MODELS = {".obj", ".bgeo", ".geo", ".abc", ".fbx", ".gltf", ".glb", ".stl", ".ply"}
+MODELS = {".obj", ".bgeo", ".geo", ".abc", ".fbx", ".glb", ".stl", ".ply", ".vdb"}
 USD = {".usd", ".usda", ".usdc", ".usdz"}
+GENRES = ('USD', 'Texture', '3DModel')
+
+def package_entry(folder):
+    folder = Path(folder)
+    for ext in ('.usd', '.usdc', '.usda', '.usdz'):
+        p = folder / (folder.name + ext)
+        if p.is_file():
+            return p
+    return None
+
+def visible_folders(base):
+    """Only the three genres; USD package contents are opaque."""
+    base = Path(base)
+    result = []
+    for genre in GENRES:
+        result.append(genre)
+        start = base / genre
+        if not start.is_dir():
+            continue
+        for folder, dirs, _ in os.walk(start, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not (Path(folder)/d).is_symlink())
+            if Path(folder) != start:
+                result.append(Path(folder).relative_to(base).as_posix())
+            if genre == 'USD' and package_entry(folder):
+                dirs[:] = []
+    return result
 
 def classify(path):
     p = Path(path)
@@ -129,20 +155,35 @@ class Library:
             if cancel():
                 return {"cancelled": True, "count": 0, "errors": errors}
             dirs[:] = [d for d in dirs if not d.startswith('.') and not (Path(folder)/d).is_symlink() and (Path(folder)/d).resolve() != self.data_dir]
+            relative_folder = Path(folder).relative_to(base)
+            if not relative_folder.parts:
+                dirs[:] = [d for d in dirs if d in GENRES]
+                continue
+            genre = relative_folder.parts[0]
+            if genre == 'USD':
+                entry = package_entry(folder) if len(relative_folder.parts)>1 else None
+                if not entry:
+                    continue
+                names = [entry.name]
+                dirs[:] = []
             for name in names:
                 if cancel():
                     return {"cancelled": True, "count": 0, "errors": errors}
                 p = Path(folder) / name
                 if p.is_symlink():
                     continue
-                kind = classify(p)
+                ext = p.suffix.lower()
+                kind = ('usd' if genre=='USD' else
+                        'texture' if genre=='Texture' and ext in IMAGES else
+                        'model' if genre=='3DModel' and (ext in MODELS or p.name.lower().endswith(('.bgeo.sc','.geo.sc'))) else None)
                 if not kind:
                     continue
                 try:
                     stat = p.stat()
                     rel = p.relative_to(base).as_posix()
                     aid = hashlib.sha256((rid + '/' + rel).encode()).hexdigest()[:32]
-                    rows.append((aid, rid, rel, p.stem, kind, stat.st_size, stat.st_mtime))
+                    label = p.parent.name if kind=='usd' else p.stem
+                    rows.append((aid, rid, rel, label, kind, stat.st_size, stat.st_mtime))
                 except OSError as exc:
                     errors.append(str(exc))
         # A failed or cancelled traversal must never invalidate a good index.
@@ -151,7 +192,7 @@ class Library:
                 db.execute("UPDATE assets SET present=0 WHERE root_id=?", (rid,))
             db.executemany('''INSERT INTO assets (id,root_id,relpath,label,kind,size,mtime)
                 VALUES (?,?,?,?,?,?,?) ON CONFLICT(root_id,relpath) DO UPDATE SET
-                kind=excluded.kind,size=excluded.size,mtime=excluded.mtime,present=1''', rows)
+                kind=excluded.kind,override_kind=NULL,size=excluded.size,mtime=excluded.mtime,present=1''', rows)
         return {"cancelled": False, "count": len(rows), "errors": errors}
 
     def assets(self, search="", root_id=None, kind=None, favorite=False, missing=False):
@@ -161,7 +202,7 @@ class Library:
         if root_id:
             clauses.append("a.root_id=?"); args.append(root_id)
         if kind:
-            clauses.append("COALESCE(a.override_kind,a.kind)=?"); args.append(kind)
+            clauses.append("a.kind=?"); args.append(kind)
         if favorite:
             clauses.append("a.favorite=1")
         for word in search.split():
@@ -169,7 +210,7 @@ class Library:
             word = word.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             args.extend(['%' + word + '%'] * 3)
         sql = '''SELECT a.*, r.path AS root_path, r.label AS root_label,
-                 COALESCE(a.override_kind,a.kind) AS effective_kind
+                 a.kind AS effective_kind
                  FROM assets a JOIN roots r ON r.id=a.root_id'''
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)

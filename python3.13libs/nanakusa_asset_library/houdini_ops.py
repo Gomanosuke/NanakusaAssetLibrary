@@ -21,6 +21,68 @@ def _encoded_parm(node, token, value):
         raise RuntimeError('Could not identify ' + token + ' on ' + node.path())
     matches[0].set(value)
 
+def _read_geometry(parent, path, kind):
+    p=Path(path)
+    if kind=='usd':
+        typ,parm='usdimport','filepath1'
+    else:
+        typ,parm={'.fbx':('kinefx::fbxskinimport','fbxfile'),'.abc':('alembic','fileName'),
+                  '.glb':('gltf','gltffile')}.get(p.suffix.lower(),('file','file'))
+    node=parent.createNode(typ,safe_name(p.stem))
+    _set(node,parm,p.as_posix())
+    node.setDisplayFlag(True);node.setRenderFlag(True)
+    return node
+
+def _texture_material(parent, path, label):
+    """Material Library -> full builder; inside a builder -> surface + UV graph."""
+    import hou, voptoolutils
+    builder_parent=parent.type().name() in ('materiallibrary','matnet') or parent.path()=='/mat'
+    if builder_parent:
+        builder=voptoolutils._setupMtlXBuilderSubnet(destination_node=parent,name=safe_name(label))
+        shader=next(n for n in builder.children() if n.type().name()=='mtlxstandard_surface')
+        result=builder
+    else:
+        builder=parent
+        shader=builder.createNode('mtlxstandard_surface',safe_name(label)+'_surface')
+        result=shader
+    image=builder.createNode('mtlximage',safe_name(label)+'_image')
+    image.parm('signature').set('color3')
+    image.parm('file').set(Path(path).as_posix())
+    image.parm('filecolorspace').set('lin_rec709' if Path(path).suffix.lower() in ('.hdr','.exr') else 'srgb_texture')
+    uv=builder.createNode('mtlxtexcoord',safe_name(label)+'_uv')
+    image.setNamedInput('texcoord',uv,'out')
+    shader.setNamedInput('base_color',image,'out')
+    if not builder_parent:
+        # Never replace an existing surface connection. Use an empty output only.
+        outputs=[n for n in builder.children() if n.type().name()=='subnetconnector' and n.parm('parmname') and n.parm('parmname').eval()=='surface']
+        if outputs and not outputs[0].inputs():
+            outputs[0].setInput(0,shader)
+        else:
+            hou.ui.setStatusMessage('MaterialX surface created; connect it to the builder output when needed.') if hou.isUIAvailable() else None
+    for n in (shader,image,uv):n.moveToGoodPosition()
+    return result
+
+def import_into_context(path, kind, label, parent):
+    import hou
+    if not Path(path).is_file():raise FileNotFoundError(str(path))
+    before=set(parent.children())
+    try:
+        if kind=='texture':
+            return _texture_material(parent,path,label)
+        category=parent.childTypeCategory()
+        if category==hou.lopNodeTypeCategory():
+            return import_asset(path,kind,label,parent.path())
+        if category==hou.objNodeTypeCategory():
+            geo=parent.createNode('geo',safe_name(label))
+            _read_geometry(geo,path,kind)
+            return geo
+        if category==hou.sopNodeTypeCategory():
+            return _read_geometry(parent,path,kind)
+        raise ValueError('Drop into /stage, /obj or a geometry network')
+    except Exception:
+        for created in set(parent.children())-before:created.destroy()
+        raise
+
 def _material(parent, name, maps, settings, upstream=None):
     import voptoolutils
     lib = parent.createNode('materiallibrary', name + '_materials')
