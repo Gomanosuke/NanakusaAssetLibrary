@@ -7,8 +7,8 @@ Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D�
 
 このGitリポジトリーはコード、ドキュメント、合成データを使うテストだけを含みます。
 アセットは独立した任意のフォルダーに置き、画面またはインストーラーから指定します。
-PC固有の設定、SQLiteインデックス、タグ、サムネイルは
-`$HOUDINI_USER_PREF_DIR/nanakusa_asset_library_data` に保存します。
+PC固有の設定、SQLiteインデックス、タグ、画像素材の縮小キャッシュは、指定した`data`フォルダーに保存します。
+モデルとUSDのサムネイルは素材と一緒に共有できるよう、素材の隣に保存します。
 `NAL_DATA_DIR` で保存先、`NAL_ASSET_ROOT` で初回のアセットルートを指定することもできます。
 これらのデータと素材はGitに含めません。
 
@@ -18,7 +18,7 @@ PC固有の設定、SQLiteインデックス、タグ、サムネイルは
 2. Houdiniの作業を保存してから、Python 3.10以上またはHoudini 22のhythonで実行します。
 
 ```text
-python install.py --prefs "<Houdiniのユーザー設定フォルダー>" --library "<アセットルート>"
+python install.py --prefs "<Houdiniのユーザー設定フォルダー>" --library "<アセットルート>" --data "<データフォルダー>"
 ```
 
 3. Houdiniを再起動し、Python Panelのメニューから **NanakusaAssetLibrary** を開きます。
@@ -29,7 +29,10 @@ import nanakusa_asset_library
 nanakusa_asset_library.show()
 ```
 
-`--library`を省略して画面から登録することもできます。インストーラーはコードの場所を指す
+`--data`を省略するとアセットルートと同じ階層の`data`を使用します。
+`--library`を省略して画面から登録することもできます。その場合は`--data`を指定してください。
+両方省略した場合はOSのユーザーアプリデータ領域を使用し、HoudiniのDocumentsフォルダーにはキャッシュを作りません。
+インストーラーはコードの場所と`NAL_DATA_DIR`を指定する
 `packages/nanakusa_asset_library.json` を作成します。既存設定は日時付きでバックアップします。
 コードを移動した場合は再インストールしてください。
 別PCではそのPCの素材ルートを指定します。同じ素材階層を共有しても、インデックスは各PCで保持できます。
@@ -86,14 +89,25 @@ FBXはFBX Skin Import、ABCはAlembic、GLBはglTF、VDB等はFile SOPで読み�
 
 ## プレビューとサムネイル
 
-TIFF・HDR・EXRはHoudini付属の画像変換ツールで縮小し、PCごとのキャッシュへ保存します。
-画像表示は近似色です。元画像を書き換えません。
+TIFF・HDR・EXRはHoudini付属の画像変換ツールで縮小し、`data/thumbnails`へ保存します。
+一覧と詳細プレビューは正方形です。画像の縦横比を保持し、非正方形の画像の余白は透明にします。
+元画像に黒い帯を追加したり、引き延ばしたりしません。画像表示は近似色です。
+
+| 種類 | 生成画像の保存先 |
+|---|---|
+| 3DModel | 元ファイルと同じフォルダーの`<モデル名>_thumbnail.png` |
+| USD | 入口USDと同じフォルダーの`thumbnail.png` |
+| Texture | `data/thumbnails` |
+
+USDの配置は[Component Builder](https://www.sidefx.com/docs/houdini/solaris/component_builder.html)の出力と同じ規約です。
+USD仕様全体で必須のファイル名という意味ではありません。既存の`thumbnail.jpg`も認識します。
+素材の隣へ書き込める権限が必要です。生成失敗時は既存サムネイルを保持します。
 
 USD・3DModelは「選択素材のサムネイルを生成」で作成できます。
 「表示対象の不足サムネイルを生成」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
 既存サムネイルがある素材は一括生成でスキップします。「サムネイル生成を中止」で待機分を解除できます。
 
-形状のサムネイルは別プロセスのhythonとKarma CPUで512×320にレンダリングします。
+形状のサムネイルは別プロセスのhythonとKarma CPUで512×512にレンダリングします。
 形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
 GPUを占有せず4 CPUスレッドを使います。Houdini / Karmaの利用可能なライセンスが必要です。
 USDの材質と依存ファイルを参照し、最初のフレームを描画します。欠落した依存ファイルや読み込み不能な形状はエラーとして表示します。
@@ -120,5 +134,3 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 ```text
 hython -m unittest discover -s tests
 ```
-
-実機検証対象はHoudini 22.0.447 / Windowsです。OD Toolsとは独立した実装です。

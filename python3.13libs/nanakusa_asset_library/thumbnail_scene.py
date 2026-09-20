@@ -41,7 +41,7 @@ def prepare(source, kind, destination):
         prefix += '_'
     camera = UsdGeom.Camera.Define(stage, prefix + '/camera')
     camera.CreateFocalLengthAttr(50)
-    camera.CreateHorizontalApertureAttr(38.4)
+    camera.CreateHorizontalApertureAttr(24)
     camera.CreateVerticalApertureAttr(24)
     camera.CreateClippingRangeAttr(Gf.Vec2f(max(radius*.0001, 1e-5), distance + radius*10))
     camera.AddTransformOp().Set(Gf.Matrix4d().SetLookAt(eye, center, up).GetInverse())

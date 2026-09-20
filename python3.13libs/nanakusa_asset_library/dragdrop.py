@@ -127,5 +127,5 @@ class AssetList(QtWidgets.QListWidget):
             return
         drag=QtGui.QDrag(self)
         drag.setMimeData(mime_data(path,row['effective_kind'],row['label']))
-        drag.setPixmap(item.icon().pixmap(96,64))
+        drag.setPixmap(item.icon().pixmap(96,96))
         drag.exec(QtCore.Qt.DropAction.CopyAction)

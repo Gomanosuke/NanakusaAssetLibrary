@@ -8,12 +8,26 @@ import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops, dragdrop
+from . import core, houdini_ops as ops, dragdrop, storage
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 KINDS = {'': 'すべての種類', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'}
 _windows = []
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
+
+def square_preview(path, edge):
+    """Fit without stretching, cropping or baking black bars into the image."""
+    reader=QtGui.QImageReader(str(path))
+    size=reader.size()
+    if size.isValid():
+        reader.setScaledSize(size.scaled(edge,edge,QtCore.Qt.AspectRatioMode.KeepAspectRatio))
+    image=reader.read()
+    if image.isNull():return None
+    image=image.scaled(edge,edge,QtCore.Qt.AspectRatioMode.KeepAspectRatio,QtCore.Qt.TransformationMode.SmoothTransformation)
+    pix=QtGui.QPixmap(edge,edge);pix.fill(QtCore.Qt.GlobalColor.transparent)
+    painter=QtGui.QPainter(pix)
+    painter.drawImage((edge-image.width())//2,(edge-image.height())//2,image);painter.end()
+    return pix
 
 class ScanJob(QtCore.QThread):
     done = QtCore.Signal(object)
@@ -44,19 +58,20 @@ class ThumbnailJob(QtCore.QThread):
     def run(self):
         try:
             # Run image decoding outside Houdini's UI thread; no shell interpolation.
-            args=[self.exe,'--threads','4',self.source,'--fit','512x320']
+            args=[self.exe,'--threads','4',self.source,'--fit:pad=0','512x512','--origin','+0+0','--fullpixels']
             if Path(self.source).suffix.lower() in ('.hdr','.exr'):
                 args += ['--colorconvert','lin_rec709','srgb_texture']
-            args += ['-d','uint8','-o',self.dest]
+            temporary = str(Path(self.dest).with_suffix('.pending.png'))
+            Path(self.dest).parent.mkdir(parents=True, exist_ok=True)
+            args += ['-d','uint8','-o',temporary]
             result = subprocess.run(args,
                 capture_output=True, timeout=120, creationflags=(subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0))
             if result.returncode:
                 raise RuntimeError(result.stderr.decode(errors='replace')[-1500:])
-            image = QtGui.QImage(self.dest)
+            image = QtGui.QImage(temporary)
             if image.isNull():
                 raise RuntimeError('Could not decode thumbnail')
-            image = image.scaled(512, 320, QtCore.Qt.AspectRatioMode.KeepAspectRatio, QtCore.Qt.TransformationMode.SmoothTransformation)
-            image.save(self.dest)
+            os.replace(temporary,self.dest)
             self.done.emit(self.asset_id, self.dest, '')
         except Exception as exc:
             self.done.emit(self.asset_id, '', str(exc))
@@ -97,7 +112,7 @@ class GeometryThumbnailJob(QtCore.QThread):
                     self.source, self.kind, str(base/'scene.usda'), str(base/'camera.json')], base/'prepare.log')
                 info = json.loads((base/'camera.json').read_text(encoding='utf-8'))
                 self.execute([str(self.bin/('husk'+suffix)), '--renderer', 'BRAY_HdKarma', '--engine', 'cpu',
-                    '--threads', '4', '--pixel-samples', '16', '--res', '512', '320',
+                    '--threads', '4', '--pixel-samples', '16', '--res', '512', '512',
                     '--camera', info['camera'], '--frame', str(info['frame']), '--disable-motionblur',
                     '--disable-delegate-products', '--disable-slapcomp', '--timelimit', '180',
                     '--output', str(base/'render.exr'), str(base/'scene.usda')], base/'render.log')
@@ -157,7 +172,7 @@ class LibraryWidget(QtWidgets.QWidget):
     def __init__(self, parent=None, data_dir=None, initial_root=None):
         super().__init__(parent)
         self.setObjectName('NanakusaAssetLibrary')
-        self.data_dir = Path(data_dir or os.environ.get('NAL_DATA_DIR') or (Path(hou.getenv('HOUDINI_USER_PREF_DIR'))/'nanakusa_asset_library_data'))
+        self.data_dir = Path(data_dir or storage.default_data_dir())
         self.library = core.Library(self.data_dir)
         config_path = self.data_dir / 'settings.json'
         self.settings = json.loads(config_path.read_text(encoding='utf-8-sig')) if config_path.exists() else {}
@@ -227,7 +242,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.items.setMovement(QtWidgets.QListView.Movement.Static)
         self.items.setDragEnabled(True)
         self.items.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
-        self.items.setIconSize(QtCore.QSize(144,100)); self.items.setGridSize(QtCore.QSize(168,148))
+        self.items.setIconSize(QtCore.QSize(144,144)); self.items.setGridSize(QtCore.QSize(168,192))
         self.items.setWordWrap(True); self.items.setSpacing(5)
         self.items.currentItemChanged.connect(self.selection_changed)
         self.items.itemDoubleClicked.connect(lambda item: self.safe(self.import_selected))
@@ -238,7 +253,7 @@ class LibraryWidget(QtWidgets.QWidget):
         split.addWidget(center)
         details=QtWidgets.QWidget(); details.setMinimumWidth(235)
         db=QtWidgets.QVBoxLayout(details)
-        self.preview=QtWidgets.QLabel('素材を選択'); self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumHeight(150)
+        self.preview=QtWidgets.QLabel('素材を選択'); self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumHeight(240)
         db.addWidget(self.preview)
         self.info=QtWidgets.QLabel(); self.info.setWordWrap(True); self.info.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse); db.addWidget(self.info)
         form=QtWidgets.QFormLayout(); db.addLayout(form)
@@ -320,22 +335,15 @@ class LibraryWidget(QtWidgets.QWidget):
         self.page=max(0,self.page+delta); self.refresh()
 
     def thumbnail_path(self,row):
-        p=Path(row['root_path'])/row['relpath']
-        candidates=[Path(row['thumbnail'])] if row['thumbnail'] else []
-        candidates += [p.with_suffix('.preview.jpg'),p.parent/'thumbnail.jpg',p.parent/'thumbnail.png',p.parent/'preview.jpg']
-        cached=self.cache_path(row)
-        if cached.is_file():candidates.insert(1 if row['thumbnail'] else 0,cached)
-        if p.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tga'}:candidates.append(p)
-        return next((x for x in candidates if x.is_file()),None)
+        return next((x for x in storage.thumbnail_candidates(row,self.data_dir) if x.is_file()),None)
 
     def cache_path(self,row):
-        cache=self.data_dir/'thumbnails';cache.mkdir(exist_ok=True)
-        return cache/(row['id']+'_'+str(int(row['mtime']*1000000))+'_'+str(row['size'])+'.png')
+        return storage.thumbnail_destination(row,self.data_dir)
 
-    def queue_thumbnail(self,row,geometry=False):
+    def queue_thumbnail(self,row,geometry=False,force=False):
         aid=row['id']
         if (row['kind']!='texture' and not geometry) or aid in self.thumb_pending or aid in self.thumb_failed:return
-        if self.cache_path(row).is_file():return
+        if not force and self.cache_path(row).is_file():return
         self.thumb_pending.add(aid);self.thumb_queue.append(row)
         QtCore.QTimer.singleShot(0,self.next_thumbnail)
 
@@ -355,10 +363,10 @@ class LibraryWidget(QtWidgets.QWidget):
     def icon_for(self,row):
         path=self.thumbnail_path(row)
         if path:
-            reader=QtGui.QImageReader(str(path)); reader.setScaledSize(QtCore.QSize(144,100)); image=reader.read()
-            if not image.isNull():return QtGui.QIcon(QtGui.QPixmap.fromImage(image))
+            pix=square_preview(path,256)
+            if pix is not None:return QtGui.QIcon(pix)
         self.queue_thumbnail(row)
-        pix=QtGui.QPixmap(144,100); pix.fill(QtGui.QColor({'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}[row['effective_kind']]))
+        pix=QtGui.QPixmap(144,144); pix.fill(QtGui.QColor({'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}[row['effective_kind']]))
         painter=QtGui.QPainter(pix); painter.setPen(QtGui.QColor('#eeeeee')); painter.drawText(pix.rect(),QtCore.Qt.AlignmentFlag.AlignCenter,row['effective_kind'].upper()); painter.end()
         return QtGui.QIcon(pix)
 
@@ -371,7 +379,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if not self.items.currentItem():
             self.preview.clear(); self.info.clear(); return
         row=self.selected()
-        self.preview.setPixmap(self.icon_for(row).pixmap(240,150))
+        self.preview.setPixmap(self.icon_for(row).pixmap(240,240))
         display_path=Path(row['relpath']).parent.as_posix() if row['kind']=='usd' else row['relpath']
         self.info.setText(f"{row['root_label']} / {display_path}\n{row['size']/1048576:.2f} MB")
         self.label.setText(row['label']); self.tags.setText(row['tags']); self.star.setChecked(bool(row['favorite']))
@@ -480,8 +488,8 @@ class LibraryWidget(QtWidgets.QWidget):
     def generate_thumbnail(self):
         row=self.selected(); path=self.library.resolve(row)
         if row['id'] in self.thumb_pending:return
-        self.thumb_failed.discard(row['id']); self.cache_path(row).unlink(missing_ok=True)
-        self.queue_thumbnail(row,geometry=True); self.status.setText('サムネイル生成を予約しました（形状は別プロセスのKarma CPUで描画）')
+        self.thumb_failed.discard(row['id'])
+        self.queue_thumbnail(row,geometry=True,force=True); self.status.setText('サムネイル生成を予約しました（形状は別プロセスのKarma CPUで描画）')
 
     def generate_missing_thumbnails(self):
         count=0
