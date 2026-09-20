@@ -298,6 +298,8 @@ class LibraryWidget(QtWidgets.QWidget):
     def refresh(self):
         folder=self.current_folder()
         rows=self.library.assets(self.search.text(),folder[0] if folder else None,self.kind.currentData() or None,self.favorite.isChecked())
+        # Older indexes may still contain retired kinds until the next scan.
+        rows=[r for r in rows if r['effective_kind'] in KINDS]
         if folder:
             rel=folder[1]
             if self.recursive.isChecked(): rows=[r for r in rows if not rel or r['relpath'].startswith(rel+'/')]
