@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.py text eol=lf
+*.pypanel text eol=lf
+*.shelf text eol=lf
