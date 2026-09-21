@@ -185,6 +185,31 @@ class LibraryUiTests(unittest.TestCase):
             again=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
             self.assertEqual(again.items.iconSize().width(),512);again.close();again.deleteLater()
 
+    def test_usdz_preview_is_shown_cached_and_never_overrides_a_generated_thumbnail(self):
+        import zipfile
+        import base64
+        png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')   # 1x1 image
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            (root/'USD').mkdir(parents=True)
+            for name,extra in (('with_preview',{'Thumbnails/thumbnail.png':png}),('plain',{})):
+                with zipfile.ZipFile(root/'USD'/(name+'.usdz'),'w') as z:
+                    z.writestr('a.usdc','x');[z.writestr(k,v) for k,v in extra.items()]
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            rows={r['label']:r for r in widget.rows}
+            found=widget.thumbnail_path(rows['with_preview'])
+            self.assertTrue(found.parent.samefile(base/'data'/'thumbnails'));self.assertEqual(found.read_bytes(),png)   # cached, nothing written next to the asset
+            self.assertEqual(sorted(p.name for p in (root/'USD').iterdir()),['plain.usdz','with_preview.usdz'])
+            self.assertIsNone(widget.thumbnail_path(rows['plain']))
+            with patch.object(ui.embedded,'extract',wraps=ui.embedded.extract) as extract:
+                widget.thumbnail_path(rows['plain']);widget.thumbnail_path(rows['with_preview'])
+                self.assertEqual(extract.call_count,0)   # missing previews are remembered, existing ones come from the cache
+            self.assertTrue(widget.items.item(0).icon().pixmap(32,32).width()>0)
+            generated=root/'USD'/'with_preview_thumbnail.png';generated.write_bytes(png)
+            self.assertTrue(widget.thumbnail_path(rows['with_preview']).samefile(generated))   # a generated thumbnail wins
+            widget.close();widget.deleteLater()
+
     def test_catalog_creation_selection_and_registration_target(self):
         import hou
         with tempfile.TemporaryDirectory() as folder:

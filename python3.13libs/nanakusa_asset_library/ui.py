@@ -8,7 +8,7 @@ import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr
+from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STACK_ROLE = dragdrop.STACK_ROLE   # ids of the assets a list item stands for
@@ -238,7 +238,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.thumb_failed = set()
         self.thumb_job = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={}
-        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.row_index={};self.entries=[];self.icon_cache={}
+        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.row_index={};self.entries=[];self.icon_cache={};self.no_embedded=set()
         dragdrop.install()
         self._setup()
         self.rebuild_tree()
@@ -512,7 +512,14 @@ class LibraryWidget(QtWidgets.QWidget):
         self.page=max(0,self.page+delta); self.refresh()
 
     def thumbnail_path(self,row):
-        return next((x for x in storage.thumbnail_candidates(row,self.data_dir) if x.is_file()),None)
+        found=next((x for x in storage.thumbnail_candidates(row,self.data_dir) if x.is_file()),None)
+        if found is None and storage.is_usdz(row):
+            # Take the preview stored inside the .usdz once and cache it; remember packages without one.
+            key=(row['id'],row['mtime'],row['size'])
+            if key not in self.no_embedded:
+                found=embedded.extract(Path(row['root_path'])/row['relpath'],storage.embedded_cache_stem(row,self.data_dir))
+                if found is None:self.no_embedded.add(key)
+        return found
 
     def cache_path(self,row):
         return storage.thumbnail_destination(row,self.data_dir)

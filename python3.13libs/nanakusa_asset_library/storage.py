@@ -27,6 +27,16 @@ def thumbnail_destination(row, data_dir):
         'square_v2_' + row['id'] + '_' + str(int(row['mtime']*1000000)) + '_' + str(row['size']) + '.png')
 
 
+def embedded_cache_stem(row, data_dir):
+    """Where a preview image taken out of a .usdz is cached (never written next to the asset)."""
+    return Path(data_dir) / 'thumbnails' / (
+        'usdz_' + row['id'] + '_' + str(int(row['mtime']*1000000)) + '_' + str(row['size']))
+
+
+def is_usdz(row):
+    return row['kind'] == 'usd' and row['relpath'].lower().endswith('.usdz')
+
+
 def thumbnail_candidates(row, data_dir):
     source = Path(row['root_path']) / row['relpath']
     result = [Path(row['thumbnail'])] if row.get('thumbnail') else []
@@ -38,4 +48,8 @@ def thumbnail_candidates(row, data_dir):
     result.append(source.with_suffix('.preview.jpg'))
     if row['kind'] == 'texture' and source.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tga'}:
         result.append(source)
+    if is_usdz(row):
+        # Lowest priority: a generated or chosen thumbnail always wins over the package's own preview.
+        stem = embedded_cache_stem(row, data_dir)
+        result.extend(stem.with_name(stem.name + ext) for ext in ('.png', '.jpg', '.jpeg'))
     return result

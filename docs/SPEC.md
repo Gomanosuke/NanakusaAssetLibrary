@@ -3,7 +3,7 @@
 開発者・エージェント向けの現行仕様です。利用者向けの説明は [README.md](../README.md)、作業ルールは [AGENTS.md](../AGENTS.md) を参照してください。
 仕様を変更したら、このファイルと README.md（利用者向けの表現）の両方を実装と揃えます。
 
-現在のバージョンは **0.8.2** です。
+現在のバージョンは **0.9.0** です。
 
 ## コードとデータの分離
 
@@ -281,6 +281,7 @@ python -m unittest discover -s tests -p test_core.py
 python -m unittest discover -s tests -p test_storage.py
 python -m unittest discover -s tests -p test_organize.py
 python -m unittest discover -s tests -p test_pbr.py
+python -m unittest discover -s tests -p test_embedded.py
 ```
 
 Houdini 22のhython（作業シーンとは別プロセス）:
@@ -289,7 +290,7 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.7.0ではHoudini 22.0.447 / Windowsで72件のテストが通過しました。
+0.9.0ではHoudini 22.0.447 / Windowsで78件のテストが通過しました。
 移動（`organize.py`）は標準Pythonでも検証できます。
 Scene Viewへのドロップ抑止は、実機のマウス操作では未検証です（イベントフィルターの判定のみテスト済み）。
 保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
@@ -303,7 +304,8 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `install.py` | package JSONと保存先の設定 |
 | `core.py` | 固定分類の走査、SQLite、メタデータ |
 | `organize.py` | 素材・フォルダーの移動（サムネイル同梱、失敗時の巻き戻し） |
-| `storage.py` | dataの決定、サムネイルの保存先・検出 |
+| `storage.py` | dataの決定、サムネイルの保存先・検出（USDZ内プレビューのキャッシュ先を含む） |
+| `embedded.py` | `.usdz`内のプレビュー画像の検出と取り出し（標準はUsdMediaAssetPreviewsAPI、慣用名は`thumbnail`/`preview`/`Thumbnails`/`.thumbs`） |
 | `ui.py` | パネル、正方形プレビュー、生成キュー |
 | `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定、フォルダーツリー |
 | `pbr.py` | ファイル名によるPBR用途・セットの判定、スタック表示用のグループ化 |

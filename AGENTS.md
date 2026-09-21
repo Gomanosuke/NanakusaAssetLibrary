@@ -62,6 +62,11 @@
 - USDの移動後はAsset CatalogのファイルパスをsetFilePathで更新する。
 - ライブラリー独自MIMEのドロップは、パラメーター欄・文字列入力欄・Network Editor・ライブラリーのフォルダーツリー以外では受け取り、何もせず無視する（Houdiniにファイルを開かせない）。
 
+## USDZ内のプレビュー
+
+- サムネイルの優先順位は、指定画像 > 素材の隣の生成画像 > USDZ内のプレビュー（data/thumbnails/usdz_*にキャッシュ）。USDZ自体には書き込まない。内部のテクスチャ画像をプレビューと誤認しない（embedded.pyの検出規則を広げる時は、テクスチャ名を拾わないことをテストで確認する）。
+- キャッシュはIDとmtime・サイズで決まるため、素材を移動しても有効。中にプレビューがないパッケージは、メモリー内で記録して再走査しない。
+
 ## サムネイルのライティング
 
 - サムネイルのDome Lightはresources/meadow_2_8k.exr（Exposure -0.5、上軸まわり-30度）、Distant LightはExposure 1。値の変更はthumbnail_scene.pyの定数で行う。
