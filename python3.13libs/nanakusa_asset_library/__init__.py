@@ -1,5 +1,5 @@
 """Cross-project asset library for Houdini 22. No third-party dependencies."""
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 def show():
     from .ui import show_window

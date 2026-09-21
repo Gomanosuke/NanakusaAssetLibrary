@@ -45,8 +45,11 @@ def prepare(source, kind, destination):
     camera.CreateVerticalApertureAttr(24)
     camera.CreateClippingRangeAttr(Gf.Vec2f(max(radius*.0001, 1e-5), distance + radius*10))
     camera.AddTransformOp().Set(Gf.Matrix4d().SetLookAt(eye, center, up).GetInverse())
-    dome = UsdLux.DomeLight.Define(stage, prefix + '/fill')
-    dome.CreateIntensityAttr(.35)
+    dome = UsdLux.DomeLight.Define(stage, prefix + '/domelight')
+    # Match Houdini's default Dome Light: white, intensity 1, exposure 0.
+    dome.CreateIntensityAttr(1)
+    dome.CreateExposureAttr(0)
+    dome.CreateColorAttr(Gf.Vec3f(1))
     key = UsdLux.DistantLight.Define(stage, prefix + '/key')
     key.CreateIntensityAttr(2)
     key.CreateAngleAttr(15)

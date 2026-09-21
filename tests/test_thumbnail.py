@@ -20,6 +20,11 @@ class ThumbnailTests(unittest.TestCase):
             point=view.Transform(Gf.Vec3d(50,20,100))
             self.assertAlmostEqual(point[0],0,places=5);self.assertAlmostEqual(point[1],0,places=5)
             self.assertLess(point[2],0)
+            dome=result.GetPrimAtPath(str(camera.GetPath().GetParentPath())+'/domelight')
+            self.assertEqual(dome.GetTypeName(),'DomeLight')
+            self.assertEqual(dome.GetAttribute('inputs:intensity').Get(),1)
+            self.assertEqual(dome.GetAttribute('inputs:exposure').Get(),0)
+            self.assertEqual(tuple(dome.GetAttribute('inputs:color').Get()),(1,1,1))
             self.assertEqual(source.read_bytes(),before)
 
     def test_empty_stage_fails_instead_of_saving_blank_thumbnail(self):

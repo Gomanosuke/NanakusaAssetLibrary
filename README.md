@@ -3,7 +3,7 @@
 Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
 Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
-現在のバージョンは **0.6.2** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+現在のバージョンは **0.6.3** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
 
 ## コードとデータの分離
 
@@ -186,6 +186,8 @@ USD・3DModelは右クリックの「Generate Selected Thumbnails」で作成で
 既存サムネイルがある素材は一括生成でスキップします。「Libraries... → Cancel Thumbnails」で待機分を解除できます。
 
 形状のサムネイルは別プロセスのhythonとKarma CPUで512×512にレンダリングします。
+Houdini初期値のDome Light（Intensity 1 / Exposure 0 / 白色・画像なし）と補助のDistant Lightを配置します。
+既存の暗いサムネイルには、右クリックのGenerate Selected Thumbnailsを実行してください。
 形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
 GPUを占有せず4 CPUスレッドを使います。Houdini / Karmaの利用可能なライセンスが必要です。
 USDの材質と依存ファイルを参照し、最初のフレームを描画します。欠落した依存ファイルや読み込み不能な形状はエラーとして表示します。
@@ -223,7 +225,7 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.6.2ではHoudini 22.0.447 / Windowsで39件のテストが通過しました。
+0.6.3ではHoudini 22.0.447 / Windowsで39件のテストが通過しました。
 保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
 画像・形状の情報取得、右クリック項目、タグ・お気に入り保存、バックアップ先も検証しています。
 検証結果はこのバージョン時点の記録です。変更後は影響するテストと実際の利用経路を確認してください。
