@@ -15,7 +15,7 @@
 - HoudiniのDocuments設定フォルダーへ画像キャッシュを戻さない。
 - 設定、タグ、お気に入り、SQLiteインデックス、Textureの画像キャッシュはdataへ保存する。
 - バックアップはdata/backupsへ統一する。assetやdataの親に新たなbackupsを作らない。
-- asset直下の分類はUSD / Texture / 3DModelの3つで固定。Catalog用_catalogは素材分類として表示しない。
+- asset直下の分類はUSD / Texture / 3DModelの3つで固定。CatalogはDB専用とし、素材分類として表示しない。
 - USDはフォルダーと同名の入口USDを検出し、パッケージを1件として表示する。内部レイヤー・画像を列挙しない。
 - 3DModelは単一ファイルで形状を読める形式を対象とし、外部材質の自動再構築は前提にしない。
 - スキャンは元素材を変更しない。生成サムネイルを独立アセットとして混入させない。
@@ -36,6 +36,7 @@
 - GUIのラベル・メニュー・ステータスは英語。読み込み設定はOptions、管理操作はLibraries、素材操作は右クリックメニューにまとめる。
 - 右側の大きなプレビューは常時表示し、編集項目はTagsとFavoriteだけにする。タグはEnterまたはフォーカス移動で保存する。
 - 素材情報は別プロセスで取得し、選択変更後の古い結果を表示しない。形状の集計で作業HIPを変更しない。
+- Catalog選択欄はasset/CatalogのDBを検出する。選択先はルートごとに保存し、Add Catalog / Open Catalogの双方で同じ選択を使う。新規作成で既存DBを上書きしない。
 - Import Selected / Copy Pathsは右クリックに置き、Add CatalogはUSD選択時のみ表示する。
 - Ctrl / Shiftの複数選択を保持してD&D・Copy Paths・サムネイル生成を行う。メタデータ編集はactive assetのみ。
 - 全種類で文字列入力欄にはパスを渡す。Network ViewのPパラメーターは独立したネイティブ描画領域なので、グラフと誤判定してイベントを横取りしない。

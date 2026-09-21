@@ -295,6 +295,13 @@ class LibraryWidget(QtWidgets.QWidget):
         left = QtWidgets.QWidget(); leftbox=QtWidgets.QVBoxLayout(left); leftbox.setContentsMargins(0,0,0,0)
         self.tree = QtWidgets.QTreeWidget(); self.tree.setHeaderLabel('Libraries / Folders')
         self.tree.currentItemChanged.connect(self.reset_page); leftbox.addWidget(self.tree,1)
+        leftbox.addWidget(QtWidgets.QLabel('Catalog'))
+        self.catalogs=QtWidgets.QComboBox()
+        self.catalogs.setToolTip('USD registration target. Right-click to open, select or create a catalog.')
+        self.catalogs.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.catalogs.customContextMenuRequested.connect(self.catalog_menu)
+        self.catalogs.currentIndexChanged.connect(self.catalog_changed)
+        leftbox.addWidget(self.catalogs)
         folderbuttons=QtWidgets.QHBoxLayout()
         self._button('Libraries...', self.root_menu, folderbuttons); leftbox.addLayout(folderbuttons)
         split.addWidget(left)
@@ -348,6 +355,7 @@ class LibraryWidget(QtWidgets.QWidget):
         return item.data(0,ROLE) if item else None
 
     def rebuild_tree(self):
+        self.refresh_catalogs()
         selected=self.current_folder()
         self.tree.blockSignals(True); self.tree.clear()
         allitem=QtWidgets.QTreeWidgetItem(['All Libraries']); self.tree.addTopLevelItem(allitem)
@@ -594,12 +602,14 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addAction('Generate Missing Thumbnails',lambda:self.safe(self.generate_missing_thumbnails))
         menu.addAction('Cancel Thumbnails',lambda:self.safe(self.cancel_thumbnails))
         menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
+        menu.addAction('Select Catalog...',lambda:self.safe(self.select_catalog))
+        menu.addAction('New Catalog...',lambda:self.safe(self.new_catalog))
         menu.exec(QtGui.QCursor.pos())
 
     def set_publish_root(self):
         folder=self.current_folder()
         if not folder:raise ValueError('Select a library.')
-        self.default_root=folder[2]; self.settings['publish_root']=self.default_root; self.save_settings()
+        self.default_root=folder[2]; self.settings['publish_root']=self.default_root; self.save_settings(); self.refresh_catalogs()
         self.status.setText('USD / Catalog output: '+self.default_root)
 
     def relink(self):
@@ -718,9 +728,72 @@ class LibraryWidget(QtWidgets.QWidget):
         with dest.open('x',encoding='utf-8') as stream:json.dump(data,stream,ensure_ascii=False,indent=2)
         self.scan(); self.status.setText('Set saved: '+str(dest))
 
+    def catalog_directory(self):
+        if not self.default_root:raise ValueError('Choose a library for USD / Catalog output in Libraries.')
+        return Path(self.default_root)/'Catalog'
+
     def catalog_path(self):
-        if not self.default_root:raise ValueError('Add a library and choose its USD / Catalog output location in Libraries.')
-        return Path(self.default_root)/'_catalog'/'solaris_assets.db'
+        selected=self.settings.get('catalogs',{}).get(core.path_key(self.default_root))
+        if selected:return core.inside(self.default_root,selected) if not Path(selected).is_absolute() else Path(selected)
+        return self.catalog_directory()/'solaris_assets.db'
+
+    def refresh_catalogs(self):
+        if not hasattr(self,'catalogs'):return
+        self.catalogs.blockSignals(True);self.catalogs.clear()
+        if self.default_root:
+            current=self.catalog_path()
+            folder=self.catalog_directory()
+            paths=sorted((p for p in folder.rglob('*') if p.is_file() and p.suffix.lower() in {'.db','.sqlite','.sqlite3'}),key=lambda p:str(p).lower()) if folder.exists() else []
+            if current not in paths:paths.append(current)
+            for path in paths:
+                try:label=path.relative_to(folder).as_posix()
+                except ValueError:label=str(path)
+                self.catalogs.addItem(label+(' (new)' if not path.exists() else ''),str(path))
+                self.catalogs.setItemData(self.catalogs.count()-1,str(path),QtCore.Qt.ItemDataRole.ToolTipRole)
+            self.catalogs.setCurrentIndex(self.catalogs.findData(str(current)))
+        self.catalogs.blockSignals(False)
+
+    def use_catalog(self,path):
+        path=Path(path).resolve()
+        try:value=path.relative_to(Path(self.default_root).resolve()).as_posix()
+        except ValueError:value=str(path)
+        self.settings.setdefault('catalogs',{})[core.path_key(self.default_root)]=value
+        self.save_settings();self.refresh_catalogs()
+        self.status.setText('Catalog target: '+str(path))
+
+    def catalog_changed(self,index):
+        if index>=0:self.safe(lambda:self.use_catalog(self.catalogs.itemData(index)))
+
+    def select_catalog(self):
+        path,_=QtWidgets.QFileDialog.getOpenFileName(self,'Select Catalog',str(self.catalog_directory()),'Asset Catalog (*.db *.sqlite *.sqlite3)')
+        if path:
+            source=hou.AssetGalleryDataSource(path)
+            if not source.isValid():raise ValueError('Invalid Asset Catalog')
+            self.use_catalog(path)
+
+    def new_catalog(self):
+        path,_=QtWidgets.QFileDialog.getSaveFileName(self,'New Catalog',str(self.catalog_directory()/'NewCatalog.db'),'Asset Catalog (*.db)')
+        if not path:return
+        path=Path(path)
+        if not path.suffix:path=path.with_suffix('.db')
+        if path.exists():raise FileExistsError('Choose a new filename. Existing catalogs are never overwritten.')
+        path.parent.mkdir(parents=True,exist_ok=True)
+        source=hou.AssetGalleryDataSource(path.as_posix())
+        if not source.isValid() or source.isReadOnly():raise ValueError('Could not create a writable Asset Catalog')
+        source.startTransaction();source.endTransaction(True)
+        self.use_catalog(path)
+
+    def build_catalog_menu(self):
+        menu=QtWidgets.QMenu(self)
+        menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
+        menu.addAction('Select Catalog...',lambda:self.safe(self.select_catalog))
+        menu.addAction('New Catalog...',lambda:self.safe(self.new_catalog))
+        return menu
+
+    def catalog_menu(self,position):
+        menu=self.build_catalog_menu()
+        try:menu.exec(self.catalogs.mapToGlobal(position))
+        finally:menu.deleteLater()
 
     def add_catalog(self):
         rows=self.selected_rows()
@@ -730,6 +803,7 @@ class LibraryWidget(QtWidgets.QWidget):
             path=self.library.resolve(row);thumb=self.thumbnail_path(row)
             item,added=ops.register_catalog(path,self.catalog_path(),row['label'],row['tags'],str(thumb) if thumb else '',backup_dir=self.data_dir/'backups')
             items.append(item)
+        self.refresh_catalogs()
         self.status.setText(f'Catalog ready: {len(items)} USD assets (existing entries kept).')
         return items
 

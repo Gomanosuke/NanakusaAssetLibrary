@@ -3,7 +3,7 @@
 Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
 Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
-現在のバージョンは **0.5.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+現在のバージョンは **0.6.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
 
 ## コードとデータの分離
 
@@ -192,8 +192,16 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
 
 ## USD / Asset Catalog
 
+左下の「Catalog」選択欄でUSDの登録先を選びます。素材ルートの`Catalog`内のDBを自動検出します。
+選択欄を右クリックすると「Open Catalog」「Select Catalog...」「New Catalog...」を使用できます。
+「Select Catalog...」では別の場所の既存DBも指定でき、「New Catalog...」は空のDBを作成します。既存ファイルは上書きしません。
+選択はライブラリールートごとに保存されます。ルート内のDBは相対パスで記録します。
+「Add Catalog」は選択中のDBへの登録で、「Open Catalog」でそのDBをHoudiniのAsset Catalogとして開きます。
+未作成の標準DBには「(new)」を表示し、最初のAdd Catalogで作成します。
+旧`_catalog`内のDBは`Catalog`へ移してRescanするか、Select Catalogで指定してください。自動移動・削除は行いません。
+
 USDを選択して右クリックの「Add Catalog」でHoudini Asset Catalogのデータベースへ登録できます。
-複数のUSDをまとめて登録できます。同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `_catalog` に保存します（素材分類としては表示しません）。
+複数のUSDをまとめて登録できます。同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `Catalog` に保存します（素材分類としては表示しません）。
 DB更新前のバックアップは`data/backups`へ保存します。
 右クリックの「Publish Static USD...」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
 外部依存を持つUSDを他PCへ渡すときは、その依存ファイルと相対パスも保ってください。
@@ -213,7 +221,7 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.5.0ではHoudini 22.0.447 / Windowsで36件のテストが通過しました。
+0.6.0ではHoudini 22.0.447 / Windowsで37件のテストが通過しました。
 保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
 画像・形状の情報取得、右クリック項目、タグ・お気に入り保存、バックアップ先も検証しています。
 検証結果はこのバージョン時点の記録です。変更後は影響するテストと実際の利用経路を確認してください。

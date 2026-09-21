@@ -33,4 +33,30 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(widget.library.backup_index().parent,base/'data'/'backups')
             widget.close();widget.deleteLater()
 
+    def test_catalog_creation_selection_and_registration_target(self):
+        import hou
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder);root=base/'asset';root.mkdir()
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            first=root/'Catalog'/'Props.db';second=root/'Catalog'/'Plants.db'
+            self.assertEqual(widget.catalog_path(),root/'Catalog'/'solaris_assets.db')
+            with patch.object(ui.QtWidgets.QFileDialog,'getSaveFileName',return_value=(str(first),'')):
+                widget.new_catalog()
+            self.assertTrue(first.is_file());self.assertTrue(hou.AssetGalleryDataSource(str(first)).isValid())
+            self.assertEqual(widget.catalog_path().resolve(),first.resolve())
+            with patch.object(ui.QtWidgets.QFileDialog,'getSaveFileName',return_value=(str(first),'')):
+                with self.assertRaises(FileExistsError):widget.new_catalog()
+            with patch.object(ui.QtWidgets.QFileDialog,'getSaveFileName',return_value=(str(second),'')):
+                widget.new_catalog()
+            widget.catalogs.setCurrentIndex(widget.catalogs.findData(str(first.resolve())))
+            self.assertEqual(widget.catalog_path().resolve(),first.resolve())
+            self.assertIn('Open Catalog',[a.text() for a in widget.build_catalog_menu().actions()])
+            with patch.object(widget,'selected_rows',return_value=[{'kind':'usd','label':'Chair','tags':''}]),patch.object(widget.library,'resolve',return_value=root/'USD'/'Chair.usda'),patch.object(widget,'thumbnail_path',return_value=None),patch.object(ui.ops,'register_catalog',return_value=(1,True)) as register:
+                widget.add_catalog()
+                self.assertEqual(register.call_args.args[1].resolve(),first.resolve())
+            widget.close();widget.deleteLater()
+            restored=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            self.assertEqual(restored.catalog_path().resolve(),first.resolve())
+            restored.close();restored.deleteLater()
+
 if __name__=='__main__':unittest.main()
