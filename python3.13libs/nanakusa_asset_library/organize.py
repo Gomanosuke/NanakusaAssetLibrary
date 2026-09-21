@@ -56,11 +56,15 @@ def _remap(thumbnail, pairs):
     """Follow a user-chosen thumbnail path when the file it names was moved."""
     if not thumbnail:
         return thumbnail
+    # Compare resolved paths: a chosen thumbnail may spell the same folder differently
+    # (Windows short names, drive-letter case). Call this before the files are renamed.
+    chosen = Path(thumbnail).resolve()
     for old, new in pairs:
-        if Path(thumbnail) == old:
+        old = old.resolve()
+        if chosen == old:
             return str(new)
         try:
-            return str(new / Path(thumbnail).relative_to(old))
+            return str(new / chosen.relative_to(old))
         except ValueError:
             pass
     return thumbnail

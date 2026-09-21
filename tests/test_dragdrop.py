@@ -14,15 +14,16 @@ class DropTests(unittest.TestCase):
     def tearDown(self):self.net.destroy();self.temp.cleanup()
     def test_mime_preserves_plain_path(self):
         mime=dd.mime_data(self.obj,'model','mesh')
-        self.assertEqual(mime.text(),self.obj.as_posix());self.assertEqual(dd.parse(mime)['path'],self.obj.as_posix())
-        self.assertEqual(mime.urls()[0].toLocalFile(),self.obj.as_posix())
+        plain=self.obj.resolve().as_posix()   # the payload uses resolved paths (temp folders can be short names on Windows)
+        self.assertEqual(mime.text(),plain);self.assertEqual(dd.parse(mime)['path'],plain)
+        self.assertEqual(mime.urls()[0].toLocalFile(),plain)
 
     def test_batch_mime_all_kinds_and_spaces(self):
         entries=[{'path':str(self.root/name),'kind':kind,'label':kind} for name,kind in [('mesh file.obj','model'),('asset.usd','usd'),('color.png','texture')]]
         mime=dd.mime_data_many(entries)
         self.assertEqual(len(dd.parse_items(mime)),3)
         self.assertEqual(len(mime.urls()),3)
-        self.assertIn('"'+(self.root/'mesh file.obj').as_posix()+'"',mime.text())
+        self.assertIn('"'+(self.root/'mesh file.obj').resolve().as_posix()+'"',mime.text())
 
     def test_batch_merges_geometry_and_rolls_back_failure(self):
         data={'kind':'model','path':str(self.obj),'label':'mesh'}

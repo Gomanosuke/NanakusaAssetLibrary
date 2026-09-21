@@ -30,7 +30,7 @@ class LibraryUiTests(unittest.TestCase):
             self.assertIn('Add Catalog',[a.text() for a in widget.build_asset_menu().actions()])
             self.assertFalse(any(b.text() in ('Import Selected','Copy Paths') for b in widget.findChildren(QtWidgets.QPushButton)))
             self.assertFalse(widget.preview.isHidden())
-            self.assertEqual(widget.library.backup_index().parent,base/'data'/'backups')
+            self.assertTrue(widget.library.backup_index().parent.samefile(base/'data'/'backups'))
             widget.close();widget.deleteLater()
 
     def test_tree_drops_move_assets_and_folders_keeping_metadata(self):

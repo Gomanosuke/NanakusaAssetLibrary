@@ -44,7 +44,7 @@ class OrganizeTests(unittest.TestCase):
         self.assertFalse((self.root/'USD/Misc/Chair').exists())
         new=self.row('USD/Props/Chair/Chair.usd');self.assertEqual((new['id'],new['tags']),(old['id'],'seat'))
         self.assertEqual([(Path(o).name,Path(n).parent.name) for o,n in result['catalog']],[('Chair.usd','Chair')])
-        self.assertEqual(Path(result['catalog'][0][1]),self.root/'USD/Props/Chair/Chair.usd')
+        self.assertTrue(Path(result['catalog'][0][1]).samefile(self.root/'USD/Props/Chair/Chair.usd'))   # Windows may spell temp folders in short form
 
     def test_standalone_usdz_and_custom_thumbnail_follow(self):
         self.write('USD/post.usdz');self.write('USD/post_thumbnail.png');(self.root/'USD/Props').mkdir()
@@ -52,7 +52,7 @@ class OrganizeTests(unittest.TestCase):
         row=self.row('USD/post.usdz');self.lib.update(row['id'],thumbnail=str(custom))
         self.move(['USD/post.usdz'],'USD/Props')
         self.assertTrue((self.root/'USD/Props/post_thumbnail.png').is_file());self.assertTrue((self.root/'USD/Props/post_thumbnail.jpg').is_file())
-        self.assertEqual(Path(self.row('USD/Props/post.usdz')['thumbnail']),self.root/'USD/Props/post_thumbnail.jpg')
+        self.assertTrue(Path(self.row('USD/Props/post.usdz')['thumbnail']).samefile(self.root/'USD/Props/post_thumbnail.jpg'))
 
     def test_texture_thumbnail_cache_needs_no_move(self):
         self.write('Texture/PBR/stone.tif');(self.root/'Texture/Misc').mkdir();self.scan()
@@ -114,7 +114,7 @@ class OrganizeTests(unittest.TestCase):
         self.assertTrue((self.root/'3DModel/Environment/Rocks/big_thumbnail.png').is_file())
         moved=self.row('3DModel/Environment/Rocks/big.fbx');self.assertEqual((moved['id'],moved['tags']),(ids['3DModel/Misc/Rocks/big.fbx']['id'],'stone'))
         small=self.row('3DModel/Environment/Rocks/Deep/small.obj')
-        self.assertEqual(Path(small['thumbnail']),self.root/'3DModel/Environment/Rocks/pick.png')
+        self.assertTrue(Path(small['thumbnail']).samefile(self.root/'3DModel/Environment/Rocks/pick.png'))
         self.assertEqual(self.row('USD/Misc/Rocks/Rocks.usd')['present'],1)   # other genre untouched
 
     def test_folder_move_refusals(self):
