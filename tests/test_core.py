@@ -19,6 +19,15 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual([r['relpath'] for r in rows],['USD/Plants/tree/tree.usd'])
         self.assertEqual(rows[0]['label'],'tree')
         self.assertNotIn('USD/Plants/tree/textures',visible_folders(self.root))
+    def test_standalone_usdz_and_opaque_packages(self):
+        for rel in ('USD/post.usdz','USD/Props/sign.USDZ','USD/tree/tree.usdz','USD/tree/hidden.usdz','USD/loose.usd'):
+            self.write(rel)
+        self.lib.scan(self.rid)
+        rows={r['relpath']:r for r in self.lib.assets()}
+        self.assertEqual(set(rows),{'USD/post.usdz','USD/Props/sign.USDZ','USD/tree/tree.usdz'})
+        self.assertEqual(rows['USD/post.usdz']['label'],'post')
+        self.assertEqual(rows['USD/Props/sign.USDZ']['label'],'sign')
+
     def test_fixed_genres_and_single_file_models(self):
         for path in ('3DModel/a.obj','3DModel/b.fbx','3DModel/smoke.vdb','Texture/a.tif','Texture/sky.hdr'):self.write(path)
         for path in ('3DModel/color.png','3DModel/multi.gltf','Texture/model.obj','Other/a.obj'):self.write(path)

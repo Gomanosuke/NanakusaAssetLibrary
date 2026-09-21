@@ -26,6 +26,11 @@ def package_entry(folder):
             return p
     return None
 
+def is_usd_package(row):
+    path=Path(row['relpath'])
+    return row['kind']=='usd' and not (path.suffix.lower()=='.usdz' and
+        (len(path.parts)==2 or path.stem.lower()!=path.parent.name.lower()))
+
 def visible_folders(base):
     """Only the three genres; USD package contents are opaque."""
     base = Path(base)
@@ -162,10 +167,11 @@ class Library:
             genre = relative_folder.parts[0]
             if genre == 'USD':
                 entry = package_entry(folder) if len(relative_folder.parts)>1 else None
-                if not entry:
-                    continue
-                names = [entry.name]
-                dirs[:] = []
+                if entry:
+                    names = [entry.name]
+                    dirs[:] = []
+                else:
+                    names = [name for name in names if Path(name).suffix.lower()=='.usdz']
             for name in names:
                 if cancel():
                     return {"cancelled": True, "count": 0, "errors": errors}
@@ -182,7 +188,7 @@ class Library:
                     stat = p.stat()
                     rel = p.relative_to(base).as_posix()
                     aid = hashlib.sha256((rid + '/' + rel).encode()).hexdigest()[:32]
-                    label = p.parent.name if kind=='usd' else p.stem
+                    label = p.parent.name if kind=='usd' and entry else p.stem
                     rows.append((aid, rid, rel, label, kind, stat.st_size, stat.st_mtime))
                 except OSError as exc:
                     errors.append(str(exc))

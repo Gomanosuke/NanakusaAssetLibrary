@@ -3,7 +3,7 @@
 Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
 Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
-現在のバージョンは **0.6.1** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+現在のバージョンは **0.6.2** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
 
 ## コードとデータの分離
 
@@ -95,6 +95,7 @@ package JSONの`path`が本体、`env`の`NAL_DATA_DIR`がdataの指定です。
 - **USD**: フォルダーと同名の `.usd` / `.usdc` / `.usda` / `.usdz` を入口として検出し、
   パッケージの親フォルダーを1件表示します。内部のUSDレイヤーやテクスチャは表示しません。
   複数の入口がある場合は上記の拡張子順です。同名の入口がないフォルダーは整理用フォルダーとして走査します。
+  例外として単体の`.usdz`はUSD直下や整理用フォルダー内からファイル名で表示します。展開は不要です。
 - **3DModel**: `.obj`, `.fbx`, `.vdb`, `.bgeo`, `.bgeo.sc`, `.geo`, `.geo.sc`, `.abc`, `.glb`, `.stl`, `.ply`。
   形状を単一ファイルから読める形式が対象です。FBXの外部画像や元の材質は再構築しません。
 - **Texture**: PNG、JPEG、TIFF、HDR、EXRなどの画像。HDRやデカールもこの分類に置きます。
@@ -172,7 +173,8 @@ TIFF・HDR・EXRはHoudini付属の画像変換ツールで縮小し、`data/thu
 | 種類 | 生成画像の保存先 |
 |---|---|
 | 3DModel | 元ファイルと同じフォルダーの`<モデル名>_thumbnail.png` |
-| USD | 入口USDと同じフォルダーの`thumbnail.png` |
+| USDパッケージ | 入口USDと同じフォルダーの`thumbnail.png` |
+| 単体USDZ | 元ファイルと同じフォルダーの`<ファイル名>_thumbnail.png`（複数ファイルの衝突防止） |
 | Texture | `data/thumbnails` |
 
 USDの配置は[Component Builder](https://www.sidefx.com/docs/houdini/solaris/component_builder.html)の出力と同じ規約です。
@@ -221,7 +223,7 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.6.1ではHoudini 22.0.447 / Windowsで37件のテストが通過しました。
+0.6.2ではHoudini 22.0.447 / Windowsで39件のテストが通過しました。
 保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
 画像・形状の情報取得、右クリック項目、タグ・お気に入り保存、バックアップ先も検証しています。
 検証結果はこのバージョン時点の記録です。変更後は影響するテストと実際の利用経路を確認してください。

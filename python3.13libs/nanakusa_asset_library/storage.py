@@ -1,6 +1,7 @@
 """Portable data and adjacent thumbnail locations (no Houdini dependency)."""
 from pathlib import Path
 import os
+from .core import is_usd_package
 
 
 def default_data_dir():
@@ -16,7 +17,7 @@ def default_data_dir():
 def thumbnail_destination(row, data_dir):
     source = Path(row['root_path']) / row['relpath']
     if row['kind'] == 'usd':
-        return source.parent / 'thumbnail.png'
+        return source.parent / 'thumbnail.png' if is_usd_package(row) else source.with_name(source.stem+'_thumbnail.png')
     if row['kind'] == 'model':
         name = source.stem
         if source.name.lower().endswith(('.bgeo.sc', '.geo.sc')):
@@ -31,7 +32,7 @@ def thumbnail_candidates(row, data_dir):
     result = [Path(row['thumbnail'])] if row.get('thumbnail') else []
     result.append(thumbnail_destination(row, data_dir))
     if row['kind'] == 'usd':
-        result.append(source.parent / 'thumbnail.jpg')
+        result.append(thumbnail_destination(row, data_dir).with_suffix('.jpg'))
     elif row['kind'] == 'model':
         result.append(thumbnail_destination(row, data_dir).with_suffix('.jpg'))
     result.append(source.with_suffix('.preview.jpg'))

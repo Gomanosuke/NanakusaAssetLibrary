@@ -384,7 +384,7 @@ class LibraryWidget(QtWidgets.QWidget):
             rel=folder[1]
             if self.recursive.isChecked(): rows=[r for r in rows if not rel or r['relpath'].startswith(rel+'/')]
             else:
-                rows=[r for r in rows if (Path(r['relpath']).parent.parent.as_posix() if r['kind']=='usd' else Path(r['relpath']).parent.as_posix())==rel or (r['kind']=='usd' and Path(r['relpath']).parent.as_posix()==rel)]
+                rows=[r for r in rows if (Path(r['relpath']).parent.parent.as_posix() if core.is_usd_package(r) else Path(r['relpath']).parent.as_posix())==rel or (core.is_usd_package(r) and Path(r['relpath']).parent.as_posix()==rel)]
         self.rows=rows
         pages=max(1,(len(rows)+self.PAGE_SIZE-1)//self.PAGE_SIZE); self.page=min(self.page,pages-1)
         self.items.clear()
@@ -455,7 +455,7 @@ class LibraryWidget(QtWidgets.QWidget):
         thumb=self.thumbnail_path(row)
         pix=square_preview(thumb,1024) if thumb else None
         self.preview.setPixmap(pix if pix is not None else self.icon_for(row).pixmap(512,512))
-        display_path=Path(row['relpath']).parent.as_posix() if row['kind']=='usd' else row['relpath']
+        display_path=Path(row['relpath']).parent.as_posix() if core.is_usd_package(row) else row['relpath']
         self.info.setText(f"{row['label']}\n{KINDS[row['kind']]} | {row['size']/1048576:.2f} MB")
         self.info.setToolTip(f"{row['root_label']} / {display_path}")
         self.metadata_id=row['id'];self.tags.setEnabled(True);self.star.setEnabled(True)

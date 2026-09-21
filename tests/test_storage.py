@@ -21,6 +21,14 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(thumbnail_destination(row,'/data'),Path('/assets/USD/tree/thumbnail.png'))
         self.assertIn(Path('/assets/USD/tree/thumbnail.jpg'),thumbnail_candidates(row,'/data'))
 
+    def test_standalone_usdz_thumbnails_do_not_collide(self):
+        for name in ('post','sign'):
+            row=self.row('USD/'+name+'.usdz','usd')
+            self.assertEqual(thumbnail_destination(row,'/data'),Path('/assets/USD/'+name+'_thumbnail.png'))
+            self.assertNotIn(Path('/assets/USD/thumbnail.jpg'),thumbnail_candidates(row,'/data'))
+        row=self.row('USD/tree/tree.usdz','usd')
+        self.assertEqual(thumbnail_destination(row,'/data'),Path('/assets/USD/tree/thumbnail.png'))
+
     def test_only_texture_cache_is_in_data_and_invalidates_old_padded_cache(self):
         row=self.row('Texture/color.tif','texture')
         result=thumbnail_destination(row,'/data')
