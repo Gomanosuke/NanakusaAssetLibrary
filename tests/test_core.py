@@ -42,7 +42,8 @@ class LibraryTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):self.lib.scan(self.rid)
         self.assertEqual(len(self.lib.assets()),1)
         self.lib.relink_root(self.rid,new);self.lib.scan(self.rid)
-        self.assertEqual(self.lib.resolve(self.lib.assets()[0]),new/'3DModel/a.obj')
+        # Windows runners may expose TEMP through an 8.3 alias; compare identity.
+        self.assertTrue(self.lib.resolve(self.lib.assets()[0]).samefile(new/'3DModel/a.obj'))
     def test_path_escape_and_overlap(self):
         with self.assertRaises(ValueError):inside(self.root,'../escape')
         with self.assertRaises(ValueError):self.lib.add_root(self.root/'USD')
