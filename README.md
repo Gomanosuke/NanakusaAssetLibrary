@@ -3,7 +3,7 @@
 Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
 Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
-現在のバージョンは **0.8.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+現在のバージョンは **0.8.2** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
 
 ## コードとデータの分離
 
@@ -160,6 +160,8 @@ GUIは英語です。右側には大きな正方形プレビューと素材情�
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
 Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで表示ページ内を全選択できます。
+素材一覧でCtrl+マウス中ボタンをドラッグすると、アイコンサイズを変更できます（右・上へ動かすと大きく、左・下へ動かすと小さくなります。64〜512px）。
+サイズは`settings.json`に保存し、次回も引き継ぎます。256pxを超える場合は、鮮明に表示するため一覧を作り直します。
 D&D・Copy Paths・Generate Selected Thumbnailsは選択した全素材が対象です。
 右側の編集項目はTagsとFavoriteのみで、active asset（最後に選んだ1件）が対象です。
 TagsはEnterまたは入力欄から離れた時に保存し、Favoriteは切り替え時に保存します。
@@ -241,8 +243,13 @@ USD・3DModelは右クリックの「Generate Selected Thumbnails」で作成で
 既存サムネイルがある素材は一括生成でスキップします。「Libraries... → Cancel Thumbnails」で待機分を解除できます。
 
 形状のサムネイルは別プロセスのhythonとKarma CPUで512×512にレンダリングします。
-Houdini初期値のDome Light（Intensity 1 / Exposure 0 / 白色・画像なし）と補助のDistant Lightを配置します。
-既存の暗いサムネイルには、右クリックのGenerate Selected Thumbnailsを実行してください。
+屋外HDRI（`meadow_2_8k.exr`）のDome Light（Exposure -0.5、上方向軸まわりに-30度回転＝Houdiniの回転0, -30, 0）と、Exposure 1のDistant Lightを配置します。
+HDRIは背景には映りません。
+HDRIはライブラリーのフォルダーから独立させるため、本体の`python3.13libs/nanakusa_asset_library/resources/`にコピーして使います。
+容量が大きい（約92MB）ためGitには含めません（`*.exr`は除外）。別のPCでも同じファイルをこのフォルダーへコピーしてください。
+ファイルがない場合は、Houdini初期値の白いDome Light（Exposure 0）で生成します。
+USDの上方向軸（Y-up / Z-up）は、構図とライティングに反映します。
+既存のサムネイルには、右クリックのGenerate Selected Thumbnailsを実行して更新してください。
 形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
 GPUを占有せず4 CPUスレッドを使います。Houdini / Karmaの利用可能なライセンスが必要です。
 USDの材質と依存ファイルを参照し、最初のフレームを描画します。欠落した依存ファイルや読み込み不能な形状はエラーとして表示します。
@@ -282,7 +289,7 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.7.0ではHoudini 22.0.447 / Windowsで68件のテストが通過しました。
+0.7.0ではHoudini 22.0.447 / Windowsで72件のテストが通過しました。
 移動（`organize.py`）は標準Pythonでも検証できます。
 Scene Viewへのドロップ抑止は、実機のマウス操作では未検証です（イベントフィルターの判定のみテスト済み）。
 保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
@@ -302,6 +309,6 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `pbr.py` | ファイル名によるPBR用途・セットの判定、スタック表示用のグループ化 |
 | `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
 | `asset_info.py` | 別プロセスの画像・形状情報取得 |
-| `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成 |
+| `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。

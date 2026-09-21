@@ -184,12 +184,44 @@ def install():
     return _filter
 
 class AssetList(QtWidgets.QListWidget):
+    MIN_ICON, MAX_ICON = 64, 512
+    iconSizeFinished = QtCore.Signal(int)
+
     def __init__(self, library, parent=None):
         super().__init__(parent)
         self.library=library
+        self._sizing=None
         self.setDragEnabled(True)
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def apply_icon_size(self, size):
+        size=max(self.MIN_ICON,min(self.MAX_ICON,int(size)))
+        self.setIconSize(QtCore.QSize(size,size))
+        self.setGridSize(QtCore.QSize(size+24,size+48))
+        return size
+
+    # Ctrl + middle-button drag resizes the icons: right or up = larger, left or down = smaller.
+    def mousePressEvent(self, event):
+        if event.button()==QtCore.Qt.MouseButton.MiddleButton and event.modifiers()&QtCore.Qt.KeyboardModifier.ControlModifier:
+            self._sizing=(event.position().toPoint(),self.iconSize().width())
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            event.accept();return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._sizing is not None:
+            start,size=self._sizing;point=event.position().toPoint()
+            self.apply_icon_size(size+(point.x()-start.x())-(point.y()-start.y()))
+            event.accept();return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._sizing is not None and event.button()==QtCore.Qt.MouseButton.MiddleButton:
+            self._sizing=None;self.unsetCursor()
+            self.iconSizeFinished.emit(self.iconSize().width())
+            event.accept();return
+        super().mouseReleaseEvent(event)
 
     def expand(self, item):
         """Rows an item stands for; the library widget expands a PBR stack into its images."""

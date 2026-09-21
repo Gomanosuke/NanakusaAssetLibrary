@@ -3,16 +3,26 @@ from pathlib import Path
 import math
 import sys
 
+# Lighting HDR bundled with the source so thumbnails do not depend on a movable library folder.
+# It is not tracked by Git (large downloaded asset): copy it here on every PC. See resources/README.md.
+ENVIRONMENT = Path(__file__).with_name('resources') / 'meadow_2_8k.exr'
+DOME_EXPOSURE = -0.5
+DOME_ROTATION = -30      # degrees around the up axis
+KEY_EXPOSURE = 1
+
 
 def prepare(source, kind, destination):
     import hou
-    from pxr import Usd, UsdGeom, UsdLux, Gf
+    from pxr import Usd, UsdGeom, UsdLux, Gf, Sdf
     from nanakusa_asset_library import houdini_ops
 
     destination = Path(destination)
     if kind == 'usd':
         stage = Usd.Stage.CreateNew(str(destination))
         stage.GetRootLayer().subLayerPaths = [Path(source).resolve().as_posix()]
+        # Sublayer metadata is not composed: carry the asset's up axis over so framing and
+        # lighting follow it (a Z-up asset would otherwise lie on its side).
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.GetStageUpAxis(Usd.Stage.Open(str(source), Usd.Stage.LoadNone)))
     else:
         network = hou.node('/obj').createNode('lopnet', 'thumbnail')
         node = houdini_ops.import_asset(source, 'model', 'asset', network.path())
@@ -46,16 +56,25 @@ def prepare(source, kind, destination):
     camera.CreateClippingRangeAttr(Gf.Vec2f(max(radius*.0001, 1e-5), distance + radius*10))
     camera.AddTransformOp().Set(Gf.Matrix4d().SetLookAt(eye, center, up).GetInverse())
     dome = UsdLux.DomeLight.Define(stage, prefix + '/domelight')
-    # Match Houdini's default Dome Light: white, intensity 1, exposure 0.
     dome.CreateIntensityAttr(1)
-    dome.CreateExposureAttr(0)
     dome.CreateColorAttr(Gf.Vec3f(1))
+    if ENVIRONMENT.is_file():
+        # meadow HDRI: exposure -0.5, rotated -30 degrees around the up axis (Houdini's rotate 0, -30, 0).
+        dome.CreateTextureFileAttr(Sdf.AssetPath(ENVIRONMENT.resolve().as_posix()))
+        dome.CreateTextureFormatAttr('latlong')
+        dome.CreateExposureAttr(DOME_EXPOSURE)
+        turn = Gf.Vec3f(0, DOME_ROTATION, 0) if up[1] else Gf.Vec3f(0, 0, DOME_ROTATION)
+        UsdGeom.Xformable(dome).AddRotateXYZOp().Set(turn)
+    else:
+        # Without the bundled HDR fall back to Houdini's default Dome Light (white, exposure 0).
+        dome.CreateExposureAttr(0)
     key = UsdLux.DistantLight.Define(stage, prefix + '/key')
-    key.CreateIntensityAttr(2)
+    key.CreateIntensityAttr(1)
+    key.CreateExposureAttr(KEY_EXPOSURE)
     key.CreateAngleAttr(15)
     UsdGeom.Xformable(key).AddTransformOp().Set(Gf.Matrix4d().SetLookAt(eye, center, up).GetInverse())
     stage.GetRootLayer().Save()
-    return {'camera': str(camera.GetPath()), 'frame': frame}
+    return {'camera': str(camera.GetPath()), 'frame': frame, 'environment': ENVIRONMENT.as_posix() if ENVIRONMENT.is_file() else ''}
 
 
 if __name__ == '__main__':

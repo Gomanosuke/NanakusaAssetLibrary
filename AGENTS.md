@@ -62,6 +62,15 @@
 - USDの移動後はAsset CatalogのファイルパスをsetFilePathで更新する。
 - ライブラリー独自MIMEのドロップは、パラメーター欄・文字列入力欄・Network Editor・ライブラリーのフォルダーツリー以外では受け取り、何もせず無視する（Houdiniにファイルを開かせない）。
 
+## サムネイルのライティング
+
+- サムネイルのDome Lightはresources/meadow_2_8k.exr（Exposure -0.5、上軸まわり-30度）、Distant LightはExposure 1。値の変更はthumbnail_scene.pyの定数で行う。
+- HDRIはライブラリーのassetではなく本体側のresourcesへコピーして使う（ユーザーの指示: 移動してもサムネイルが作れなくならないように）。容量が大きいためGitへは入れない（*.exrを除外）。resources/README.mdに手順を残す。HDRIがない場合は白いDome Lightへ戻す。
+
+## 一覧のアイコンサイズ
+
+- Ctrl+中ボタンドラッグの処理はdragdrop.AssetListに置く。範囲は64〜512px、サイズはsettings.jsonのicon_sizeへ保存する。256pxを超える時だけ、大きい元画像（icon_edge）で一覧を作り直す。
+
 ## PBRスタックとマテリアル配置
 
 - スタックの判定はpbr.stack_entriesに集約する。一覧の項目はSTACK_ROLEに所属する素材IDを持ち、選択・D&D・メタデータ保存は必ず全画像へ展開する。self.rowsは全画像のまま保ち、ページ分割だけをスタック単位で行う。

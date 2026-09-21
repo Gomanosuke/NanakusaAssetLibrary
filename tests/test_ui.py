@@ -1,5 +1,5 @@
 from pathlib import Path
-import sys,tempfile,unittest
+import json,sys,tempfile,unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 from hutil.PySide import QtWidgets
@@ -153,6 +153,37 @@ class LibraryUiTests(unittest.TestCase):
             again=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
             self.assertFalse(again.stack.isChecked());self.assertEqual(again.items.count(),5)
             again.close();again.deleteLater()
+
+    def test_ctrl_middle_drag_resizes_icons_and_remembers_the_size(self):
+        from hutil.PySide import QtCore,QtGui
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for rel in ('3DModel/a.obj','3DModel/b.obj'):
+                p=root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('placeholder')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            items=widget.items;self.assertEqual(items.iconSize().width(),144)
+            def event(kind,x,y,button=QtCore.Qt.MouseButton.MiddleButton,mods=QtCore.Qt.KeyboardModifier.ControlModifier):
+                held=QtCore.Qt.MouseButton.NoButton if kind==QtCore.QEvent.Type.MouseButtonRelease else button
+                return QtGui.QMouseEvent(kind,QtCore.QPointF(x,y),QtCore.QPointF(x,y),button,held,mods)
+            T=QtCore.QEvent.Type
+            items.mousePressEvent(event(T.MouseButtonPress,100,100))
+            items.mouseMoveEvent(event(T.MouseMove,180,100));self.assertEqual(items.iconSize().width(),224)
+            self.assertEqual(items.gridSize().width(),248)
+            items.mouseMoveEvent(event(T.MouseMove,100,140));self.assertEqual(items.iconSize().width(),104)   # down = smaller
+            items.mouseMoveEvent(event(T.MouseMove,-500,100));self.assertEqual(items.iconSize().width(),64)    # clamped
+            items.mouseMoveEvent(event(T.MouseMove,900,100));self.assertEqual(items.iconSize().width(),512)
+            items.mouseReleaseEvent(event(T.MouseButtonRelease,900,100))
+            self.assertEqual(widget.settings['icon_size'],512);self.assertEqual(widget.icon_edge(),512)
+            self.assertEqual(json.loads((base/'data'/'settings.json').read_text())['icon_size'],512)
+            items.mouseMoveEvent(event(T.MouseMove,0,0))   # no drag in progress: ignored
+            self.assertEqual(items.iconSize().width(),512)
+            # Plain middle clicks and Ctrl-less drags do not resize.
+            items.mousePressEvent(event(T.MouseButtonPress,100,100,mods=QtCore.Qt.KeyboardModifier.NoModifier))
+            items.mouseMoveEvent(event(T.MouseMove,300,100,mods=QtCore.Qt.KeyboardModifier.NoModifier));self.assertEqual(items.iconSize().width(),512)
+            widget.close();widget.deleteLater()
+            again=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            self.assertEqual(again.items.iconSize().width(),512);again.close();again.deleteLater()
 
     def test_catalog_creation_selection_and_registration_target(self):
         import hou

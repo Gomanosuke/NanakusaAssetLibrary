@@ -324,7 +324,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.items.setDragEnabled(True)
         self.items.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
         self.items.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.items.setIconSize(QtCore.QSize(144,144)); self.items.setGridSize(QtCore.QSize(168,192))
+        self.items.apply_icon_size(self.settings.get('icon_size',144)); self.items.iconSizeFinished.connect(self.icon_size_finished)
         self.items.setWordWrap(True); self.items.setSpacing(5)
         self.items.currentItemChanged.connect(self.selection_changed)
         self.items.itemSelectionChanged.connect(self.selection_changed)
@@ -446,6 +446,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.page=0; self.refresh()
 
     def refresh(self):
+        self.icons_built_at=self.icon_edge()
         folder=self.current_folder()
         rows=self.library.assets(self.search.text(),folder[0] if folder else None,self.kind.currentData() or None,self.favorite.isChecked())
         # Older indexes may still contain retired kinds until the next scan.
@@ -482,16 +483,26 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def stacked_icon(self,icon,count):
         """Card pile with a count badge, so a stack is recognisable at a glance."""
-        out=QtGui.QPixmap(256,256);out.fill(QtCore.Qt.GlobalColor.transparent)
-        painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        edge=self.icon_edge();out=QtGui.QPixmap(edge,edge);out.fill(QtCore.Qt.GlobalColor.transparent)
+        painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.scale(edge/256,edge/256)
         for x,y in ((32,16),(16,32)):
             painter.setPen(QtGui.QPen(QtGui.QColor(160,160,160),2));painter.setBrush(QtGui.QColor(72,72,72))
             painter.drawRoundedRect(x,y,208,208,6,6)
-        painter.drawPixmap(0,48,icon.pixmap(208,208))
+        painter.drawPixmap(QtCore.QRect(0,48,208,208),icon.pixmap(edge,edge))
         painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(30,120,90));painter.drawEllipse(166,198,50,50)
         font=painter.font();font.setBold(True);font.setPixelSize(24);painter.setFont(font)
         painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(166,198,50,50),QtCore.Qt.AlignmentFlag.AlignCenter,str(count));painter.end()
         return QtGui.QIcon(out)
+
+    def icon_edge(self):
+        return 512 if self.items.iconSize().width()>256 else 256
+
+    def icon_size_finished(self,size):
+        # Larger icons need larger source pictures; rebuild the list only when that changes.
+        self.settings['icon_size']=size;self.safe(self.save_settings)
+        edge=self.icon_edge()
+        if edge!=getattr(self,'icons_built_at',256):self.icon_cache.clear();self.refresh()
+        self.status.setText(f'Icon size: {size}px (Ctrl + middle-drag to change)')
 
     def stack_toggled(self,checked):
         self.settings['stack_pbr']=bool(checked)
@@ -529,14 +540,15 @@ class LibraryWidget(QtWidgets.QWidget):
     def icon_for(self,row):
         path=self.thumbnail_path(row)
         if path:
-            try:key=(str(path),path.stat().st_mtime_ns)
+            edge=self.icon_edge()
+            try:key=(str(path),path.stat().st_mtime_ns,edge)
             except OSError:key=None
             if key in self.icon_cache:return self.icon_cache[key]
-            pix=square_preview(path,256)
+            pix=square_preview(path,edge)
             if pix is not None:
                 icon=QtGui.QIcon(pix)
                 if key is not None:
-                    if len(self.icon_cache)>=300:self.icon_cache.pop(next(iter(self.icon_cache)))
+                    if len(self.icon_cache)>=300*256*256//(edge*edge):self.icon_cache.pop(next(iter(self.icon_cache)))
                     self.icon_cache[key]=icon
                 return icon
         self.queue_thumbnail(row)
