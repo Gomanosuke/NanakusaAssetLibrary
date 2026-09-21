@@ -156,6 +156,9 @@ class Library:
             raise FileNotFoundError("Library is offline: " + str(base))
         rows = []
         errors = []
+        with self.connect() as db:
+            known = {r[1]: r[0] for r in db.execute("SELECT id, relpath FROM assets WHERE root_id=?", (rid,))}
+        taken = set(known.values())
         for folder, dirs, names in os.walk(base, followlinks=False, onerror=lambda e: errors.append(str(e))):
             if cancel():
                 return {"cancelled": True, "count": 0, "errors": errors}
@@ -187,7 +190,14 @@ class Library:
                 try:
                     stat = p.stat()
                     rel = p.relative_to(base).as_posix()
-                    aid = hashlib.sha256((rid + '/' + rel).encode()).hexdigest()[:32]
+                    # A moved asset keeps its original id so tags survive; another file
+                    # later appearing at the old path must not reuse that id.
+                    aid = known.get(rel)
+                    if aid is None:
+                        aid = hashlib.sha256((rid + '/' + rel).encode()).hexdigest()[:32]
+                        if aid in taken:
+                            aid = uuid.uuid4().hex
+                        taken.add(aid)
                     label = p.parent.name if kind=='usd' and entry else p.stem
                     rows.append((aid, rid, rel, label, kind, stat.st_size, stat.st_mtime))
                 except OSError as exc:
@@ -200,6 +210,20 @@ class Library:
                 VALUES (?,?,?,?,?,?,?) ON CONFLICT(root_id,relpath) DO UPDATE SET
                 kind=excluded.kind,override_kind=NULL,size=excluded.size,mtime=excluded.mtime,present=1''', rows)
         return {"cancelled": False, "count": len(rows), "errors": errors}
+
+    def relocate(self, root_id, changes):
+        """Apply path changes from a completed move in one transaction.
+
+        changes: dicts with id, relpath and thumbnail. Ids are kept so tags,
+        favorites and notes follow the asset. Stale rows for files that no
+        longer exist may hold a destination path; they are dropped.
+        """
+        with self.connect() as db:
+            for change in changes:
+                db.execute("DELETE FROM assets WHERE root_id=? AND relpath=? AND present=0 AND id<>?",
+                           (root_id, change['relpath'], change['id']))
+                db.execute("UPDATE assets SET relpath=?, thumbnail=? WHERE id=? AND root_id=?",
+                           (change['relpath'], change['thumbnail'], change['id'], root_id))
 
     def assets(self, search="", root_id=None, kind=None, favorite=False, missing=False):
         clauses, args = [], []

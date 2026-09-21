@@ -36,7 +36,47 @@ def _read_geometry(parent, path, kind):
 def _texture_material(parent, path, label):
     return texture_material(parent, {'base_color':Path(path).as_posix()}, label)
 
-def texture_material(parent, maps, label):
+# Top to bottom, following the input order of mtlxstandard_surface (base_color, metalness,
+# specular_roughness, emission, opacity, normal). AO joins base_color; displacement is last.
+CHANNEL_ORDER = ('base_color', 'ao', 'metalness', 'roughness', 'emission', 'opacity', 'normal', 'displacement')
+
+
+def _layout_material(builder, existing, origin, shader, uv, images, processors, extras, outputs):
+    """Left-to-right columns: UV | images | processing | surface | outputs.
+
+    Every Image node shares one x and is spaced evenly; each processing node sits
+    beside the image it reads. Existing nodes are never moved: in an existing
+    builder the new group goes below them (or at origin when one is given).
+    """
+    import hou
+    ordered = [c for c in CHANNEL_ORDER if c in images] + [c for c in images if c not in CHANNEL_ORDER]
+    nodes = [images[c] for c in ordered]
+    width = max(n.size()[0] for n in nodes + [shader, uv])
+    pitch = max(n.size()[1] for n in nodes) + 0.9
+    if origin is None:
+        origin = hou.Vector2(0, 0)
+        others = [n for n in existing if n not in extras]
+        if others:
+            bottom = min(n.position()[1] - n.size()[1] for n in others)
+            origin = hou.Vector2(min(n.position()[0] for n in others), bottom - 1.2 - pitch)
+    columns = [origin[0] + i * (width + 1.6) for i in range(5)]
+    row = {}
+    for i, channel in enumerate(ordered):
+        row[channel] = origin[1] - i * pitch
+        images[channel].setPosition(hou.Vector2(columns[1], row[channel]))
+    top = origin[1]
+    below = min(row.values(), default=top) - pitch   # an unused displacement node waits below the last image
+    for channel, node in processors.items():
+        node.setPosition(hou.Vector2(columns[2], row.get(channel, below)))
+    uv.setPosition(hou.Vector2(columns[0], (top + min(row.values())) / 2 if row else top))
+    shader.setPosition(hou.Vector2(columns[3], top))
+    for name, node in outputs.items():
+        node.setPosition(hou.Vector2(columns[4], top if name == 'surface' else row.get('displacement', below)))
+    for node in extras:
+        node.setPosition(hou.Vector2(columns[0], top + 1.4))
+
+
+def texture_material(parent, maps, label, origin=None):
     """Material Library -> full builder; inside a builder -> surface + UV graph."""
     import hou, voptoolutils
     existing=set(parent.children())
@@ -50,19 +90,20 @@ def texture_material(parent, maps, label):
         shader=builder.createNode('mtlxstandard_surface',safe_name(label)+'_surface')
         result=shader
     uv=builder.createNode('mtlxtexcoord',safe_name(label)+'_uv')
-    images={}
-    for channel,path in maps.items():
+    images={};processors={}
+    for channel,path in sorted(maps.items(),key=lambda item:CHANNEL_ORDER.index(item[0]) if item[0] in CHANNEL_ORDER else len(CHANNEL_ORDER)):
         image=builder.createNode('mtlximage',channel+'_image')
         image.parm('signature').set('vector3' if channel=='normal' else ('color3' if channel in ('base_color','emission','opacity') else 'float'))
         image.parm('file').set(Path(path).as_posix())
         image.parm('filecolorspace').set(('lin_rec709' if Path(path).suffix.lower() in ('.hdr','.exr') else 'srgb_texture') if channel in ('base_color','emission') else 'Raw')
         image.setNamedInput('texcoord',uv,'out');images[channel]=image
         if channel=='normal':
-            normal=builder.createNode('mtlxnormalmap','normal_decode');normal.setNamedInput('in',image,'out')
+            normal=builder.createNode('mtlxnormalmap','normal_decode');normal.setNamedInput('in',image,'out');processors['normal']=normal
             shader.setNamedInput('normal',normal,'out')
         elif channel=='displacement':
             disp=next((n for n in builder.children() if builder_parent and n.type().name()=='mtlxdisplacement'),None)
             if disp is None:disp=builder.createNode('mtlxdisplacement',safe_name(label)+'_displacement')
+            processors['displacement']=disp
             disp.setNamedInput('displacement',image,'out');disp.parm('scale').set(.01)
             outputs=[n for n in builder.children() if n.type().name()=='subnetconnector' and n.parm('parmname') and n.parm('parmname').eval()=='displacement']
             if outputs and (builder_parent or not outputs[0].inputs()):outputs[0].setInput(0,disp)
@@ -73,7 +114,7 @@ def texture_material(parent, maps, label):
         multiply=builder.createNode('mtlxmultiply','base_color_ao');multiply.parm('signature').set('color3')
         if 'base_color' in images:multiply.setNamedInput('in1',images['base_color'],'out')
         else:multiply.parmTuple('in1').set((1,1,1))
-        multiply.setNamedInput('in2',images['ao'],'out');shader.setNamedInput('base_color',multiply,'out')
+        multiply.setNamedInput('in2',images['ao'],'out');shader.setNamedInput('base_color',multiply,'out');processors['ao']=multiply
     if not builder_parent:
         # Never replace an existing surface connection. Use an empty output only.
         outputs=[n for n in builder.children() if n.type().name()=='subnetconnector' and n.parm('parmname') and n.parm('parmname').eval()=='surface']
@@ -81,10 +122,13 @@ def texture_material(parent, maps, label):
             outputs[0].setInput(0,shader)
         else:
             hou.ui.setStatusMessage('MaterialX surface created; connect it to the builder output when needed.') if hou.isUIAvailable() else None
-    if builder_parent:builder.layoutChildren()
-    else:
-        for node in set(builder.children())-existing:
-            node.moveToGoodPosition(move_inputs=False,move_outputs=False,move_unconnected=False)
+    outputs={n.parm('parmname').eval():n for n in builder.children() if n.type().name()=='subnetconnector' and n.parm('parmname') and n.parm('parmname').eval() in ('surface','displacement')} if builder_parent else {}
+    extras=[n for n in builder.children() if n.type().name()=='subinput'] if builder_parent else []
+    if builder_parent:
+        # The template's own displacement node stays with its output when no height map is used.
+        spare=next((n for n in builder.children() if n.type().name()=='mtlxdisplacement' and n not in processors.values()),None)
+        if spare is not None:processors.setdefault('displacement',spare)
+    _layout_material(builder,[] if builder_parent else existing,None if builder_parent else origin,shader,uv,images,processors,extras,outputs)
     return result
 
 def import_into_context(path, kind, label, parent):
@@ -370,3 +414,41 @@ def register_catalog(usd_path, catalog_path, label, tags='', thumbnail='', backu
         source.endTransaction(False)
         raise
     return item, True
+
+
+def relink_catalog_paths(catalog_paths, moves, backup_dir=None):
+    """Point Asset Catalog entries at USD files that were moved. Returns entries updated."""
+    import hou, sqlite3
+    lookup = {core.path_key(old): new for old, new in moves}
+    updated = 0
+    for catalog in map(Path, catalog_paths):
+        if not catalog.is_file():
+            continue
+        source = hou.AssetGalleryDataSource(catalog.as_posix())
+        if not source.isValid() or source.isReadOnly():
+            continue
+        hits = []
+        for item in source.itemIds():
+            existing = source.filePath(item)
+            if existing and core.path_key(existing) in lookup:
+                hits.append((item, lookup[core.path_key(existing)]))
+        if not hits:
+            continue
+        folder = Path(backup_dir) if backup_dir else catalog.parent / 'backups'
+        folder.mkdir(parents=True, exist_ok=True)
+        backup = folder / (catalog.stem + '_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + catalog.suffix)
+        src = sqlite3.connect(str(catalog)); dst = sqlite3.connect(str(backup))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close(); src.close()
+        source.startTransaction()
+        try:
+            for item, new in hits:
+                source.setFilePath(item, Path(new).as_posix())
+            source.endTransaction(True)
+        except Exception:
+            source.endTransaction(False)
+            raise
+        updated += len(hits)
+    return updated

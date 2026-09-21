@@ -62,6 +62,49 @@ class DropTests(unittest.TestCase):
         dd.import_payloads(payloads,builder)
         self.assertEqual(builder.node('surface_output').input(0),original)
         self.assertTrue(all(n.position()==pos for n,pos in positions.items()))
+    def pbr_payloads(self,prefix='stone_1K_',channels=('albedo','normal','roughness','metallic','height','ao','opacity','emission')):
+        payloads=[]
+        for channel in channels:
+            path=self.root/(prefix+channel+'.tif');path.write_bytes(b'placeholder')
+            payloads.append({'path':str(path),'kind':'texture','label':path.stem})
+        return payloads
+
+    def test_material_layout_aligns_image_nodes_in_columns(self):
+        mat=self.lop.createNode('materiallibrary')
+        builder,=dd.import_payloads(self.pbr_payloads(),mat)
+        images=[n for n in builder.children() if n.type().name()=='mtlximage']
+        self.assertEqual(len(images),8);self.assertEqual(len({round(n.position()[0],4) for n in images}),1)
+        ys=sorted((n.position()[1] for n in images),reverse=True)
+        self.assertTrue(all(a-b>=images[0].size()[1] for a,b in zip(ys,ys[1:])),'images must not overlap')
+        self.assertEqual(len({round(a-b,4) for a,b in zip(ys,ys[1:])}),1)   # evenly spaced
+        # Same top-to-bottom order as the inputs of mtlxstandard_surface; displacement comes last.
+        order=[n.name() for n in sorted(images,key=lambda n:-n.position()[1])]
+        self.assertEqual(order,['base_color_image','ao_image','metalness_image','roughness_image','emission_image','opacity_image','normal_image','displacement_image'])
+        shader=next(n for n in builder.children() if n.type().name()=='mtlxstandard_surface')
+        slots=[shader.inputNames().index(x) for x in ('base_color','metalness','specular_roughness','emission_color','opacity','normal')]
+        self.assertEqual(slots,sorted(slots))
+        uv=next(n for n in builder.children() if n.type().name()=='mtlxtexcoord')
+        decode=builder.node('normal_decode');multiply=builder.node('base_color_ao');out=builder.node('surface_output')
+        x=lambda n:n.position()[0]
+        self.assertLess(x(uv),x(images[0]));self.assertLess(x(images[0]),x(decode));self.assertEqual(round(x(decode),4),round(x(multiply),4))
+        self.assertLess(x(decode),x(shader));self.assertLess(x(shader),x(out))
+        self.assertEqual(round(decode.position()[1],4),round(builder.node('normal_image').position()[1],4))   # beside its image
+
+    def test_material_layout_in_existing_builder_goes_below_and_keeps_nodes(self):
+        mat=self.lop.createNode('materiallibrary')
+        builder,=dd.import_payloads(self.pbr_payloads(),mat)
+        before={n:tuple(n.position()) for n in builder.children()}
+        dd.import_payloads(self.pbr_payloads('brick_2K_',('albedo','roughness','normal')),builder)
+        self.assertTrue(all(tuple(n.position())==pos for n,pos in before.items()))
+        added=[n for n in builder.children() if n not in before]
+        self.assertTrue(all(n.position()[1]<min(p[1] for p in before.values()) for n in added))
+        images=[n for n in added if n.type().name()=='mtlximage']
+        self.assertEqual(len({round(n.position()[0],4) for n in images}),1)
+        known=set(builder.children())
+        dd.import_payloads(self.pbr_payloads('wood_2K_',('albedo','roughness')),builder,hou.Vector2(20,-30))
+        uv=next(n for n in builder.children() if n not in known and n.type().name()=='mtlxtexcoord')
+        self.assertEqual(round(uv.position()[0],3),20.0)   # dropped at the cursor, still one aligned group
+
     def test_obj_stage_and_sop_drops(self):
         data={'kind':'model','path':str(self.obj),'label':'mesh'}
         geo=dd.import_payload(data,self.net);self.assertEqual(geo.type().name(),'geo')

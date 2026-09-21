@@ -4,6 +4,7 @@ Other applications' drags and Houdini's normal node drags are untouched.
 Plain text and file URLs are included for native parameter-field drops.
 """
 import json
+import os
 from pathlib import Path
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
@@ -11,6 +12,9 @@ from . import houdini_ops as ops
 from . import pbr
 
 MIME = 'application/x-nanakusa-asset'
+IDS_MIME = 'application/x-nanakusa-asset-ids'    # in-library moves onto folders
+FOLDER_MIME = 'application/x-nanakusa-folder'
+STACK_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1
 _filter = None
 
 def mime_data(path, kind, label):
@@ -23,9 +27,10 @@ def paths_text(paths):
     return ' '.join('"'+p+'"' if any(c.isspace() for c in p) else p for p in paths)
 
 
-def mime_data_many(items):
+def mime_data_many(items, ids=None):
     items=[dict(item,path=Path(item['path']).resolve().as_posix()) for item in items]
     mime = QtCore.QMimeData()
+    if ids:mime.setData(IDS_MIME, json.dumps(list(ids)).encode('utf-8'))
     mime.setText(paths_text([item['path'] for item in items]))
     mime.setUrls([QtCore.QUrl.fromLocalFile(item['path']) for item in items])
     mime.setData(MIME, json.dumps({'schema': 2, 'items':items}).encode('utf-8'))
@@ -80,12 +85,13 @@ def import_payloads(payloads, parent, position=None):
         try:
             nodes=[]
             if groups is not None:
-                for group in groups:nodes.append(ops.texture_material(parent,group['maps'],group['label']))
+                for i,group in enumerate(groups):nodes.append(ops.texture_material(parent,group['maps'],group['label'],position if i==0 else None))
             else:
                 for p in payloads:nodes.append(ops.import_into_context(p['path'],p['kind'],p['label'],parent))
             origin=position if position is not None else hou.Vector2(0,0)
             for i,node in enumerate(nodes):
-                node.setPosition(origin+hou.Vector2((i%5)*3,-(i//5)*2))
+                # A surface inside an existing builder was already laid out with its UV and images.
+                if node.type().name()!='mtlxstandard_surface':node.setPosition(origin+hou.Vector2((i%5)*3,-(i//5)*2))
                 node.setSelected(True,clear_all_selected=(i==0))
             output=nodes[-1]
             if len(nodes)>1 and parent.childTypeCategory() in (hou.lopNodeTypeCategory(),hou.sopNodeTypeCategory()):
@@ -130,6 +136,8 @@ class LibraryDropFilter(QtCore.QObject):
             hit=QtWidgets.QApplication.widgetAt(QtGui.QCursor.pos())
             widget=hit or obj
             while widget is not None:
+                if widget.property('nanakusaInternalDrop'):
+                    return False  # Folder tree of the library: moves assets, never imports.
                 if isinstance(widget,(QtWidgets.QLineEdit,QtWidgets.QTextEdit,QtWidgets.QPlainTextEdit)):
                     if event.type()==QtCore.QEvent.Type.Drop:
                         if isinstance(widget,QtWidgets.QLineEdit):
@@ -146,8 +154,13 @@ class LibraryDropFilter(QtCore.QObject):
                     return True
                 widget=widget.parentWidget() if isinstance(widget,QtWidgets.QWidget) else None
             pane=hou.ui.paneTabUnderCursor()
+            if pane is not None and pane.type()==hou.paneTabType.Parm:
+                return False  # Native parameter fields apply their own drop rules.
             if pane is None or pane.type()!=hou.paneTabType.NetworkEditor:
-                return False
+                # Scene View, main window and every other surface: do nothing. Without
+                # this Houdini treats the dropped file URL as a file to open.
+                event.ignore()
+                return True
             if native_overlay(pane,hit):return False
             if any(not can_import(pane.pwd(),p['kind']) for p in payloads):
                 event.ignore()
@@ -178,18 +191,185 @@ class AssetList(QtWidgets.QListWidget):
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
 
+    def expand(self, item):
+        """Rows an item stands for; the library widget expands a PBR stack into its images."""
+        return [item.data(QtCore.Qt.ItemDataRole.UserRole)]
+
     def startDrag(self, actions):
         items=self.selectedItems()
         if not items:return
         try:
-            payloads=[]
+            rows={}
             for item in items:
-                row=item.data(QtCore.Qt.ItemDataRole.UserRole)
-                payloads.append({'path':self.library.resolve(row),'kind':row['effective_kind'],'label':row['label']})
+                for row in self.expand(item):rows[row['id']]=row
+            payloads=[{'path':self.library.resolve(row),'kind':row['effective_kind'],'label':row['label']} for row in rows.values()]
         except Exception as exc:
             hou.ui.setStatusMessage(str(exc),severity=hou.severityType.Error)
             return
         drag=QtGui.QDrag(self)
-        drag.setMimeData(mime_data_many(payloads))
+        drag.setMimeData(mime_data_many(payloads,list(rows)))
         drag.setPixmap(items[0].icon().pixmap(96,96))
-        drag.exec(QtCore.Qt.DropAction.CopyAction)
+        tree=getattr(self,'folder_tree',None)
+        if tree is not None:tree.begin_tracking({'assets':list(rows)})
+        result=None
+        try:
+            # Copy stays the default for Houdini; only the folder tree accepts Move.
+            result=drag.exec(QtCore.Qt.DropAction.CopyAction|QtCore.Qt.DropAction.MoveAction,QtCore.Qt.DropAction.CopyAction)
+        finally:
+            if tree is not None:tree.end_tracking(result)
+
+
+class FolderTree(QtWidgets.QTreeWidget):
+    """Folder list that receives assets and folders dropped on it to reorganize them."""
+    dropped = QtCore.Signal(object, object)   # payload, target (root id, relative folder, root path)
+    dragStarted = QtCore.Signal()
+    dragFinished = QtCore.Signal()
+    ROLE = QtCore.Qt.ItemDataRole.UserRole
+
+    def __init__(self, validate, parent=None):
+        super().__init__(parent)
+        self.validate = validate  # callable(payload, target) -> bool
+        self.setProperty('nanakusaInternalDrop', True)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragDrop)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDropIndicatorShown(False)
+        self._hover = None
+        self._tracking = None
+        self._dropped = False
+        self._poll = QtCore.QTimer(self)
+        self._poll.setInterval(40)
+        self._poll.timeout.connect(self._follow)
+        self._expand = QtCore.QTimer(self)
+        self._expand.setSingleShot(True)
+        self._expand.setInterval(600)
+        self._expand.timeout.connect(self._expand_hover)
+
+    def mimeTypes(self):
+        return [IDS_MIME, FOLDER_MIME]
+
+    @staticmethod
+    def payload(mime):
+        if mime.hasFormat(IDS_MIME):
+            return {'assets': json.loads(bytes(mime.data(IDS_MIME)).decode('utf-8'))}
+        if mime.hasFormat(FOLDER_MIME):
+            return {'folders': json.loads(bytes(mime.data(FOLDER_MIME)).decode('utf-8'))}
+        return None
+
+    def startDrag(self, actions):
+        # Every selected folder travels; libraries and the fixed USD / Texture / 3DModel
+        # categories stay put, and all folders must belong to the same library.
+        chosen = [i.data(0, self.ROLE) for i in self.selectedItems()]
+        chosen = [d for d in chosen if d and '/' in d[1]]
+        if not chosen or len({d[0] for d in chosen}) > 1:
+            return
+        mime = QtCore.QMimeData()
+        mime.setData(FOLDER_MIME, json.dumps([{'root_id': d[0], 'rel': d[1]} for d in chosen]).encode('utf-8'))
+        drag = QtGui.QDrag(self)
+        drag.setMimeData(mime)
+        self.begin_tracking(self.payload(mime))
+        result = None
+        try:
+            result = drag.exec(QtCore.Qt.DropAction.MoveAction)
+        finally:
+            self.end_tracking(result)
+
+    # A drag that starts inside the library must still land on the tree when Qt does not
+    # deliver drag events to it (seen in docked panes until the cursor left and re-entered).
+    # While such a drag runs the cursor is followed directly; if nobody accepted the drop
+    # and the button was released over a folder, the move is performed from here.
+    def begin_tracking(self, payload):
+        self._tracking = payload
+        self._dropped = False
+        self._poll.start()
+        self.dragStarted.emit()
+
+    @staticmethod
+    def left_button_down():
+        # Qt keeps the pre-drag button state after an OS drag loop, so ask the OS on Windows.
+        if os.name == 'nt':
+            import ctypes
+            return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        return bool(QtWidgets.QApplication.mouseButtons() & QtCore.Qt.MouseButton.LeftButton)
+
+    def _tracked_item(self):
+        pos = self.viewport().mapFromGlobal(QtGui.QCursor.pos())
+        return self.itemAt(pos) if self.viewport().rect().contains(pos) else None
+
+    def _follow(self):
+        item = self._tracked_item()
+        data = item.data(0, self.ROLE) if item else None
+        self._set_hover(item if item is not None and data and self.validate(self._tracking, data) else None)
+
+    def end_tracking(self, result):
+        self._poll.stop()
+        payload, self._tracking = self._tracking, None
+        dropped, self._dropped = self._dropped, False
+        item = self._tracked_item()
+        self._set_hover(None)
+        self.dragFinished.emit()
+        if dropped or payload is None or item is None or result != QtCore.Qt.DropAction.IgnoreAction:
+            return
+        if self.left_button_down():
+            return  # Cancelled with Esc: the button is still down.
+        target = item.data(0, self.ROLE)
+        if target and target[1]:
+            self.dropped.emit(payload, target)
+
+    def _target(self, event):
+        item = self.itemAt(event.position().toPoint())
+        return item, (item.data(0, self.ROLE) if item else None)
+
+    def _set_hover(self, item):
+        if item is not self._hover:
+            self._hover = item
+            self.viewport().update()
+            self._expand.stop()
+            if item is not None and item.childCount() and not item.isExpanded():
+                self._expand.start()
+
+    def _expand_hover(self):
+        if self._hover is not None:
+            self._hover.setExpanded(True)
+
+    def dragEnterEvent(self, event):
+        self.dragMoveEvent(event)
+
+    def dragMoveEvent(self, event):
+        payload = self.payload(event.mimeData())
+        item, target = self._target(event)
+        bar = self.verticalScrollBar()
+        y = event.position().toPoint().y()
+        if y < 24:
+            bar.setValue(bar.value() - 8)
+        elif y > self.viewport().height() - 24:
+            bar.setValue(bar.value() + 8)
+        if payload is not None and target and self.validate(payload, target):
+            self._set_hover(item)
+            event.setDropAction(QtCore.Qt.DropAction.MoveAction)
+            event.accept()
+        else:
+            self._set_hover(None)
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._set_hover(None)
+        event.accept()
+
+    def dropEvent(self, event):
+        payload = self.payload(event.mimeData())
+        item, target = self._target(event)
+        self._set_hover(None)
+        if payload is None or not target or not self.validate(payload, target):
+            event.ignore()
+            return
+        event.setDropAction(QtCore.Qt.DropAction.MoveAction)
+        event.accept()
+        self._dropped = True
+        self.dropped.emit(payload, target)
+
+    def drawRow(self, painter, option, index):
+        super().drawRow(painter, option, index)
+        if self._hover is not None and index == self.indexFromItem(self._hover):
+            painter.fillRect(option.rect, QtGui.QColor(90, 150, 255, 90))

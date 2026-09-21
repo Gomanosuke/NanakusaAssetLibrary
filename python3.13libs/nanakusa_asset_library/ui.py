@@ -8,9 +8,10 @@ import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops, dragdrop, storage
+from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
+STACK_ROLE = dragdrop.STACK_ROLE   # ids of the assets a list item stands for
 KINDS = {'': 'All Types', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'}
 _windows = []
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
@@ -237,7 +238,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.thumb_failed = set()
         self.thumb_job = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={}
-        self.metadata_id=None;self.pending_tags=None
+        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.row_index={};self.entries=[];self.icon_cache={}
         dragdrop.install()
         self._setup()
         self.rebuild_tree()
@@ -289,12 +290,23 @@ class LibraryWidget(QtWidgets.QWidget):
         self.kind.currentIndexChanged.connect(self.reset_page)
         self.favorite = QtWidgets.QCheckBox('★ Favorites'); self.favorite.toggled.connect(self.reset_page)
         self.recursive = QtWidgets.QCheckBox('Include Subfolders'); self.recursive.setChecked(True); self.recursive.toggled.connect(self.reset_page)
-        filters.addWidget(self.search,1); filters.addWidget(self.kind); filters.addWidget(self.favorite)
+        self.stack = QtWidgets.QCheckBox('Stack PBR Sets'); self.stack.setChecked(bool(self.settings.get('stack_pbr',True)))
+        self.stack.setToolTip('Show the images of one PBR set (albedo, roughness, normal...) as a single item. Dragging a stack drags all of its images.')
+        self.stack.toggled.connect(self.stack_toggled)
+        filters.addWidget(self.search,1); filters.addWidget(self.kind); filters.addWidget(self.stack); filters.addWidget(self.favorite)
         outer.addLayout(filters)
         split = QtWidgets.QSplitter(); outer.addWidget(split,1)
         left = QtWidgets.QWidget(); leftbox=QtWidgets.QVBoxLayout(left); leftbox.setContentsMargins(0,0,0,0)
-        self.tree = QtWidgets.QTreeWidget(); self.tree.setHeaderLabel('Libraries / Folders')
-        self.tree.currentItemChanged.connect(self.reset_page); leftbox.addWidget(self.tree,1)
+        self.tree = dragdrop.FolderTree(self.can_drop); self.tree.setHeaderLabel('Libraries / Folders')
+        self.tree.setToolTip('Drop assets or folders here to move them. Ctrl / Shift-click selects several folders; drag them onto another folder to nest them.')
+        self.tree.dropped.connect(self.tree_dropped)
+        # Listing a folder can take a while; doing it inside the mouse press would freeze a drag
+        # that starts on the same folder. Wait briefly, and never while a drag is running.
+        self.folder_timer=QtCore.QTimer(self); self.folder_timer.setSingleShot(True); self.folder_timer.setInterval(120)
+        self.folder_timer.timeout.connect(self.reset_page); self.folder_dirty=False
+        self.tree.currentItemChanged.connect(lambda *a:self.folder_timer.start())
+        self.tree.dragStarted.connect(self.folder_drag_started); self.tree.dragFinished.connect(self.folder_drag_finished)
+        leftbox.addWidget(self.tree,1)
         folderbuttons=QtWidgets.QHBoxLayout()
         self._button('Libraries...', self.root_menu, folderbuttons); leftbox.addLayout(folderbuttons)
         leftbox.addWidget(QtWidgets.QLabel('Catalog'))
@@ -306,7 +318,7 @@ class LibraryWidget(QtWidgets.QWidget):
         leftbox.addWidget(self.catalogs)
         split.addWidget(left)
         center=QtWidgets.QWidget(); centerbox=QtWidgets.QVBoxLayout(center); centerbox.setContentsMargins(0,0,0,0)
-        self.items = dragdrop.AssetList(self.library); self.items.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
+        self.items = dragdrop.AssetList(self.library); self.items.expand=self.item_rows; self.items.folder_tree=self.tree; self.items.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
         self.items.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
         self.items.setMovement(QtWidgets.QListView.Movement.Static)
         self.items.setDragEnabled(True)
@@ -357,6 +369,10 @@ class LibraryWidget(QtWidgets.QWidget):
     def rebuild_tree(self):
         self.refresh_catalogs()
         selected=self.current_folder()
+        it=QtWidgets.QTreeWidgetItemIterator(self.tree); expanded=set()
+        while it.value():
+            if it.value().isExpanded() and it.value().data(0,ROLE):expanded.add(it.value().data(0,ROLE))
+            it+=1
         self.tree.blockSignals(True); self.tree.clear()
         allitem=QtWidgets.QTreeWidgetItem(['All Libraries']); self.tree.addTopLevelItem(allitem)
         chosen=allitem
@@ -367,10 +383,64 @@ class LibraryWidget(QtWidgets.QWidget):
                 parent=Path(rel).parent.as_posix(); parent='' if parent=='.' else parent
                 item=QtWidgets.QTreeWidgetItem([Path(rel).name]); value=(root['id'],rel,root['path']); item.setData(0,ROLE,value)
                 folders.get(parent,top).addChild(item); folders[rel]=item
+                item.setExpanded(value in expanded)
                 if value==selected:chosen=item
             if data==selected:chosen=top
             top.setExpanded(True)
         self.tree.setCurrentItem(chosen); self.tree.blockSignals(False)
+
+    def select_folder(self,value):
+        it=QtWidgets.QTreeWidgetItemIterator(self.tree)
+        while it.value():
+            if it.value().data(0,ROLE)==value:
+                parent=it.value().parent()
+                while parent is not None:parent.setExpanded(True);parent=parent.parent()
+                self.tree.setCurrentItem(it.value());self.tree.scrollToItem(it.value());return
+            it+=1
+
+    def dragged_rows(self,ids):
+        by_id={r['id']:r for r in self.rows}
+        return [by_id[i] for i in ids if i in by_id]
+
+    def can_drop(self,payload,target):
+        try:
+            if 'assets' in payload:organize.check_assets_target(self.dragged_rows(payload['assets']),target[0],target[1])
+            else:
+                folders=payload['folders']
+                if any(f['root_id']!=target[0] for f in folders):return False
+                for f in folders:organize.check_folder_target(target[2],f['rel'],target[1])
+        except (organize.MoveError,KeyError,ValueError,OSError):return False
+        return True
+
+    def tree_dropped(self,payload,target):
+        # The drag that started in the asset list is still unwinding; change the list afterwards.
+        QtCore.QTimer.singleShot(0,lambda:self.safe(lambda:self.organize_drop(payload,target)))
+
+    def organize_drop(self,payload,target):
+        if self.job and self.job.isRunning():raise ValueError('Wait for the scan to finish before moving assets.')
+        if self.thumb_pending:raise ValueError('Wait for thumbnail generation to finish (or use Libraries... > Cancel Thumbnails) before moving assets.')
+        self.save_metadata()
+        root_id,dest_rel,_=target;select=None
+        if 'assets' in payload:
+            result=organize.move_assets(self.library,self.dragged_rows(payload['assets']),dest_rel,self.data_dir)
+            message=f"Moved {result['moved']} asset(s) to {dest_rel}"
+        else:
+            result=organize.move_folders(self.library,root_id,[f['rel'] for f in payload['folders']],dest_rel,self.data_dir)
+            message=f"Moved {result['folders']} folder(s) ({result['moved']} assets) to {dest_rel}";select=(root_id,result['new_rel'],target[2])
+        try:
+            relinked=ops.relink_catalog_paths([self.catalogs.itemData(i) for i in range(self.catalogs.count())],result['catalog'],self.data_dir/'backups') if result['catalog'] else 0
+            if relinked:message+=f' / {relinked} Catalog entries updated'
+        except Exception as exc:message+=' / Catalog entries were not updated: '+str(exc)
+        self.info_cache.clear();self.info_key=None
+        self.rebuild_tree()
+        if select:self.select_folder(select)
+        self.refresh();self.status.setText(message+' (index backed up)')
+
+    def folder_drag_started(self):
+        self.folder_dirty=self.folder_timer.isActive();self.folder_timer.stop()
+
+    def folder_drag_finished(self):
+        if self.folder_dirty:self.folder_dirty=False;self.folder_timer.start(0)
 
     def reset_page(self,*args):
         self.page=0; self.refresh()
@@ -385,14 +455,47 @@ class LibraryWidget(QtWidgets.QWidget):
             if self.recursive.isChecked(): rows=[r for r in rows if not rel or r['relpath'].startswith(rel+'/')]
             else:
                 rows=[r for r in rows if (Path(r['relpath']).parent.parent.as_posix() if core.is_usd_package(r) else Path(r['relpath']).parent.as_posix())==rel or (core.is_usd_package(r) and Path(r['relpath']).parent.as_posix()==rel)]
-        self.rows=rows
-        pages=max(1,(len(rows)+self.PAGE_SIZE-1)//self.PAGE_SIZE); self.page=min(self.page,pages-1)
+        self.rows=rows;self.row_index={r['id']:r for r in rows}
+        self.entries=pbr.stack_entries(rows,self.stack.isChecked())
+        pages=max(1,(len(self.entries)+self.PAGE_SIZE-1)//self.PAGE_SIZE); self.page=min(self.page,pages-1)
         self.items.clear()
-        for row in rows[self.page*self.PAGE_SIZE:(self.page+1)*self.PAGE_SIZE]:
+        for entry in self.entries[self.page*self.PAGE_SIZE:(self.page+1)*self.PAGE_SIZE]:
+            row=entry['rep'];members=entry['rows']
             icon=self.icon_for(row)
-            item=QtWidgets.QListWidgetItem(icon, ('★ ' if row['favorite'] else '')+row['label']+'\n'+KINDS[row['effective_kind']])
-            item.setData(ROLE,row); item.setToolTip(row['relpath']); self.items.addItem(item)
-        self.page_label.setText(f'{len(rows)} assets  ·  {self.page+1} / {pages}')
+            if len(members)>1:icon=self.stacked_icon(icon,len(members))
+            item=QtWidgets.QListWidgetItem(icon,self.item_text(members,row,entry['label']))
+            item.setData(ROLE,row);item.setData(STACK_ROLE,[m['id'] for m in members])
+            item.setToolTip(row['relpath'] if len(members)==1 else f"{entry['label']}: {', '.join(entry['channels'])}")
+            self.items.addItem(item)
+        stacked=len(self.entries)!=len(rows)
+        self.page_label.setText((f'{len(self.entries)} items ({len(rows)} assets)' if stacked else f'{len(rows)} assets')+f'  ·  {self.page+1} / {pages}')
+
+    def item_text(self,members,rep,label=None):
+        favorite=any(m['favorite'] for m in members)
+        if len(members)>1:return ('★ ' if favorite else '')+(label or rep['label'])+f'\nPBR set · {len(members)} images'
+        return ('★ ' if favorite else '')+rep['label']+'\n'+KINDS[rep['effective_kind']]
+
+    def item_rows(self,item):
+        """The assets a list item stands for: one row, or every image of a stack."""
+        rows=[self.row_index[i] for i in (item.data(STACK_ROLE) or []) if i in self.row_index]
+        return rows or [item.data(ROLE)]
+
+    def stacked_icon(self,icon,count):
+        """Card pile with a count badge, so a stack is recognisable at a glance."""
+        out=QtGui.QPixmap(256,256);out.fill(QtCore.Qt.GlobalColor.transparent)
+        painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        for x,y in ((32,16),(16,32)):
+            painter.setPen(QtGui.QPen(QtGui.QColor(160,160,160),2));painter.setBrush(QtGui.QColor(72,72,72))
+            painter.drawRoundedRect(x,y,208,208,6,6)
+        painter.drawPixmap(0,48,icon.pixmap(208,208))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(30,120,90));painter.drawEllipse(166,198,50,50)
+        font=painter.font();font.setBold(True);font.setPixelSize(24);painter.setFont(font)
+        painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(166,198,50,50),QtCore.Qt.AlignmentFlag.AlignCenter,str(count));painter.end()
+        return QtGui.QIcon(out)
+
+    def stack_toggled(self,checked):
+        self.settings['stack_pbr']=bool(checked)
+        self.safe(self.save_settings);self.reset_page()
 
     def turn_page(self,delta):
         self.page=max(0,self.page+delta); self.refresh()
@@ -426,8 +529,16 @@ class LibraryWidget(QtWidgets.QWidget):
     def icon_for(self,row):
         path=self.thumbnail_path(row)
         if path:
+            try:key=(str(path),path.stat().st_mtime_ns)
+            except OSError:key=None
+            if key in self.icon_cache:return self.icon_cache[key]
             pix=square_preview(path,256)
-            if pix is not None:return QtGui.QIcon(pix)
+            if pix is not None:
+                icon=QtGui.QIcon(pix)
+                if key is not None:
+                    if len(self.icon_cache)>=300:self.icon_cache.pop(next(iter(self.icon_cache)))
+                    self.icon_cache[key]=icon
+                return icon
         self.queue_thumbnail(row)
         pix=QtGui.QPixmap(144,144); pix.fill(QtGui.QColor({'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}[row['effective_kind']]))
         painter=QtGui.QPainter(pix); painter.setPen(QtGui.QColor('#eeeeee')); painter.drawText(pix.rect(),QtCore.Qt.AlignmentFlag.AlignCenter,row['effective_kind'].upper()); painter.end()
@@ -439,52 +550,67 @@ class LibraryWidget(QtWidgets.QWidget):
         return item.data(ROLE)
 
     def selected_rows(self):
-        rows=[item.data(ROLE) for item in self.items.selectedItems()]
+        rows={}
+        for item in self.items.selectedItems():
+            for row in self.item_rows(item):rows[row['id']]=row
         if not rows:raise ValueError('Select one or more assets.')
-        return rows
+        return list(rows.values())
 
     def selection_changed(self,*args):
         self.safe(self.save_metadata)
         if not self.items.currentItem():
-            self.preview.clear();self.info.clear();self.stats.clear();self.metadata_id=None
+            self.preview.clear();self.info.clear();self.stats.clear();self.metadata_id=None;self.metadata_ids=[]
             self.tags.clear();self.tags.setEnabled(False);self.star.setEnabled(False)
             self.info_key=None;self.info_pending=None
             if self.info_job:self.info_job.requestInterruption()
             self.status.setText('Select assets. Ctrl / Shift: multi-select.'); return
-        row=self.selected()
+        row=self.selected();members=self.item_rows(self.items.currentItem())
         thumb=self.thumbnail_path(row)
         pix=square_preview(thumb,1024) if thumb else None
         self.preview.setPixmap(pix if pix is not None else self.icon_for(row).pixmap(512,512))
         display_path=Path(row['relpath']).parent.as_posix() if core.is_usd_package(row) else row['relpath']
-        self.info.setText(f"{row['label']}\n{KINDS[row['kind']]} | {row['size']/1048576:.2f} MB")
-        self.info.setToolTip(f"{row['root_label']} / {display_path}")
-        self.metadata_id=row['id'];self.tags.setEnabled(True);self.star.setEnabled(True)
-        self.tags.setText(row['tags']);self.star.blockSignals(True);self.star.setChecked(bool(row['favorite']));self.star.blockSignals(False)
+        if len(members)>1:
+            entry=next((e for e in self.entries if e['rep']['id']==row['id']),None)
+            label=entry['label'] if entry else row['label'];channels=', '.join(entry['channels']) if entry else ''
+            self.info.setText(f"{label}\nPBR set: {len(members)} images | {sum(m['size'] for m in members)/1048576:.2f} MB\n{channels}")
+            self.info.setToolTip(f"{row['root_label']} / {Path(row['relpath']).parent.as_posix()}")
+        else:
+            self.info.setText(f"{row['label']}\n{KINDS[row['kind']]} | {row['size']/1048576:.2f} MB")
+            self.info.setToolTip(f"{row['root_label']} / {display_path}")
+        self.metadata_id=row['id'];self.metadata_ids=[m['id'] for m in members];self.tags.setEnabled(True);self.star.setEnabled(True)
+        words=list(dict.fromkeys(w for m in members for w in m['tags'].split()))
+        self.tags.setText(' '.join(words) if len(members)>1 else row['tags'])
+        self.star.blockSignals(True);self.star.setChecked(all(m['favorite'] for m in members));self.star.blockSignals(False)
         self.request_info(row)
-        self.status.setText(f'{len(self.items.selectedItems())} selected | Ctrl / Shift: multi-select | Drag to a field or network')
+        count=len(self.items.selectedItems())
+        self.status.setText(f'{count} selected | Ctrl / Shift: multi-select | Drag to a field or network')
 
     def save_metadata(self):
         if self.pending_tags is None:return
-        aid,value=self.pending_tags
-        self.library.update(aid,tags=value);self.update_metadata_rows(aid,tags=value)
+        ids,value=self.pending_tags
+        for aid in ids:
+            self.library.update(aid,tags=value);self.update_metadata_rows(aid,tags=value)
         self.pending_tags=None;self.status.setText('Tags saved.')
 
     def tags_edited(self,value):
-        if self.metadata_id:self.pending_tags=(self.metadata_id,value)
+        if self.metadata_ids:self.pending_tags=(list(self.metadata_ids),value)
 
     def save_favorite(self,checked):
-        if self.metadata_id:
-            self.library.update(self.metadata_id,favorite=int(checked))
-            self.update_metadata_rows(self.metadata_id,favorite=int(checked))
+        for aid in self.metadata_ids:
+            self.library.update(aid,favorite=int(checked))
+            self.update_metadata_rows(aid,favorite=int(checked))
 
     def update_metadata_rows(self,aid,**changes):
         for row in self.rows:
             if row['id']==aid:row.update(changes)
         for i in range(self.items.count()):
-            item=self.items.item(i);row=item.data(ROLE)
-            if row['id']==aid:
-                row.update(changes);item.setData(ROLE,row)
-                item.setText(('★ ' if row['favorite'] else '')+row['label']+'\n'+KINDS[row['effective_kind']])
+            item=self.items.item(i);ids=item.data(STACK_ROLE) or []
+            if aid in ids:
+                rep=item.data(ROLE)
+                if rep['id']==aid:rep.update(changes);item.setData(ROLE,rep)
+                members=self.item_rows(item)
+                entry=next((e for e in self.entries if e['rep']['id']==rep['id']),None)
+                item.setText(self.item_text(members,rep,entry['label'] if entry else None))
 
     def request_info(self,row):
         path=Path(row['root_path'])/row['relpath']
