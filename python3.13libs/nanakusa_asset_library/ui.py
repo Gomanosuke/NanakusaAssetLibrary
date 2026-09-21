@@ -295,6 +295,8 @@ class LibraryWidget(QtWidgets.QWidget):
         left = QtWidgets.QWidget(); leftbox=QtWidgets.QVBoxLayout(left); leftbox.setContentsMargins(0,0,0,0)
         self.tree = QtWidgets.QTreeWidget(); self.tree.setHeaderLabel('Libraries / Folders')
         self.tree.currentItemChanged.connect(self.reset_page); leftbox.addWidget(self.tree,1)
+        folderbuttons=QtWidgets.QHBoxLayout()
+        self._button('Libraries...', self.root_menu, folderbuttons); leftbox.addLayout(folderbuttons)
         leftbox.addWidget(QtWidgets.QLabel('Catalog'))
         self.catalogs=QtWidgets.QComboBox()
         self.catalogs.setToolTip('USD registration target. Right-click to open, select or create a catalog.')
@@ -302,8 +304,6 @@ class LibraryWidget(QtWidgets.QWidget):
         self.catalogs.customContextMenuRequested.connect(self.catalog_menu)
         self.catalogs.currentIndexChanged.connect(self.catalog_changed)
         leftbox.addWidget(self.catalogs)
-        folderbuttons=QtWidgets.QHBoxLayout()
-        self._button('Libraries...', self.root_menu, folderbuttons); leftbox.addLayout(folderbuttons)
         split.addWidget(left)
         center=QtWidgets.QWidget(); centerbox=QtWidgets.QVBoxLayout(center); centerbox.setContentsMargins(0,0,0,0)
         self.items = dragdrop.AssetList(self.library); self.items.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
@@ -750,7 +750,8 @@ class LibraryWidget(QtWidgets.QWidget):
                 except ValueError:label=str(path)
                 self.catalogs.addItem(label+(' (new)' if not path.exists() else ''),str(path))
                 self.catalogs.setItemData(self.catalogs.count()-1,str(path),QtCore.Qt.ItemDataRole.ToolTipRole)
-            self.catalogs.setCurrentIndex(self.catalogs.findData(str(current)))
+            selected=next((i for i in range(self.catalogs.count()) if core.path_key(self.catalogs.itemData(i))==core.path_key(current)),-1)
+            self.catalogs.setCurrentIndex(selected)
         self.catalogs.blockSignals(False)
 
     def use_catalog(self,path):
