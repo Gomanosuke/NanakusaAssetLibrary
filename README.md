@@ -3,7 +3,7 @@
 Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
 Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
-現在のバージョンは **0.4.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+現在のバージョンは **0.5.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
 
 ## コードとデータの分離
 
@@ -21,7 +21,7 @@ PC固有の設定、SQLiteインデックス、タグ、画像素材の縮小キ
 <library-location>/
   asset/                              # USD / Texture / 3DModel
   data/                               # settings.json、library.sqlite3、thumbnails/
-  backups/                            # 移行・変更前の保全
+    backups/                          # インストール・DB更新・変更前の保全
 ```
 
 `data`のSQLiteは各PCのローカルディスクで管理し、複数PCから同じDBへ同時に書き込まないでください。
@@ -105,11 +105,19 @@ USDのパッケージ内は「Libraries... → New Folder...」の対象外で�
 
 ## GUIと複数選択
 
-GUIは英語です。通常は検索・分類・お気に入り・フォルダー・Import Selected・Copy Pathsを表示します。
-ライブラリーの追加や再リンクは「Libraries...」、メタデータ・サムネイル・読み込み設定・Catalogは「Details」から開きます。
+GUIは英語です。右側には大きな正方形プレビューと素材情報を常時表示します。
+素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
+ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
 Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで表示ページ内を全選択できます。
 D&D・Copy Paths・Generate Selected Thumbnailsは選択した全素材が対象です。
-メタデータ保存・任意サムネイル指定・Publishはactive asset（最後に選んだ1件）が対象です。
+右側の編集項目はTagsとFavoriteのみで、active asset（最後に選んだ1件）が対象です。
+TagsはEnterまたは入力欄から離れた時に保存し、Favoriteは切り替え時に保存します。
+任意サムネイル指定・Publishは1件選択時の右クリックメニューに表示します。
+
+画像は解像度・チャンネル数・画素型、モデルとUSDはポリゴン数・ポイント数・メッシュ数などを表示します。
+形状の数値は最初のフレームで読み込まれたUSD Meshの面数（非三角化）です。ボリュームは個数を表示します。
+情報取得は別プロセスのhythonで行い、作業HIPを変更しません。画像はヘッダーだけを読みます。
+結果はメモリー内に保持し、Rescanで破棄します。読み込み不能や60秒を超える処理は情報欄にエラーを表示します。
 
 ## D&D
 
@@ -171,9 +179,9 @@ USDの配置は[Component Builder](https://www.sidefx.com/docs/houdini/solaris/c
 USD仕様全体で必須のファイル名という意味ではありません。既存の`thumbnail.jpg`も認識します。
 素材の隣へ書き込める権限が必要です。生成失敗時は既存サムネイルを保持します。
 
-USD・3DModelは「Details → Generate Selected Thumbnails」で作成できます。
-「Generate Missing Thumbnails」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
-既存サムネイルがある素材は一括生成でスキップします。「Cancel Thumbnails」で待機分を解除できます。
+USD・3DModelは右クリックの「Generate Selected Thumbnails」で作成できます。
+「Libraries... → Generate Missing Thumbnails」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
+既存サムネイルがある素材は一括生成でスキップします。「Libraries... → Cancel Thumbnails」で待機分を解除できます。
 
 形状のサムネイルは別プロセスのhythonとKarma CPUで512×512にレンダリングします。
 形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
@@ -184,9 +192,10 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
 
 ## USD / Asset Catalog
 
-USDを選択して「Details → Add USD to Catalog」でHoudini Asset Catalogのデータベースへ登録できます。
-同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `_catalog` に保存します（素材分類としては表示しません）。
-「Publish Static USD...」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
+USDを選択して右クリックの「Add Catalog」でHoudini Asset Catalogのデータベースへ登録できます。
+複数のUSDをまとめて登録できます。同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `_catalog` に保存します（素材分類としては表示しません）。
+DB更新前のバックアップは`data/backups`へ保存します。
+右クリックの「Publish Static USD...」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
 外部依存を持つUSDを他PCへ渡すときは、その依存ファイルと相対パスも保ってください。
 
 ## 検証
@@ -204,8 +213,9 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.4.0ではHoudini 22.0.447 / Windowsで33件のテストが通過しました。
+0.5.0ではHoudini 22.0.447 / Windowsで36件のテストが通過しました。
 保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
+画像・形状の情報取得、右クリック項目、タグ・お気に入り保存、バックアップ先も検証しています。
 検証結果はこのバージョン時点の記録です。変更後は影響するテストと実際の利用経路を確認してください。
 
 ## 実装の構成
@@ -219,6 +229,7 @@ hython -m unittest discover -s tests
 | `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定 |
 | `pbr.py` | ファイル名によるPBR用途・セットの判定 |
 | `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
+| `asset_info.py` | 別プロセスの画像・形状情報取得 |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成 |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。

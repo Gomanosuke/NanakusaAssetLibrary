@@ -329,7 +329,7 @@ def export_stage(node, destination):
         raise
     return p
 
-def register_catalog(usd_path, catalog_path, label, tags='', thumbnail=''):
+def register_catalog(usd_path, catalog_path, label, tags='', thumbnail='', backup_dir=None):
     import hou
     p = Path(usd_path)
     if p.suffix.lower() not in core.USD:
@@ -348,7 +348,9 @@ def register_catalog(usd_path, catalog_path, label, tags='', thumbnail=''):
     if catalog.exists():
         # Back up through SQLite to include committed WAL state.
         import sqlite3
-        backup = catalog.with_name(catalog.stem + '_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + catalog.suffix)
+        folder=Path(backup_dir) if backup_dir else catalog.parent/'backups'
+        folder.mkdir(parents=True,exist_ok=True)
+        backup = folder / (catalog.stem + '_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + catalog.suffix)
         src = sqlite3.connect(str(catalog)); dst = sqlite3.connect(str(backup))
         try:
             src.backup(dst)

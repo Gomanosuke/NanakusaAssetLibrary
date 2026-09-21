@@ -15,6 +15,56 @@ KINDS = {'': 'All Types', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'
 _windows = []
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
 
+class AssetInfoJob(QtCore.QThread):
+    done=QtCore.Signal(object,object)
+
+    def __init__(self,key,path,kind):
+        super().__init__();self.key,self.path,self.kind=key,path,kind
+
+    def run(self):
+        result={}
+        try:
+            executable=Path(hou.getenv('HFS'))/'bin'/('hython.exe' if os.name=='nt' else 'hython')
+            process=subprocess.Popen([str(executable),str(Path(__file__).with_name('asset_info.py')),str(self.path),self.kind],
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+            started=time.monotonic()
+            try:
+                while True:
+                    if self.isInterruptionRequested():return
+                    if time.monotonic()-started>60:raise RuntimeError('Information read timed out')
+                    try:
+                        out,err=process.communicate(timeout=.1);break
+                    except subprocess.TimeoutExpired:pass
+                lines=[line[9:] for line in out.decode('utf-8',errors='replace').splitlines() if line.startswith('NAL_INFO:')]
+                if not lines:raise RuntimeError(err.decode(errors='replace')[-500:] or 'Could not read asset information')
+                result=json.loads(lines[-1])
+            finally:
+                if process.poll() is None:process.kill();process.communicate()
+        except Exception as exc:result={'error':str(exc)}
+        self.done.emit(self.key,result)
+
+
+class LargePreview(QtWidgets.QWidget):
+    def __init__(self,parent=None):
+        super().__init__(parent);self.pixmap=None
+        self.setMinimumSize(180,180)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,QtWidgets.QSizePolicy.Policy.Expanding)
+
+    def sizeHint(self):return QtCore.QSize(400,400)
+
+    def setPixmap(self,pixmap):self.pixmap=pixmap;self.update()
+
+    def clear(self):self.pixmap=None;self.update()
+
+    def paintEvent(self,event):
+        painter=QtGui.QPainter(self)
+        if self.pixmap is None:
+            painter.drawText(self.rect(),QtCore.Qt.AlignmentFlag.AlignCenter,'Select an asset');return
+        edge=min(self.width(),self.height())
+        target=QtCore.QRect((self.width()-edge)//2,(self.height()-edge)//2,edge,edge)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawPixmap(target,self.pixmap)
+
 def square_preview(path, edge):
     """Fit without stretching, cropping or baking black bars into the image."""
     reader=QtGui.QImageReader(str(path))
@@ -186,6 +236,8 @@ class LibraryWidget(QtWidgets.QWidget):
         self.thumb_pending = set()
         self.thumb_failed = set()
         self.thumb_job = None
+        self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={}
+        self.metadata_id=None;self.pending_tags=None
         dragdrop.install()
         self._setup()
         self.rebuild_tree()
@@ -223,7 +275,7 @@ class LibraryWidget(QtWidgets.QWidget):
         title = QtWidgets.QLabel('NanakusaAssetLibrary  /  Karma XPU')
         title.setStyleSheet('font-size: 17px; font-weight: bold; padding: 6px;')
         heading.addWidget(title); heading.addStretch()
-        self.more=QtWidgets.QToolButton(); self.more.setText('Details'); self.more.setCheckable(True); heading.addWidget(self.more)
+        self.more=QtWidgets.QToolButton(); self.more.setText('Options'); self.more.setCheckable(True); heading.addWidget(self.more)
         self.scan_button = self._button('Rescan', self.scan, heading)
         self.cancel_button = self._button('Cancel', self.cancel_scan, heading); self.cancel_button.setVisible(False)
         outer.addLayout(heading)
@@ -258,34 +310,26 @@ class LibraryWidget(QtWidgets.QWidget):
         self.items.currentItemChanged.connect(self.selection_changed)
         self.items.itemSelectionChanged.connect(self.selection_changed)
         self.items.itemDoubleClicked.connect(lambda item: self.safe(self.import_selected))
+        self.items.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.items.customContextMenuRequested.connect(self.asset_menu)
         centerbox.addWidget(self.items,1)
         nav=QtWidgets.QHBoxLayout(); self._button('Previous',lambda:self.turn_page(-1),nav)
         self.page_label=QtWidgets.QLabel(); nav.addWidget(self.page_label,1)
         self._button('Next',lambda:self.turn_page(1),nav); centerbox.addLayout(nav)
         split.addWidget(center)
-        details=QtWidgets.QWidget(); details.setMinimumWidth(280)
+        details=QtWidgets.QWidget(); details.setMinimumWidth(250)
         db=QtWidgets.QVBoxLayout(details)
-        self.preview=QtWidgets.QLabel('Select an asset'); self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumHeight(240)
-        db.addWidget(self.preview)
+        self.preview=LargePreview();db.addWidget(self.preview,1)
         self.info=QtWidgets.QLabel(); self.info.setWordWrap(True); self.info.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse); db.addWidget(self.info)
-        metadata_note=QtWidgets.QLabel('Metadata applies to the active asset only.'); metadata_note.setWordWrap(True); db.addWidget(metadata_note)
+        self.stats=QtWidgets.QLabel(); self.stats.setWordWrap(True);self.stats.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse);db.addWidget(self.stats)
         form=QtWidgets.QFormLayout(); db.addLayout(form)
-        self.label=QtWidgets.QLineEdit(); form.addRow('Label',self.label)
         self.tags=QtWidgets.QLineEdit(); self.tags.setPlaceholderText('wood outdoor red'); form.addRow('Tags',self.tags)
-        self.override=QtWidgets.QComboBox(); self.override.addItem('From Folder',None)
-        self.override.setEnabled(False); form.addRow('Type',self.override)
-        self.star=QtWidgets.QCheckBox('Favorites'); form.addRow('',self.star)
-        self._button('Save Metadata',self.save_metadata,db)
-        self._button('Choose Thumbnail...',self.choose_thumbnail,db)
-        self._button('Generate Selected Thumbnails',self.generate_thumbnail,db)
-        self._button('Generate Missing Thumbnails',self.generate_missing_thumbnails,db)
-        self._button('Cancel Thumbnails',self.cancel_thumbnails,db)
-        self._button('Show in Explorer',self.reveal,db)
-        db.addStretch()
-        detail_scroll=QtWidgets.QScrollArea();detail_scroll.setWidgetResizable(True);detail_scroll.setWidget(details)
-        detail_scroll.setMinimumWidth(320)
-        split.addWidget(detail_scroll); split.setSizes([230,600,270])
-        detail_scroll.setVisible(False); self.more.toggled.connect(detail_scroll.setVisible)
+        self.tags.setToolTip('Press Enter or leave the field to save tags for the active asset.')
+        self.tags.textEdited.connect(self.tags_edited);self.tags.editingFinished.connect(lambda:self.safe(self.save_metadata))
+        self.star=QtWidgets.QCheckBox('Favorite'); form.addRow('',self.star)
+        self.star.toggled.connect(lambda checked:self.safe(lambda:self.save_favorite(checked)))
+        self.tags.setEnabled(False);self.star.setEnabled(False)
+        split.addWidget(details);split.setSizes([200,550,400]);split.setStretchFactor(1,2);split.setStretchFactor(2,1)
         self.advanced=QtWidgets.QWidget(); advanced=QtWidgets.QVBoxLayout(self.advanced); advanced.setContentsMargins(0,0,0,0)
         advanced.addWidget(self.recursive)
         destrow=QtWidgets.QHBoxLayout()
@@ -296,16 +340,7 @@ class LibraryWidget(QtWidgets.QWidget):
         advanced.addLayout(destrow)
         assignrow=QtWidgets.QHBoxLayout(); assignrow.addWidget(QtWidgets.QLabel('Material Prim Pattern (optional)'))
         self.assign=QtWidgets.QLineEdit(); self.assign.setPlaceholderText('/assets/chair/**'); assignrow.addWidget(self.assign,1); advanced.addLayout(assignrow)
-        actions=QtWidgets.QHBoxLayout()
-        self._button('Import Selected',self.import_selected,actions)
-        self._button('Copy Paths',self.copy_path,actions)
-        catalog_actions=QtWidgets.QHBoxLayout()
-        self._button('Add USD to Catalog',self.add_catalog,catalog_actions)
-        self._button('Publish Static USD...',self.publish_asset,catalog_actions)
-        self._button('Open Catalog',self.open_catalog,catalog_actions)
-        advanced.addLayout(catalog_actions)
         outer.addWidget(self.advanced); self.advanced.setVisible(False); self.more.toggled.connect(self.advanced.setVisible)
-        outer.addLayout(actions)
         self.status=QtWidgets.QLabel('Drop: Model / USD to a network | Texture to fields or material networks'); self.status.setWordWrap(True); outer.addWidget(self.status)
 
     def current_folder(self):
@@ -401,19 +436,100 @@ class LibraryWidget(QtWidgets.QWidget):
         return rows
 
     def selection_changed(self,*args):
+        self.safe(self.save_metadata)
         if not self.items.currentItem():
-            self.preview.clear(); self.info.clear(); self.status.setText('Select assets. Ctrl / Shift: multi-select.'); return
+            self.preview.clear();self.info.clear();self.stats.clear();self.metadata_id=None
+            self.tags.clear();self.tags.setEnabled(False);self.star.setEnabled(False)
+            self.info_key=None;self.info_pending=None
+            if self.info_job:self.info_job.requestInterruption()
+            self.status.setText('Select assets. Ctrl / Shift: multi-select.'); return
         row=self.selected()
-        self.preview.setPixmap(self.icon_for(row).pixmap(240,240))
+        thumb=self.thumbnail_path(row)
+        pix=square_preview(thumb,1024) if thumb else None
+        self.preview.setPixmap(pix if pix is not None else self.icon_for(row).pixmap(512,512))
         display_path=Path(row['relpath']).parent.as_posix() if row['kind']=='usd' else row['relpath']
-        self.info.setText(f"{row['root_label']} / {display_path}\n{row['size']/1048576:.2f} MB")
-        self.label.setText(row['label']); self.tags.setText(row['tags']); self.star.setChecked(bool(row['favorite']))
-        self.override.setCurrentIndex(max(0,self.override.findData(row['override_kind'])))
+        self.info.setText(f"{row['label']}\n{KINDS[row['kind']]} | {row['size']/1048576:.2f} MB")
+        self.info.setToolTip(f"{row['root_label']} / {display_path}")
+        self.metadata_id=row['id'];self.tags.setEnabled(True);self.star.setEnabled(True)
+        self.tags.setText(row['tags']);self.star.blockSignals(True);self.star.setChecked(bool(row['favorite']));self.star.blockSignals(False)
+        self.request_info(row)
         self.status.setText(f'{len(self.items.selectedItems())} selected | Ctrl / Shift: multi-select | Drag to a field or network')
 
     def save_metadata(self):
-        row=self.selected(); self.library.update(row['id'],label=self.label.text().strip() or row['label'],tags=self.tags.text(),favorite=int(self.star.isChecked()),override_kind=self.override.currentData())
-        self.refresh(); self.status.setText('Metadata saved. Source files are unchanged.')
+        if self.pending_tags is None:return
+        aid,value=self.pending_tags
+        self.library.update(aid,tags=value);self.update_metadata_rows(aid,tags=value)
+        self.pending_tags=None;self.status.setText('Tags saved.')
+
+    def tags_edited(self,value):
+        if self.metadata_id:self.pending_tags=(self.metadata_id,value)
+
+    def save_favorite(self,checked):
+        if self.metadata_id:
+            self.library.update(self.metadata_id,favorite=int(checked))
+            self.update_metadata_rows(self.metadata_id,favorite=int(checked))
+
+    def update_metadata_rows(self,aid,**changes):
+        for row in self.rows:
+            if row['id']==aid:row.update(changes)
+        for i in range(self.items.count()):
+            item=self.items.item(i);row=item.data(ROLE)
+            if row['id']==aid:
+                row.update(changes);item.setData(ROLE,row)
+                item.setText(('★ ' if row['favorite'] else '')+row['label']+'\n'+KINDS[row['effective_kind']])
+
+    def request_info(self,row):
+        path=Path(row['root_path'])/row['relpath']
+        try:
+            stat=path.stat();key=(str(path),stat.st_mtime_ns,stat.st_size)
+        except OSError:
+            self.stats.setText('Source file unavailable');self.info_key=None;return
+        if key==self.info_key:return
+        self.info_key=key
+        self.info_pending=None
+        if self.info_job:self.info_job.requestInterruption()
+        if key in self.info_cache:
+            self.show_info(self.info_cache[key]);return
+        self.stats.setText('Reading asset information...')
+        self.info_pending=(key,path,row['kind'])
+        if not self.info_job:self.next_info()
+
+    def next_info(self):
+        if self.info_job or not self.info_pending:return
+        self.info_job=AssetInfoJob(*self.info_pending);self.info_pending=None
+        self.info_job.done.connect(self.info_done);self.info_job.finished.connect(self.info_finished)
+        _keep_job(self.info_job)
+
+    def info_finished(self):self.info_job=None;self.next_info()
+
+    def info_done(self,key,result):
+        self.info_cache[key]=result
+        if key==self.info_key:self.show_info(result)
+
+    def show_info(self,result):
+        self.stats.setText('Information unavailable: '+result['error'] if 'error' in result else '\n'.join(f'{name}: {value}' for name,value in result['info'].items()))
+
+    def asset_menu(self,position):
+        item=self.items.itemAt(position)
+        if item is None:return
+        if not item.isSelected():self.items.setCurrentItem(item,QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        else:self.items.setCurrentItem(item,QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+        menu=self.build_asset_menu()
+        try:menu.exec(self.items.viewport().mapToGlobal(position))
+        finally:menu.deleteLater()
+
+    def build_asset_menu(self):
+        rows=self.selected_rows();menu=QtWidgets.QMenu(self)
+        def action(label,callback):menu.addAction(label,lambda:self.safe(callback))
+        action('Import Selected',self.import_selected);action('Copy Paths',self.copy_path)
+        action('Show in Explorer',self.reveal)
+        if all(row['kind']=='usd' for row in rows):action('Add Catalog',self.add_catalog)
+        menu.addSeparator()
+        action('Generate Selected Thumbnails',self.generate_thumbnail)
+        if len(rows)==1:
+            action('Choose Thumbnail...',self.choose_thumbnail)
+            action('Publish Static USD...',self.publish_asset)
+        return menu
 
     def add_root(self):
         path=QtWidgets.QFileDialog.getExistingDirectory(self,'Library Root Folder',self.default_root)
@@ -446,6 +562,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def scan_done(self,results):
         self.scan_button.setEnabled(True); self.cancel_button.setVisible(False)
+        self.info_cache.clear()
         self.rebuild_tree(); self.refresh()
         messages=[]
         for name,result in results:
@@ -473,6 +590,10 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addAction('Use Library for USD / Catalog Output',lambda:self.safe(self.set_publish_root))
         menu.addAction('Remove Library Registration...',lambda:self.safe(self.remove_root))
         menu.addAction('Back Up Index',lambda:self.status.setText(str(self.library.backup_index())))
+        menu.addSeparator()
+        menu.addAction('Generate Missing Thumbnails',lambda:self.safe(self.generate_missing_thumbnails))
+        menu.addAction('Cancel Thumbnails',lambda:self.safe(self.cancel_thumbnails))
+        menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
         menu.exec(QtGui.QCursor.pos())
 
     def set_publish_root(self):
@@ -503,12 +624,12 @@ class LibraryWidget(QtWidgets.QWidget):
             self.library.backup_index(); self.library.remove_root(folder[0]); self.rebuild_tree(); self.refresh()
 
     def reveal(self):
-        if self.items.currentItem():path=self.library.resolve(self.selected()).parent
+        if self.items.selectedItems():paths=list(dict.fromkeys(self.library.resolve(row).parent for row in self.selected_rows()))
         else:
             folder=self.current_folder()
             if not folder:raise ValueError('Select a folder.')
-            path=core.inside(folder[2],folder[1])
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+            paths=[core.inside(folder[2],folder[1])]
+        for path in paths:QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
 
     def choose_thumbnail(self):
         row=self.selected(); path,_=QtWidgets.QFileDialog.getOpenFileName(self,'Thumbnail Image',str(self.library.resolve(row).parent),'Images (*.png *.jpg *.jpeg)')
@@ -602,11 +723,15 @@ class LibraryWidget(QtWidgets.QWidget):
         return Path(self.default_root)/'_catalog'/'solaris_assets.db'
 
     def add_catalog(self):
-        row=self.selected(); path=self.library.resolve(row)
-        thumb=self.thumbnail_path(row)
-        item,added=ops.register_catalog(path,self.catalog_path(),row['label'],row['tags'],str(thumb) if thumb else '')
-        self.status.setText(('Added to Catalog: ' if added else 'Already registered: ')+row['label'])
-        return item
+        rows=self.selected_rows()
+        if any(row['kind']!='usd' for row in rows):raise ValueError('Select USD assets only.')
+        items=[]
+        for row in rows:
+            path=self.library.resolve(row);thumb=self.thumbnail_path(row)
+            item,added=ops.register_catalog(path,self.catalog_path(),row['label'],row['tags'],str(thumb) if thumb else '',backup_dir=self.data_dir/'backups')
+            items.append(item)
+        self.status.setText(f'Catalog ready: {len(items)} USD assets (existing entries kept).')
+        return items
 
     def open_catalog(self):
         path=self.catalog_path()

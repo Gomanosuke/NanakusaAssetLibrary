@@ -235,7 +235,9 @@ class Library:
 
     def backup_index(self):
         from datetime import datetime
-        p = self.data_dir / ('index_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.sqlite3')
+        folder = self.data_dir / 'backups'
+        folder.mkdir(parents=True, exist_ok=True)
+        p = folder / ('index_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.sqlite3')
         with self.connect() as source:
             target = sqlite3.connect(str(p))
             try:
