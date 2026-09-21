@@ -3,7 +3,7 @@
 ## 作業範囲
 
 - Houdini 22 / Solaris向けのPython Panel。材質はKarma XPU向けMaterialXを基本とする。
-- 利用方法と現行仕様はREADME.mdを参照する。名称はNanakusaAssetLibrary、Pythonモジュール名はnanakusa_asset_library。
+- 現行仕様・実装の構成・検証方法はdocs/SPEC.md、利用者向けの説明はREADME.mdを参照する。README.mdは利用者向けに書き、実装の詳細・テスト・移行手順はdocs/SPEC.mdへ置く。名称はNanakusaAssetLibrary、Pythonモジュール名はnanakusa_asset_library。
 - 作業開始時にgit statusと関連差分を確認し、ユーザーの未コミット変更を保持する。
 - サブエージェントはユーザーが明示的に依頼した場合のみ使用する。
 - 個人PCの絶対パス、実素材名、ダウンロード素材、設定、DB、画像、HIPをGitに入れない。例とテストには汎用名・合成データを使う。
@@ -98,5 +98,5 @@
 - 共有するコードとドキュメントだけをcommitする。push前に差分と追跡対象を確認する。
 - 本体の移動後はpackage JSONとGitHub Desktop等の参照先を更新する。データ移行と既存登録の再リンクを混同しない。
 - pushした場合はremoteのブランチSHAとローカルHEADの一致を確認する。
-- READMEの保存先、UI名、対応動作を変更内容と揃える。個別PCの導入記録はリポジトリ外へ保存する。
+- docs/SPEC.mdとREADME.md（利用者向けの表現）の保存先、UI名、対応動作を変更内容と揃える。個別PCの導入記録はリポジトリ外へ保存する。
 - 報告は変更点、検証結果、残る制限を簡潔に述べる。実行していない検証を完了扱いにしない。

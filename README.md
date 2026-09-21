@@ -1,314 +1,216 @@
 # NanakusaAssetLibrary
 
-Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
-Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
+Houdini 22（Solaris / Karma XPU）向けの、プロジェクトをまたいで使えるアセットブラウザーです。
+USD・3Dモデル・テクスチャを1つのパネルで探して、ドラッグ&ドロップでシーンに取り込めます。
 
-現在のバージョンは **0.8.2** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+現在のバージョン: **0.8.2**
 
-## コードとデータの分離
+## できること
 
-このGitリポジトリーはコード、ドキュメント、合成データを使うテストだけを含みます。
-アセットは独立した任意のフォルダーに置き、画面またはインストーラーから指定します。
-PC固有の設定、SQLiteインデックス、タグ、画像素材の縮小キャッシュは、指定した`data`フォルダーに保存します。
-モデルとUSDのサムネイルは素材と一緒に共有できるよう、素材の隣に保存します。
-`NAL_DATA_DIR` で保存先、`NAL_ASSET_ROOT` で初回のアセットルートを指定することもできます。
-これらのデータと素材はGitに含めません。
+- **一覧・検索**: USD / 3Dモデル / テクスチャをサムネイル付きで一覧し、名前・パス・タグで検索できます。タグとお気に入りを付けられます。
+- **ドラッグ&ドロップで取り込み**: Solaris（stage）、obj / SOP、パラメーター欄、材質ネットワークへ落とすだけで、適切なノードを作ります。複数素材の一括ドロップも1回のUndoで戻せます。
+- **PBRテクスチャからマテリアル作成**: albedo / roughness / normal などをまとめてドロップすると、MaterialXのマテリアルを整理されたレイアウトで自動生成します。
+- **PBRセットのスタック表示**: 同じ素材の複数画像を1つのアイコンにまとめて表示できます（ON / OFF可）。
+- **フォルダー整理**: パネル内で素材やフォルダーを別のフォルダーへドラッグして移動できます。サムネイル・タグ・お気に入りも一緒に移ります。
+- **サムネイル自動生成**: USDと3Dモデルは、Karma（CPU）で見栄えの良いサムネイルを作ります。
+- **Asset Catalog登録**: USDをHoudiniのAsset Catalogへ登録できます。
 
-推奨する配置例です。コードのclone先と素材の保存先は独立させてください。
+## 動作環境
 
-```text
-<code-location>/NanakusaAssetLibrary/    # Git管理する本体
-<library-location>/
-  asset/                              # USD / Texture / 3DModel
-  data/                               # settings.json、library.sqlite3、thumbnails/
-    backups/                          # インストール・DB更新・変更前の保全
-```
+- Houdini 22.0（動作確認: 22.0.447 / Windows 11）。他のOSやバージョンは未検証です。
+- インストールにはPython 3.10以上（またはHoudiniのhython）を使います。
+- 形状のサムネイルとプレビュー情報の取得には、Houdini / Karmaを利用できるライセンスが必要です。
+- 素材ファイルは、このリポジトリとは別の好きな場所に置きます（このリポジトリには素材を含みません）。
 
-`data`のSQLiteは各PCのローカルディスクで管理し、複数PCから同じDBへ同時に書き込まないでください。
-素材と素材の隣のサムネイルは共有できます。
+## インストール
 
-## インストール・別PCでの開発
-
-1. このリポジトリーを任意の場所にcloneします。
-2. Houdiniの作業を保存してから、Python 3.10以上またはHoudini 22のhythonで実行します。
+1. このリポジトリを好きな場所にcloneするか、ZIPで展開します。素材を置く場所とは別のフォルダーにしてください。
+2. Houdiniで作業中のシーンを保存してから、Houdiniを終了します。
+3. 次のコマンドを実行します（hythonまたはPython 3.10以上）。
 
 ```text
-python install.py --prefs "<Houdiniのユーザー設定フォルダー>" --library "<アセットルート>" --data "<データフォルダー>"
+python install.py --prefs "<Houdiniのユーザー設定フォルダー>" --library "<素材フォルダー>" --data "<データフォルダー>"
 ```
 
-3. Houdiniを再起動し、Python Panelのメニューから **NanakusaAssetLibrary** を開きます。
-   Shelfのボタン、または以下でも開けます。
+| 引数 | 意味 |
+|---|---|
+| `--prefs` | Houdiniのユーザー設定フォルダー。通常は `Documents\houdini22.0` です。 |
+| `--library` | 素材を置く（または置いてある）フォルダー。省略して、あとからパネルで登録することもできます。 |
+| `--data` | 設定・タグ・索引・バックアップを保存するフォルダー。省略すると、素材フォルダーと同じ階層の `data` になります。 |
+
+4. Houdiniを起動し、Python Panelのメニューから **NanakusaAssetLibrary** を開きます。シェルフのボタンからも開けます。
 
 ```python
 import nanakusa_asset_library
 nanakusa_asset_library.show()
 ```
 
-`--data`を省略するとアセットルートと同じ階層の`data`を使用します。
-`--library`を省略して画面から登録することもできます。その場合は`--data`を指定してください。
-両方省略した場合はOSのユーザーアプリデータ領域を使用し、HoudiniのDocumentsフォルダーにはキャッシュを作りません。
-インストーラーはコードの場所と`NAL_DATA_DIR`を指定する
-`packages/nanakusa_asset_library.json` を作成します。既存設定は日時付きでバックアップします。
-コードを移動した場合は再インストールしてください。
-別PCではそのPCの素材ルートを指定します。同じ素材階層を共有しても、インデックスは各PCで保持できます。
-コード変更はGitでcommit/pushし、別PCでpull後にHoudiniを再起動します。
-旧版の `packages/solaris_asset_library.json` がある場合は、バックアップして無効化してください。
+- **更新**: `git pull` してからHoudiniを再起動します。リポジトリのフォルダーを移動した場合は、インストールをやり直してください。
+- **アンインストール**: `<prefs>/packages/nanakusa_asset_library.json` を削除します。素材とデータは削除されません。
 
-### 既存環境の移行
-
-1. Houdiniを保存して終了し、コード・package JSON・既存dataをバックアップします。
-2. 本体フォルダー名を変更する場合は`.git`を含むフォルダー全体を移動します。
-3. dataを移す場合は、`settings.json`・`library.sqlite3`・キャッシュをまとめて移します。
-   インストーラーは既存dataの自動移動を行いません。
-4. 既存インデックスを引き継ぐ場合は、新しい本体から`--prefs`と移動先の`--data`だけを指定してインストーラーを再実行します。
-   この段階では`--library`で移動先を追加登録しないでください。
-5. Houdiniを起動し、素材ルートを移した場合は既存の登録を「Libraries... → Relink Library...」で再リンクします。
-   同じ素材を追加登録するだけでは、旧登録のタグやお気に入りは引き継がれません。
-6. 再スキャンして素材と保存先を確認します。GitHub Desktopで本体が見つからない場合はLocateで新しいclone先を指定します。
-
-package JSONの`path`が本体、`env`の`NAL_DATA_DIR`がdataの指定です。
-古い場所を参照していないことを確認してから、旧フォルダーを整理してください。
-
-## 固定の分類とフォルダー
-
-ルート直下のアセット分類は次の3つに固定です。それぞれの下に整理用フォルダーを作れます。
+推奨する配置の例です。
 
 ```text
-<asset-root>/
+<好きな場所>/NanakusaAssetLibrary/     # このリポジトリ
+<素材の場所>/
+  asset/                              # 素材（USD / Texture / 3DModel）
+  data/                               # 設定・タグ・索引（各PCで持つ）
+```
+
+`data` 内のデータベースは、各PCのローカルディスクに置いてください。複数のPCから同じデータベースへ同時に書き込まないでください。
+素材とサムネイルは共有できます。
+
+## 素材フォルダーの作り方
+
+素材フォルダーの直下は、次の3つの分類に固定です。その下は自由に整理できます。
+
+```text
+asset/
   USD/
     Props/
       Chair/
-        Chair.usd
+        Chair.usd          # フォルダーと同じ名前のファイルが入口
         thumbnail.png
-        payload.usdc
         textures/
-  Texture/
-    HDR/
-    PBR/
-    Decal/
   3DModel/
     Props/
       Mesh.fbx
-      Mesh_thumbnail.png
+  Texture/
+    PBR/
+      stone_1K_albedo.tif
+    HDR/
 ```
 
-- **USD**: フォルダーと同名の `.usd` / `.usdc` / `.usda` / `.usdz` を入口として検出し、
-  パッケージの親フォルダーを1件表示します。内部のUSDレイヤーやテクスチャは表示しません。
-  複数の入口がある場合は上記の拡張子順です。同名の入口がないフォルダーは整理用フォルダーとして走査します。
-  例外として単体の`.usdz`はUSD直下や整理用フォルダー内からファイル名で表示します。展開は不要です。
-- **3DModel**: `.obj`, `.fbx`, `.vdb`, `.bgeo`, `.bgeo.sc`, `.geo`, `.geo.sc`, `.abc`, `.glb`, `.stl`, `.ply`。
-  形状を単一ファイルから読める形式が対象です。FBXの外部画像や元の材質は再構築しません。
-- **Texture**: PNG、JPEG、TIFF、HDR、EXRなどの画像。HDRやデカールもこの分類に置きます。
+- **USD**: フォルダーと同じ名前の `.usd / .usdc / .usda / .usdz` を入口として、フォルダー全体を1つの素材として表示します。単体の `.usdz` も表示されます。
+- **3DModel**: `.obj .fbx .abc .glb .stl .ply .vdb .bgeo(.sc) .geo(.sc)` など、1つのファイルで形状を読める形式です。FBXの外部画像や元の材質は再構築しません。
+- **Texture**: PNG・JPEG・TIFF・HDR・EXRなどの画像です。
 
-素材を追加したら「Rescan」を押してください。スキャンは元ファイルの移動・改名・削除をしません。
-USDのパッケージ内は「Libraries... → New Folder...」の対象外です。UDIM・シーケンスの自動集約はありません。
-ルート移動後は「Libraries... → Relink Library...」で再リンクできます。HIP内の既存パスは書き換えません。
+素材を追加したら、右上の **Rescan** を押してください。スキャンは読み取りだけで、素材ファイルを変更しません。
 
-## フォルダー整理（移動）
+## 画面の使い方
 
-左側のフォルダーツリーへドロップして、素材とフォルダーの階層を整理できます。
-Explorerでの手動移動は不要です。
+- **左**: ライブラリーとフォルダーのツリー、**Libraries...** ボタン（ライブラリーの追加・再リンクなど）、**Catalog** 選択欄。
+- **中央**: 素材の一覧。
+- **右**: 大きなプレビュー、素材情報（ポリゴン数・解像度など）、タグ、お気に入り。
+- **上**: 検索、種類フィルター、**Stack PBR Sets**、★Favorites、Options、Rescan。
 
-- **素材の移動**: 素材一覧から左のフォルダーへドラッグします。複数選択も対応です。
-- **フォルダーの移動**: 左のフォルダーを別のフォルダーへドラッグすると、中の素材ごと入れ子にします。
-  例: `Texture/PBR/Misc/<セット名>_1K` を `Texture/PBR/Masonry` へ。
-  Ctrl / Shiftクリックで複数のフォルダーを選び、まとめて移動できます（全部成功するか、何も変わらないかのどちらかです）。
-  選択したフォルダーの中にあるフォルダーは、親と一緒に移動します。深い階層は、ドラッグ中に重ねると自動で開きます。
-- 移動できるのは同じ分類の中だけです（USDはUSD、3DModelは3DModel、TextureはTexture）。
-  USD / Texture / 3DModelの各分類フォルダー自体は移動できません。別のライブラリーへの移動もできません。
-- USDパッケージは、入口USDのあるフォルダーごと移動します（内部の`thumbnail.png`や`textures`も一緒）。
-  パッケージの中へは、素材もフォルダーも入れられません。
-- サムネイルは素材と一緒に移ります（`<名前>_thumbnail.png/.jpg`、`<名前>.preview.jpg`）。
-  同名の別素材が同じサムネイルを使っている場合は、コピーして元を残します。
-  Textureのサムネイルは`data/thumbnails`のキャッシュで、素材IDに紐づくため移動不要です。
-  「Choose Thumbnail...」で指定した画像も、一緒に移動した場合は指定先を更新します。
-- タグ・お気に入り・メモは素材IDに保存しているため、移動後も保持します。Rescanしても引き継ぎます。
-- 移動先に同名のファイル・フォルダーがある場合は、上書きせずにエラーにして何も変更しません。
-- 途中で失敗した場合は、移動済みのファイルを元に戻し、インデックスも変更しません。
-- 移動のたびにインデックスを`data/backups`へバックアップします。
-- USDを移動すると、Asset Catalog内の同じUSDのパスも、Catalogフォルダー内の全DBについて更新します（更新前のDBを`data/backups`へ保存）。
-- フォルダーを選んだ時の一覧更新は、マウスを押した瞬間ではなく120ms後に行い、ドラッグ中は止めます（ドラッグ後に実行）。
-  一覧の更新が遅いと、押した直後のドラッグが効かなくなるためです。一覧のアイコンは再利用します。
-- スキャン中、またはサムネイル生成の待機中は移動できません。
-- 素材一覧やフォルダーから左のツリーへドラッグして離した位置が、ツリーのフォルダー上だった場合は、
-  Qtのドラッグイベントがツリーに届かなくても移動を実行します（Escで取り消した場合は何もしません）。
+### 選択と操作
 
-移動しても、HIPファイルやUSDレイヤーに書かれた既存のパスは書き換えません。
-別の場所のUSDからこの素材を参照している場合は、参照先を更新してください。
-USDパッケージが自分の外側（`../`）のファイルを相対パスで参照している場合は、階層が変わると壊れることがあります。
+- `Ctrl` + クリックで追加選択、`Shift` + クリックで範囲選択、`Ctrl+A` で表示中の全選択です。
+- 素材を右クリックすると、**Import Selected**（取り込み）、**Copy Paths**、**Show in Explorer**、サムネイル生成などのメニューが出ます。USDには **Add Catalog** も出ます。
+- **Ctrl + マウス中ボタンをドラッグ**すると、アイコンの大きさを変えられます（右・上へ動かすと大きく、左・下へ動かすと小さく。64〜512px）。大きさは保存されます。
+- タグは入力してEnterを押すか、入力欄から離れると保存されます。お気に入りはチェックを切り替えた時に保存されます。タグとお気に入りは、最後に選んだ素材（スタックなら全画像）に付きます。
 
-## PBRセットのスタック表示
+### PBRセットのスタック表示
 
-Textureの一覧では、同じ素材の画像（albedo・roughness・normalなど）を1つのスタックにまとめて表示します。
-フィルター行の「Stack PBR Sets」で切り替えられます。設定は保存され、次回も引き継ぎます。
+同じフォルダーにある、同じ素材の画像（albedo・roughness・normalなど）を1つのアイコンにまとめます。
+カードを重ねた見た目と、右下の枚数バッジが目印です。フィルターの **Stack PBR Sets** で ON / OFF できます。
 
-- 同じフォルダーで、ファイル名からチャンネル名を除いた部分（解像度を含む）が同じ画像を、1つのセットとして扱います。
-  例: `TCom_Various_HighRise_1K_albedo.tif`、`..._ao.tif`、`..._normal.tif`。
-  チャンネル名は、ファイル名の最後に現れるものを使います（`Metal_Plate_normal`はnormalとして扱います）。
-- 2枚以上あり、チャンネルが重複しないセットだけがスタックになります。1K / 2Kは別のスタックです。
-  同じチャンネルの画像が2枚あるフォルダー（例: `.tif`と`.png`）は、曖昧なのでスタックにしません。
-- スタックはカードを重ねたアイコンと枚数バッジで表示します。ベースカラー画像が代表サムネイルになります。
-- スタックを選ぶと、含まれるすべての画像が選択された扱いになります。
-  D&D、Import Selected、Copy Paths、サムネイル生成、フォルダーへの移動は、全画像が対象です。
-  材質階層へ落とすと、PBRセット1つ分のMaterialXを作成します。
-- タグとお気に入りはスタックの全画像へ同時に保存します（表示は全画像のタグの和集合です）。
-- 検索やお気に入りで一部の画像だけが残った場合は、残った画像だけでスタックを作ります。
+- スタックを選ぶと、全画像を選んだ扱いになります。ドラッグ、取り込み、パスのコピー、サムネイル生成、フォルダーへの移動は、すべての画像が対象です。
+- 材質ネットワークへドロップすると、1つのマテリアルが作られます。
+- 画像の名前は、`素材名_1K_albedo.tif` のように、最後にチャンネル名が付いている形を想定しています。1K / 2Kなど解像度が違うものは別のスタックです。同じチャンネルの画像が2枚あるフォルダーはスタックにしません。
 
-## GUIと複数選択
+## ドラッグ&ドロップ
 
-GUIは英語です。右側には大きな正方形プレビューと素材情報を常時表示します。
-素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
-ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
-Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで表示ページ内を全選択できます。
-素材一覧でCtrl+マウス中ボタンをドラッグすると、アイコンサイズを変更できます（右・上へ動かすと大きく、左・下へ動かすと小さくなります。64〜512px）。
-サイズは`settings.json`に保存し、次回も引き継ぎます。256pxを超える場合は、鮮明に表示するため一覧を作り直します。
-D&D・Copy Paths・Generate Selected Thumbnailsは選択した全素材が対象です。
-右側の編集項目はTagsとFavoriteのみで、active asset（最後に選んだ1件）が対象です。
-TagsはEnterまたは入力欄から離れた時に保存し、Favoriteは切り替え時に保存します。
-任意サムネイル指定・Publishは1件選択時の右クリックメニューに表示します。
+素材を一覧からドラッグして、次の場所へ落とします。
 
-画像は解像度・チャンネル数・画素型、モデルとUSDはポリゴン数・ポイント数・メッシュ数などを表示します。
-形状の数値は最初のフレームで読み込まれたUSD Meshの面数（非三角化）です。ボリュームは個数を表示します。
-情報取得は別プロセスのhythonで行い、作業HIPを変更しません。画像はヘッダーだけを読みます。
-結果はメモリー内に保持し、Rescanで破棄します。読み込み不能や60秒を超える処理は情報欄にエラーを表示します。
-
-## D&D
-
-| 素材 | ドロップ先 | 動作 |
+| 素材 | 落とす場所 | 結果 |
 |---|---|---|
-| 3DModel | stage / LOPネットワーク | SOP Createと形式別の読み込みSOP |
-| 3DModel | obj / SOPネットワーク | Geometry内の読み込みSOP、または読み込みSOP |
+| 3Dモデル | stage / LOPネットワーク | SOP Createと形式に合った読み込みSOP |
+| 3Dモデル | obj / SOPネットワーク | Geometry内の読み込みSOP |
 | USD | stage / LOPネットワーク | Reference LOP |
 | USD | obj / SOPネットワーク | USD Import SOP |
-| 全種類 | テキスト入力欄（Network ViewのPパラメーターを含む） | ファイルパスを入力 |
-| Texture | Material Library / MaterialX Builderなどの材質階層 | UVを明示接続したMaterialX ImageとStandard Surface |
+| すべて | 文字列の入力欄（パラメーターなど） | ファイルパス |
+| テクスチャ | Material Library / MaterialX Builder | UV付きのMaterialXマテリアル |
 
-複数素材のD&Dは1つのUndoで戻せます。LOP / SOPにはMergeを作り、読み込んだ全素材を表示します。
-複数パスのテキストはスペース区切り（空白を含むパスは引用符付き）です。
-1ファイルだけを受け付けるパラメーターには、1素材ずつドロップしてください。Houdiniのネイティブ入力欄ではその欄の標準D&D規則に従います。
-Import Selectedの複数読み込みも同じ一括処理です。USDはReference、既存LOPへの自動接続とPrim割り当て設定は単体読み込み専用です。
+- 複数の素材をまとめて落とすと、1回のUndoで戻せます。LOP / SOPではMergeを作って全素材を表示します。
+- 複数のパスは、スペース区切りで入力されます（空白を含むパスは引用符付き）。1つのファイルしか受け付けない欄には、1素材ずつ落としてください。
+- Scene Viewなど、ドロップ先として想定していない場所に落としても、何も起きません。
+- テクスチャを通常のstageやobjに落としても、ノードは作りません。材質ネットワークか、入力欄に落としてください。
+- Import Selected（右クリック）でも、同じ取り込みができます。単体のUSDでは、Options で取り込み先・Reference / Sublayer・Prim割り当てを指定できます。
 
-Scene Viewなど、ドロップ先として想定していない場所へ落としても何も起きません（Houdiniがファイルを開こうとして保存確認が出ることはありません）。
-パラメーターのネイティブ入力欄と文字列入力欄だけは、パスを受け取ります。
-Textureを通常のstageやobjへ落としてもノードは作りません。
-既存Builder内では新しいSurfaceを作成し、既存の出力接続は保持します。必要に応じて新しいSurfaceを出力へ接続してください。
-生成したノードは、左から「UV → Image → 変換ノード（法線・AO乗算・Displacement）→ Standard Surface → 出力」の列に整理します。
-Imageノードは全て同じx座標で等間隔に縦に並び、上から`base_color`・`ao`・`metalness`・`roughness`・`emission`・`opacity`・`normal`の順（Standard Surfaceの入力順）、一番下が`displacement`です。変換ノードは元のImageの横に置きます。
-既存のBuilderへ追加する場合は、既存ノードを動かさず、その下に同じ形で配置します。
-色画像はsRGB、HDR/EXRはlinear Rec.709、ノーマル・粗さなどのデータ画像はRawに設定します。
-FBXはFBX Skin Import、ABCはAlembic、GLBはglTF、VDB等はFile SOPで読み込みます。
+## PBRテクスチャからマテリアルを作る
 
-### PBR画像の自動接続
+同じ素材の画像を材質ネットワークにまとめて落とすと、MaterialXのマテリアルを1セット作ります。ファイル名のチャンネル名で、自動的に接続先を決めます。
 
-同じフォルダーの同じセット名を持つ画像をまとめて材質階層へD&Dすると、MaterialXを1セット生成します。
-例: `stone_1K_albedo.tif`, `stone_1K_roughness.tif`, `stone_1K_normal.tif`。
-画像すべてのtexcoord入力は、セット内の1つのMtlX Texcoordノードを共有します。
-
-| 命名トークン例 | 接続先 |
+| ファイル名に含まれる語 | 接続先 |
 |---|---|
 | albedo / basecolor / diffuse | base_color |
 | roughness / rough | specular_roughness |
 | metallic / metalness | metalness |
-| normal / normalgl / nor_gl | MtlX Normal Map → normal |
-| height / displacement / disp | MtlX Displacement（初期scale 0.01） |
+| normal / normalgl / nor_gl | Normal Map → normal |
+| height / displacement / disp | Displacement |
 | ao / ambient_occlusion | ベースカラーに乗算 |
 | opacity / alpha | opacity |
 | emission / emissive | emission_color |
 
-区切り文字は `_`・`-`・`.`・空白に対応し、大小文字は区別しません。1K / 2K等はセット名から除外します。
-用途名を判定できない画像は、個別のベースカラー材質として扱います。
-同一チャンネルの解像度違い等を同時選択した場合は、曖昧な接続を避けるためエラーにします。
-NormalはOpenGL形式を前提とし、DirectXと判定した画像は変換を求めます。Packed ORMの分解・UDIMの集約は対象外です。
-既存Builderの出力が接続済みなら保持するので、新しいSurfaceやDisplacementは必要に応じて接続してください。
+- 区切り文字は `_ - . ` と空白で、大文字・小文字は区別しません。名前の中にチャンネル名と同じ語が入っていても、**最後に出てくる語**をチャンネルとして扱います。
+- 色の画像はsRGB、HDR / EXRはlinear Rec.709、法線・粗さなどのデータ画像はRawで読み込みます。
+- ノードは左から「UV → Image → 変換 → Standard Surface → 出力」の順に整理します。Imageノードは同じ縦の列に、Standard Surfaceの入力順（base_color・ao・metalness・roughness・emission・opacity・normal）で並び、displacementが一番下です。
+- 既存のBuilderへ落とした場合は、既存のノードを動かさず、その下に追加します。出力への接続も勝手に付け替えないので、必要なら手で接続してください。
+- 法線マップはOpenGL形式を想定しています。DirectX形式と判定した画像はエラーになります（変換してください）。
+- Packed ORMの分解と、UDIMの自動まとめには対応していません。
 
-## プレビューとサムネイル
+## フォルダー・素材の整理
 
-TIFF・HDR・EXRはHoudini付属の画像変換ツールで縮小し、`data/thumbnails`へ保存します。
-一覧と詳細プレビューは正方形です。画像の縦横比を保持し、非正方形の画像の余白は透明にします。
-元画像に黒い帯を追加したり、引き延ばしたりしません。画像表示は近似色です。
+Explorerで動かさなくても、パネルの中で階層を整理できます。
 
-| 種類 | 生成画像の保存先 |
-|---|---|
-| 3DModel | 元ファイルと同じフォルダーの`<モデル名>_thumbnail.png` |
-| USDパッケージ | 入口USDと同じフォルダーの`thumbnail.png` |
-| 単体USDZ | 元ファイルと同じフォルダーの`<ファイル名>_thumbnail.png`（複数ファイルの衝突防止） |
-| Texture | `data/thumbnails` |
+- **素材の移動**: 一覧から左のフォルダーへドラッグします。複数選択やスタックも移動できます。
+- **フォルダーの移動**: 左のフォルダーを、別のフォルダーへドラッグします。`Ctrl` / `Shift` クリックで複数のフォルダーを選び、まとめて移動できます。
+- サムネイル・タグ・お気に入りは、素材と一緒に移動します。
+- 移動先に同じ名前があると、上書きせずにエラーになり、何も変更しません。途中で失敗したときは元に戻ります。
+- 移動できるのは、同じ分類（USD / 3DModel / Texture）の中だけです。USDパッケージの中へは入れられません。
+- 移動のたびに、索引を `data/backups` へバックアップします。
+- USDを移動すると、Asset Catalogに登録済みのパスも更新します。
 
-USDの配置は[Component Builder](https://www.sidefx.com/docs/houdini/solaris/component_builder.html)の出力と同じ規約です。
-USD仕様全体で必須のファイル名という意味ではありません。既存の`thumbnail.jpg`も認識します。
-素材の隣へ書き込める権限が必要です。生成失敗時は既存サムネイルを保持します。
+注意: HIPファイルやUSDレイヤーに書かれた、すでに使用中の素材へのパスは書き換わりません。
+移動した素材をシーンから参照している場合は、参照先を更新してください。
 
-USD・3DModelは右クリックの「Generate Selected Thumbnails」で作成できます。
-「Libraries... → Generate Missing Thumbnails」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
-既存サムネイルがある素材は一括生成でスキップします。「Libraries... → Cancel Thumbnails」で待機分を解除できます。
+## サムネイル
 
-形状のサムネイルは別プロセスのhythonとKarma CPUで512×512にレンダリングします。
-屋外HDRI（`meadow_2_8k.exr`）のDome Light（Exposure -0.5、上方向軸まわりに-30度回転＝Houdiniの回転0, -30, 0）と、Exposure 1のDistant Lightを配置します。
-HDRIは背景には映りません。
-HDRIはライブラリーのフォルダーから独立させるため、本体の`python3.13libs/nanakusa_asset_library/resources/`にコピーして使います。
-容量が大きい（約92MB）ためGitには含めません（`*.exr`は除外）。別のPCでも同じファイルをこのフォルダーへコピーしてください。
-ファイルがない場合は、Houdini初期値の白いDome Light（Exposure 0）で生成します。
-USDの上方向軸（Y-up / Z-up）は、構図とライティングに反映します。
-既存のサムネイルには、右クリックのGenerate Selected Thumbnailsを実行して更新してください。
-形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
-GPUを占有せず4 CPUスレッドを使います。Houdini / Karmaの利用可能なライセンスが必要です。
-USDの材質と依存ファイルを参照し、最初のフレームを描画します。欠落した依存ファイルや読み込み不能な形状はエラーとして表示します。
-ボリュームの見た目は元データの密度・材質に依存します。任意の画像を「Choose Thumbnail...」で割り当てることもできます。
-元ファイル更新後は再スキャンして生成してください。USD内の依存画像だけを更新した場合は選択素材を再生成してください。
+- **テクスチャ**: 縮小画像を `data/thumbnails` に自動で作ります。
+- **USD / 3Dモデル**: 右クリックの **Generate Selected Thumbnails** で作ります。Libraries... の **Generate Missing Thumbnails** は、条件に合う素材のうち、サムネイルがないものをまとめて作ります。**Cancel Thumbnails** で待機中の分を止められます。
+- 素材の隣に保存されます（USDは入口ファイルの隣の `thumbnail.png`、3Dモデルは `<モデル名>_thumbnail.png`）。そのため、素材と一緒に共有できます。書き込める場所に置いてください。
+- 形状は別のプロセスで、Karma CPUを使って512×512でレンダリングします。作業中のシーンにはノードを足さず、GPUも占有しません。
+- 屋外のHDRI画像で照らします。**HDRIはこのリポジトリに含まれていません。** 使う場合は、`meadow_2_8k.exr`（Poly Havenなどで配布されている「Meadow 2」の8K EXR。ライセンスは配布元で確認してください）を `python3.13libs/nanakusa_asset_library/resources/` にコピーします。ない場合は、白いDome Lightで生成します。
+- 「Choose Thumbnail...」で、好きな画像を指定することもできます。元のファイルを更新したときは、再スキャンして作り直してください。
 
 ## USD / Asset Catalog
 
-左下の「Libraries...」ボタンの下にある「Catalog」選択欄でUSDの登録先を選びます。素材ルートの`Catalog`内のDBを自動検出します。
-選択欄を右クリックすると「Open Catalog」「Select Catalog...」「New Catalog...」を使用できます。
-「Select Catalog...」では別の場所の既存DBも指定でき、「New Catalog...」は空のDBを作成します。既存ファイルは上書きしません。
-選択はライブラリールートごとに保存されます。ルート内のDBは相対パスで記録します。
-「Add Catalog」は選択中のDBへの登録で、「Open Catalog」でそのDBをHoudiniのAsset Catalogとして開きます。
-未作成の標準DBには「(new)」を表示し、最初のAdd Catalogで作成します。
-旧`_catalog`内のDBは`Catalog`へ移してRescanするか、Select Catalogで指定してください。自動移動・削除は行いません。
+- 左下の **Catalog** 選択欄で、登録先のカタログを選びます。素材フォルダーの `Catalog` フォルダー内のデータベースが自動で見つかります。選択欄を右クリックすると、**Open Catalog** / **Select Catalog...** / **New Catalog...** が使えます。
+- USDを選んで右クリックの **Add Catalog** で登録します。複数のUSDをまとめて登録できます。同じパスの重複は登録されません。
+- 右クリックの **Publish Static USD...** は、素材単体の現在のフレームをUSDとして書き出します。元の画像への参照は書き換わらないので、画像も一緒に共有してください。
+- 外部の画像を参照するUSDを他のPCへ渡すときは、その画像と相対パスも保ってください。
 
-USDを選択して右クリックの「Add Catalog」でHoudini Asset Catalogのデータベースへ登録できます。
-複数のUSDをまとめて登録できます。同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `Catalog` に保存します（素材分類としては表示しません）。
-DB更新前のバックアップは`data/backups`へ保存します。
-右クリックの「Publish Static USD...」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
-外部依存を持つUSDを他PCへ渡すときは、その依存ファイルと相対パスも保ってください。
+## 設定とデータ
 
-## 検証
+`data` フォルダーに、次のものを保存します。
 
-標準Python:
-
-```text
-python -m unittest discover -s tests -p test_core.py
-python -m unittest discover -s tests -p test_storage.py
-python -m unittest discover -s tests -p test_organize.py
-python -m unittest discover -s tests -p test_pbr.py
-```
-
-Houdini 22のhython（作業シーンとは別プロセス）:
-
-```text
-hython -m unittest discover -s tests
-```
-
-0.7.0ではHoudini 22.0.447 / Windowsで72件のテストが通過しました。
-移動（`organize.py`）は標準Pythonでも検証できます。
-Scene Viewへのドロップ抑止は、実機のマウス操作では未検証です（イベントフィルターの判定のみテスト済み）。
-保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
-画像・形状の情報取得、右クリック項目、タグ・お気に入り保存、バックアップ先も検証しています。
-検証結果はこのバージョン時点の記録です。変更後は影響するテストと実際の利用経路を確認してください。
-
-## 実装の構成
-
-| ファイル | 担当 |
+| ファイル | 内容 |
 |---|---|
-| `install.py` | package JSONと保存先の設定 |
-| `core.py` | 固定分類の走査、SQLite、メタデータ |
-| `organize.py` | 素材・フォルダーの移動（サムネイル同梱、失敗時の巻き戻し） |
-| `storage.py` | dataの決定、サムネイルの保存先・検出 |
-| `ui.py` | パネル、正方形プレビュー、生成キュー |
-| `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定、フォルダーツリー |
-| `pbr.py` | ファイル名によるPBR用途・セットの判定、スタック表示用のグループ化 |
-| `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
-| `asset_info.py` | 別プロセスの画像・形状情報取得 |
-| `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
+| `settings.json` | PCごとの設定（アイコンの大きさ、スタック表示の設定など） |
+| `library.sqlite3` | 素材の索引、タグ、お気に入り |
+| `thumbnails/` | テクスチャの縮小画像 |
+| `backups/` | 移動・更新の前のバックアップ |
 
-モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。
+素材を別の場所へ移したときは、「Libraries... → Relink Library...」で新しい場所へ再リンクします。
+同じ素材を新しく追加しただけでは、以前のタグやお気に入りは引き継がれません。
+
+## 困ったとき
+
+- **素材が表示されない**: 素材が `USD` / `Texture` / `3DModel` の下にあるか確認して、Rescanを押します。USDは、フォルダーと同じ名前の入口ファイルが必要です。
+- **サムネイルが作れない**: Houdini / Karmaのライセンスを確認してください。素材の隣に書き込める権限も必要です。読み込めない形状や、依存ファイルが欠けている素材はエラーになります。
+- **サムネイルが白い光になる**: HDRIが見つからない場合の表示です。上の「サムネイル」を参照してください。
+- **ドロップしても何も起きない**: ドロップ先として想定していない場所では、意図して何も起きません。取り込み先の一覧は「ドラッグ&ドロップ」の表を見てください。
+- **DirectX法線のエラー**: 法線マップをOpenGL形式に変換してください。
+
+## 開発者・エージェント向け
+
+実装の仕様と作業ルールは、別のドキュメントにまとめています。
+
+- [docs/SPEC.md](docs/SPEC.md): 現行仕様・実装の構成・検証方法
+- [AGENTS.md](AGENTS.md): 開発を行うエージェント向けの作業ルール
+
+## ライセンス
+
+現時点では、ライセンスを指定していません。

@@ -128,16 +128,16 @@ class OrganizeTests(unittest.TestCase):
 
     def test_texture_set_folders_move_together_with_tags(self):
         names=('albedo','ao','emissive','height','normal','roughness')
-        for kit in ('TCom_Various_HighRise_1K','TCom_Various_Plaster_1K'):
+        for kit in ('Brick_Wall_1K','Plaster_Fine_1K'):
             for n in names:self.write('Texture/PBR/Misc/%s/%s_%s.tif'%(kit,kit,n))
         (self.root/'Texture/PBR/Masonry').mkdir();self.scan()
         rows=self.lib.assets();self.assertEqual(len(rows),12)
-        tagged=self.row('Texture/PBR/Misc/TCom_Various_HighRise_1K/TCom_Various_HighRise_1K_albedo.tif');self.lib.update(tagged['id'],tags='tower',favorite=1)
-        result=organize.move_folders(self.lib,self.rid,['Texture/PBR/Misc/TCom_Various_HighRise_1K','Texture/PBR/Misc/TCom_Various_Plaster_1K'],'Texture/PBR/Masonry',self.data)
+        tagged=self.row('Texture/PBR/Misc/Brick_Wall_1K/Brick_Wall_1K_albedo.tif');self.lib.update(tagged['id'],tags='tower',favorite=1)
+        result=organize.move_folders(self.lib,self.rid,['Texture/PBR/Misc/Brick_Wall_1K','Texture/PBR/Misc/Plaster_Fine_1K'],'Texture/PBR/Masonry',self.data)
         self.assertEqual((result['folders'],result['moved']),(2,12))
-        self.assertEqual(sorted(p.name for p in (self.root/'Texture/PBR/Masonry').iterdir()),['TCom_Various_HighRise_1K','TCom_Various_Plaster_1K'])
+        self.assertEqual(sorted(p.name for p in (self.root/'Texture/PBR/Masonry').iterdir()),['Brick_Wall_1K','Plaster_Fine_1K'])
         self.assertFalse(any((self.root/'Texture/PBR/Misc').iterdir()))
-        moved=self.row('Texture/PBR/Masonry/TCom_Various_HighRise_1K/TCom_Various_HighRise_1K_albedo.tif')
+        moved=self.row('Texture/PBR/Masonry/Brick_Wall_1K/Brick_Wall_1K_albedo.tif')
         self.assertEqual((moved['id'],moved['tags'],moved['favorite']),(tagged['id'],'tower',1))
         self.scan();self.assertEqual(len(self.lib.assets()),12);self.assertEqual(self.row(moved['relpath'])['tags'],'tower')
 

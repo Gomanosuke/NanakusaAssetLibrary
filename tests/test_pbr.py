@@ -21,11 +21,11 @@ def rows(*relpaths,kind='texture'):
 
 class StackTests(unittest.TestCase):
     def test_images_of_one_set_stack_and_others_stay_single(self):
-        base='Texture/PBR/Misc/TCom_Various_HighRise_1K/TCom_Various_HighRise_1K_'
+        base='Texture/PBR/Misc/Brick_Wall_1K/Brick_Wall_1K_'
         data=rows(*(base+c+'.tif' for c in ('albedo','ao','normal','roughness')),'Texture/HDR/sky.hdr','Texture/PBR/Misc/lone_albedo.tif')
         entries=pbr.stack_entries(data)
         self.assertEqual([len(e['rows']) for e in entries],[4,1,1])
-        stack=entries[0];self.assertEqual(stack['label'],'TCom_Various_HighRise_1K');self.assertEqual(stack['rep']['label'],'TCom_Various_HighRise_1K_albedo')
+        stack=entries[0];self.assertEqual(stack['label'],'Brick_Wall_1K');self.assertEqual(stack['rep']['label'],'Brick_Wall_1K_albedo')
         self.assertEqual(stack['channels'],['base_color','roughness','normal','ao'])
         self.assertEqual([len(e['rows']) for e in pbr.stack_entries(data,enabled=False)],[1]*6)
 
