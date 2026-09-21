@@ -1,4 +1,5 @@
 """Dockable Python Panel and floating window for Houdini 22 / PySide6."""
+from collections import OrderedDict, deque
 from pathlib import Path
 import json
 import os
@@ -233,12 +234,15 @@ class LibraryWidget(QtWidgets.QWidget):
         self.job = None
         self.page = 0
         self.rows = []
-        self.thumb_queue = []
+        self.thumb_queue = deque()
         self.thumb_pending = set()
         self.thumb_failed = set()
         self.thumb_job = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={}
-        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.row_index={};self.entries=[];self.icon_cache={};self.no_embedded=set()
+        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.row_index={};self.entries=[];self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
+        self.icon_todo=deque();self.page_entries=[];self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
+        self.info_wanted=None;self.info_timer=QtCore.QTimer(self);self.info_timer.setSingleShot(True);self.info_timer.setInterval(250);self.info_timer.timeout.connect(self.start_info)
+        self.missing_scan=None
         dragdrop.install()
         self._setup()
         self.rebuild_tree()
@@ -378,16 +382,23 @@ class LibraryWidget(QtWidgets.QWidget):
         chosen=allitem
         for root in self.library.roots():
             top=QtWidgets.QTreeWidgetItem([root['label']]); data=(root['id'],'',root['path']); top.setData(0,ROLE,data); top.setToolTip(0,root['path']); self.tree.addTopLevelItem(top)
-            folders={'' :top}; rels=set(core.visible_folders(root['path']))
-            for rel in sorted(rels, key=lambda x:(len(Path(x).parts),x.lower())):
-                parent=Path(rel).parent.as_posix(); parent='' if parent=='.' else parent
-                item=QtWidgets.QTreeWidgetItem([Path(rel).name]); value=(root['id'],rel,root['path']); item.setData(0,ROLE,value)
+            folders={'' :top}; rels=self.folder_paths(root)
+            for rel in sorted(rels, key=lambda x:(x.count('/'),x.lower())):
+                parent,_,name=rel.rpartition('/')
+                item=QtWidgets.QTreeWidgetItem([name]); value=(root['id'],rel,root['path']); item.setData(0,ROLE,value)
                 folders.get(parent,top).addChild(item); folders[rel]=item
                 item.setExpanded(value in expanded)
                 if value==selected:chosen=item
             if data==selected:chosen=top
             top.setExpanded(True)
         self.tree.setCurrentItem(chosen); self.tree.blockSignals(False)
+
+    def folder_paths(self,root):
+        """Folders of a library from the index; walk the disk only once for an index made by an older version."""
+        rels=set(self.library.folders(root['id']))
+        if not rels and Path(root['path']).is_dir():
+            rels=set(core.visible_folders(root['path']));self.library.set_folders(root['id'],rels)
+        return rels|set(core.GENRES)
 
     def select_folder(self,value):
         it=QtWidgets.QTreeWidgetItemIterator(self.tree)
@@ -448,7 +459,7 @@ class LibraryWidget(QtWidgets.QWidget):
     def refresh(self):
         self.icons_built_at=self.icon_edge()
         folder=self.current_folder()
-        rows=self.library.assets(self.search.text(),folder[0] if folder else None,self.kind.currentData() or None,self.favorite.isChecked())
+        rows=self.library.assets(self.search.text(),folder[0] if folder else None,self.kind.currentData() or None,self.favorite.isChecked(),folder=folder[1] if folder and folder[1] else None)
         # Older indexes may still contain retired kinds until the next scan.
         rows=[r for r in rows if r['effective_kind'] in KINDS]
         if folder:
@@ -459,17 +470,39 @@ class LibraryWidget(QtWidgets.QWidget):
         self.rows=rows;self.row_index={r['id']:r for r in rows}
         self.entries=pbr.stack_entries(rows,self.stack.isChecked())
         pages=max(1,(len(self.entries)+self.PAGE_SIZE-1)//self.PAGE_SIZE); self.page=min(self.page,pages-1)
-        self.items.clear()
-        for entry in self.entries[self.page*self.PAGE_SIZE:(self.page+1)*self.PAGE_SIZE]:
+        self.items.clear();self.icon_todo.clear();self.icon_timer.stop()
+        self.page_entries=self.entries[self.page*self.PAGE_SIZE:(self.page+1)*self.PAGE_SIZE]
+        for index,entry in enumerate(self.page_entries):
             row=entry['rep'];members=entry['rows']
-            icon=self.icon_for(row)
-            if len(members)>1:icon=self.stacked_icon(icon,len(members))
-            item=QtWidgets.QListWidgetItem(icon,self.item_text(members,row,entry['label']))
+            # Items appear at once with a flat placeholder; pictures are read a few at a time so a big
+            # folder never freezes the panel.
+            item=QtWidgets.QListWidgetItem(self.placeholder(row['effective_kind']),self.item_text(members,row,entry['label']))
+            self.icon_todo.append(index)
             item.setData(ROLE,row);item.setData(STACK_ROLE,[m['id'] for m in members])
             item.setToolTip(row['relpath'] if len(members)==1 else f"{entry['label']}: {', '.join(entry['channels'])}")
             self.items.addItem(item)
+        self.icon_timer.start(0)
         stacked=len(self.entries)!=len(rows)
         self.page_label.setText((f'{len(self.entries)} items ({len(rows)} assets)' if stacked else f'{len(rows)} assets')+f'  ·  {self.page+1} / {pages}')
+
+    def placeholder(self,kind):
+        icon=self.placeholders.get(kind)
+        if icon is None:
+            pix=QtGui.QPixmap(144,144);pix.fill(QtGui.QColor({'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}.get(kind,'#555555')))
+            icon=self.placeholders[kind]=QtGui.QIcon(pix)
+        return icon
+
+    def load_icons(self):
+        """Read the pictures of the visible page in small slices (about 12 ms each) between events."""
+        deadline=time.monotonic()+0.012
+        while self.icon_todo and time.monotonic()<deadline:
+            index=self.icon_todo.popleft()
+            if index>=self.items.count() or index>=len(self.page_entries):continue
+            entry=self.page_entries[index]
+            icon=self.icon_for(entry['rep'])
+            if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
+            self.items.item(index).setIcon(icon)
+        if self.icon_todo:self.icon_timer.start(0)
 
     def item_text(self,members,rep,label=None):
         favorite=any(m['favorite'] for m in members)
@@ -512,7 +545,10 @@ class LibraryWidget(QtWidgets.QWidget):
         self.page=max(0,self.page+delta); self.refresh()
 
     def thumbnail_path(self,row):
-        found=next((x for x in storage.thumbnail_candidates(row,self.data_dir) if x.is_file()),None)
+        source=Path(row['root_path'])/row['relpath']
+        # A large original image is not decoded on the UI thread; its small thumbnail is made in the background.
+        found=next((x for x in storage.thumbnail_candidates(row,self.data_dir)
+                    if x.is_file() and not (x==source and row['kind']=='texture' and row['size']>2*1024*1024)),None)
         if found is None and storage.is_usdz(row):
             # Take the preview stored inside the .usdz once and cache it; remember packages without one.
             key=(row['id'],row['mtime'],row['size'])
@@ -533,7 +569,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def next_thumbnail(self):
         if self.thumb_job is not None or not self.thumb_queue:return
-        row=self.thumb_queue.pop(0)
+        row=self.thumb_queue.popleft()
         source=Path(row['root_path'])/row['relpath']
         self.thumb_job=(ThumbnailJob(row['id'],source,self.cache_path(row)) if row['kind']=='texture' else
             GeometryThumbnailJob(row['id'],source,row['kind'],self.cache_path(row)))
@@ -563,6 +599,17 @@ class LibraryWidget(QtWidgets.QWidget):
         painter=QtGui.QPainter(pix); painter.setPen(QtGui.QColor('#eeeeee')); painter.drawText(pix.rect(),QtCore.Qt.AlignmentFlag.AlignCenter,row['effective_kind'].upper()); painter.end()
         return QtGui.QIcon(pix)
 
+    def preview_pixmap(self,path):
+        try:key=(str(path),Path(path).stat().st_mtime_ns)
+        except OSError:return None
+        if key in self.preview_cache:
+            self.preview_cache.move_to_end(key);return self.preview_cache[key]
+        pix=square_preview(path,1024)
+        if pix is not None:
+            self.preview_cache[key]=pix
+            while len(self.preview_cache)>12:self.preview_cache.popitem(last=False)
+        return pix
+
     def selected(self):
         item=self.items.currentItem()
         if not item:raise ValueError('Select an asset.')
@@ -580,12 +627,12 @@ class LibraryWidget(QtWidgets.QWidget):
         if not self.items.currentItem():
             self.preview.clear();self.info.clear();self.stats.clear();self.metadata_id=None;self.metadata_ids=[]
             self.tags.clear();self.tags.setEnabled(False);self.star.setEnabled(False)
-            self.info_key=None;self.info_pending=None
+            self.info_key=None;self.info_pending=None;self.info_wanted=None;self.info_timer.stop()
             if self.info_job:self.info_job.requestInterruption()
             self.status.setText('Select assets. Ctrl / Shift: multi-select.'); return
         row=self.selected();members=self.item_rows(self.items.currentItem())
         thumb=self.thumbnail_path(row)
-        pix=square_preview(thumb,1024) if thumb else None
+        pix=self.preview_pixmap(thumb) if thumb else None
         self.preview.setPixmap(pix if pix is not None else self.icon_for(row).pixmap(512,512))
         display_path=Path(row['relpath']).parent.as_posix() if core.is_usd_package(row) else row['relpath']
         if len(members)>1:
@@ -620,8 +667,7 @@ class LibraryWidget(QtWidgets.QWidget):
             self.update_metadata_rows(aid,favorite=int(checked))
 
     def update_metadata_rows(self,aid,**changes):
-        for row in self.rows:
-            if row['id']==aid:row.update(changes)
+        if aid in self.row_index:self.row_index[aid].update(changes)
         for i in range(self.items.count()):
             item=self.items.item(i);ids=item.data(STACK_ROLE) or []
             if aid in ids:
@@ -639,12 +685,16 @@ class LibraryWidget(QtWidgets.QWidget):
             self.stats.setText('Source file unavailable');self.info_key=None;return
         if key==self.info_key:return
         self.info_key=key
-        self.info_pending=None
+        self.info_pending=None;self.info_wanted=None
         if self.info_job:self.info_job.requestInterruption()
         if key in self.info_cache:
             self.show_info(self.info_cache[key]);return
         self.stats.setText('Reading asset information...')
-        self.info_pending=(key,path,row['kind'])
+        # Starting hython costs seconds of CPU: wait until the selection settles.
+        self.info_wanted=(key,path,row['kind']);self.info_timer.start()
+
+    def start_info(self):
+        if self.info_wanted:self.info_pending,self.info_wanted=self.info_wanted,None
         if not self.info_job:self.next_info()
 
     def next_info(self):
@@ -731,6 +781,7 @@ class LibraryWidget(QtWidgets.QWidget):
         name,ok=QtWidgets.QInputDialog.getText(self,'New Folder','Name (use / for nested folders)')
         if ok and name.strip():
             path=core.inside(core.inside(folder[2],folder[1]),name.strip()); path.mkdir(parents=True,exist_ok=True)
+            self.library.add_folder(folder[0],path.relative_to(Path(folder[2])).as_posix())
             self.rebuild_tree(); self.status.setText('Created: '+str(path))
 
     def root_menu(self):
@@ -799,14 +850,28 @@ class LibraryWidget(QtWidgets.QWidget):
         self.status.setText(f'Queued {len(rows)} thumbnails. Geometry renders in a separate Karma CPU process.')
 
     def generate_missing_thumbnails(self):
-        count=0
-        for row in self.rows:
-            if not self.thumbnail_path(row) and row['id'] not in self.thumb_pending:
+        if self.missing_scan is not None:return
+        # Checking every asset touches the disk; do it in slices so the panel stays responsive.
+        self.missing_scan={'rows':list(self.rows),'index':0,'count':0}
+        QtCore.QTimer.singleShot(0,self.missing_step)
+
+    def missing_step(self):
+        scan=self.missing_scan
+        if scan is None:return
+        rows=scan['rows'];deadline=time.monotonic()+0.015
+        while scan['index']<len(rows) and time.monotonic()<deadline:
+            row=rows[scan['index']];scan['index']+=1
+            if row['id'] not in self.thumb_pending and not self.thumbnail_path(row):
                 self.thumb_failed.discard(row['id'])
-                self.queue_thumbnail(row,geometry=True); count+=1
-        self.status.setText(f'Queued {count} missing thumbnails. All pages matching the search and folder filters are included.')
+                self.queue_thumbnail(row,geometry=True);scan['count']+=1
+        if scan['index']<len(rows):
+            self.status.setText(f"Checking thumbnails... {scan['index']} / {len(rows)}")
+            QtCore.QTimer.singleShot(0,self.missing_step);return
+        self.missing_scan=None
+        self.status.setText(f"Queued {scan['count']} missing thumbnails. All pages matching the search and folder filters are included.")
 
     def cancel_thumbnails(self):
+        self.missing_scan=None
         for row in self.thumb_queue:self.thumb_pending.discard(row['id'])
         self.thumb_queue.clear()
         if self.thumb_job:self.thumb_job.requestInterruption()

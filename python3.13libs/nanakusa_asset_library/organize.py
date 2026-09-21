@@ -70,7 +70,7 @@ def _remap(thumbnail, pairs):
     return thumbnail
 
 
-def _apply(library, root_id, ops, changes):
+def _apply(library, root_id, ops, changes, folder_moves=()):
     done = []
     try:
         for op in ops:
@@ -83,7 +83,7 @@ def _apply(library, root_id, ops, changes):
                 raise MoveError('Could not move "%s": %s. Close programs that use it and try again.'
                                 % (op['src'].name, exc)) from exc
             done.append(op)
-        library.relocate(root_id, changes)
+        library.relocate(root_id, changes, folder_moves)
     except BaseException:
         stuck = []
         for op in reversed(done):
@@ -142,22 +142,25 @@ def move_assets(library, rows, dest_rel, data_dir):
         raise MoveError('Assets from different libraries cannot be moved together.')
     root_id = root_ids.pop()
     dest_rel = '/'.join(_parts(dest_rel))
-    everything = library.assets(root_id=root_id, missing=True)
-    fresh = {r['id']: r for r in everything}
+    fresh = {r['id']: r for r in library.assets_by_ids([r['id'] for r in rows])}
     if any(r['id'] not in fresh for r in rows):
         raise MoveError('An asset is no longer in the index. Rescan and try again.')
     rows = [fresh[r['id']] for r in rows]
     root_path = rows[0]['root_path']
     dest = check_assets_target(rows, root_id, dest_rel)
-    indexed = {_key(Path(r['root_path']) / r['relpath']) for r in everything}
     moving_ids = {r['id'] for r in rows}
+    # Only assets in the same folders can share a sidecar thumbnail; ask the index for those
+    # instead of loading the whole library.
     folders = {Path(r['relpath']).parent.as_posix() for r in rows}
-    neighbours = [r for r in everything if Path(r['relpath']).parent.as_posix() in folders]
+    neighbours = [r for f in folders
+                  for r in library.assets(root_id=root_id, missing=True, folder=f)
+                  if Path(r['relpath']).parent.as_posix() == f]
+    indexed = {_key(Path(r['root_path']) / r['relpath']) for r in neighbours}
     owners = {}
     for r in neighbours:
         for sidecar in _sidecars(r, data_dir, indexed):
             owners.setdefault(_key(sidecar), set()).add(r['id'])
-    ops, changes, catalog, claimed = [], [], [], set()
+    ops, changes, catalog, claimed, folder_moves = [], [], [], set(), []
 
     def claim(dst):
         if dst.exists() or _key(dst) in claimed:
@@ -178,6 +181,7 @@ def move_assets(library, rows, dest_rel, data_dir):
             pairs.append((folder, dest / folder.name))
             new_rel = dest_rel + '/' + folder.name + '/' + source.name
             new_source = dest / folder.name / source.name
+            folder_moves.append((Path(row['relpath']).parent.as_posix(), dest_rel + '/' + folder.name))
         else:
             claim(dest / source.name)
             ops.append({'src': source, 'dst': dest / source.name, 'mode': 'move'})
@@ -196,7 +200,7 @@ def move_assets(library, rows, dest_rel, data_dir):
     if not ops:
         raise MoveError('The assets are already in that folder.')
     backup = library.backup_index()
-    _apply(library, root_id, ops, changes)
+    _apply(library, root_id, ops, changes, folder_moves)
     return {'moved': len(changes), 'backup': backup, 'catalog': catalog}
 
 
@@ -217,7 +221,7 @@ def move_folders(library, root_id, src_rels, dest_rel, data_dir):
     lowered = [r.lower() for r in rels]
     rels = [r for r in rels if not any(r.lower().startswith(o + '/') for o in lowered)]
     ops, changes, catalog, claimed, new_rels = [], [], [], set(), []
-    everything = library.assets(root_id=root_id, missing=True)
+    folder_moves = []
     for src_rel in rels:
         if '/'.join(_parts(src_rel)[:-1]).lower() == dest_rel.lower():
             continue
@@ -228,7 +232,8 @@ def move_folders(library, root_id, src_rels, dest_rel, data_dir):
         claimed.add(_key(dst))
         ops.append({'src': src, 'dst': dst, 'mode': 'move'})
         new_rels.append(dest_rel + '/' + src.name)
-        for row in everything:
+        folder_moves.append((src_rel, new_rels[-1]))
+        for row in library.assets(root_id=root_id, missing=True, folder=src_rel):
             if row['relpath'].startswith(src_rel + '/'):
                 tail = row['relpath'][len(src_rel) + 1:]
                 changes.append({'id': row['id'], 'relpath': new_rels[-1] + '/' + tail,
@@ -238,7 +243,7 @@ def move_folders(library, root_id, src_rels, dest_rel, data_dir):
     if not ops:
         raise MoveError('The folders are already in that location.')
     backup = library.backup_index()
-    _apply(library, root_id, ops, changes)
+    _apply(library, root_id, ops, changes, folder_moves)
     return {'moved': len(changes), 'folders': len(ops), 'backup': backup, 'new_rels': new_rels,
             'new_rel': new_rels[0], 'catalog': catalog}
 

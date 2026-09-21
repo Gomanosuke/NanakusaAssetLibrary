@@ -1,4 +1,5 @@
 """Conservative filename-based grouping for dropped PBR images."""
+from functools import lru_cache
 from pathlib import Path
 import re
 
@@ -13,14 +14,23 @@ ALIASES = {
     'ao': ('ambient_occlusion','ambientocclusion','occlusion','ao'),
 }
 
+_PATTERNS = [(channel, alias, re.compile(r'(?<![a-z0-9])' + re.escape(alias) + r'(?![a-z])'))
+             for channel, aliases in ALIASES.items() for alias in aliases]
+
+
+@lru_cache(maxsize=200000)
 def _find(name):
-    """(channel, start, end) of the channel token; the last one wins ('Metal_Plate_normal' is a normal map)."""
+    """(channel, start, end) of the channel token; the last one wins ('Metal_Plate_normal' is a normal map).
+
+    Cached: the list view classifies every image on each refresh. The substring test skips
+    almost every regular expression.
+    """
     best=None
-    for channel,aliases in ALIASES.items():
-        for alias in aliases:
-            for match in re.finditer(r'(?<![a-z0-9])'+re.escape(alias)+r'(?![a-z])',name):
-                if best is None or (match.end(),match.end()-match.start())>(best[2],best[2]-best[1]):
-                    best=(channel,match.start(),match.end())
+    for channel,alias,pattern in _PATTERNS:
+        if alias not in name:continue
+        for match in pattern.finditer(name):
+            if best is None or (match.end(),match.end()-match.start())>(best[2],best[2]-best[1]):
+                best=(channel,match.start(),match.end())
     return best
 
 def identify(path):
@@ -56,6 +66,7 @@ def _split(path):
     found=_find(stem.lower())
     return (found[0],stem,found) if found else (None,stem,None)
 
+@lru_cache(maxsize=200000)
 def stack_info(relpath):
     """(folder, set key, display label, channel) of an image that belongs to a PBR set, else None.
 

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+from stat import S_ISLNK
 import sqlite3
 import uuid
 
@@ -97,13 +98,21 @@ class Library:
                 thumbnail TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
                 UNIQUE(root_id, relpath));
               CREATE INDEX IF NOT EXISTS asset_root ON assets(root_id);
+              CREATE TABLE IF NOT EXISTS folders (
+                root_id TEXT NOT NULL, relpath TEXT NOT NULL, PRIMARY KEY(root_id, relpath));
             ''')
+            try:
+                # Readers (the panel) keep working while a scan writes; safe on a local disk.
+                db.execute('PRAGMA journal_mode=WAL')
+            except sqlite3.DatabaseError:
+                pass
 
     @contextmanager
     def connect(self):
         db = sqlite3.connect(str(self.db), timeout=30)
         db.row_factory = sqlite3.Row
         try:
+            db.execute('PRAGMA synchronous=NORMAL')
             with db:
                 yield db
         finally:
@@ -135,6 +144,7 @@ class Library:
         """Forget index entries only; never delete source assets."""
         with self.connect() as db:
             db.execute("DELETE FROM assets WHERE root_id=?", (rid,))
+            db.execute("DELETE FROM folders WHERE root_id=?", (rid,))
             db.execute("DELETE FROM roots WHERE id=?", (rid,))
 
     def relink_root(self, rid, path):
@@ -156,40 +166,49 @@ class Library:
             raise FileNotFoundError("Library is offline: " + str(base))
         rows = []
         errors = []
+        folders = set()
         with self.connect() as db:
             known = {r[1]: r[0] for r in db.execute("SELECT id, relpath FROM assets WHERE root_id=?", (rid,))}
         taken = set(known.values())
-        for folder, dirs, names in os.walk(base, followlinks=False, onerror=lambda e: errors.append(str(e))):
+        base_text = str(base)
+        data_key = os.path.normcase(str(self.data_dir))
+        for folder, dirs, names in os.walk(base_text, followlinks=False, onerror=lambda e: errors.append(str(e))):
             if cancel():
                 return {"cancelled": True, "count": 0, "errors": errors}
-            dirs[:] = [d for d in dirs if not d.startswith('.') and not (Path(folder)/d).is_symlink() and (Path(folder)/d).resolve() != self.data_dir]
-            relative_folder = Path(folder).relative_to(base)
-            if not relative_folder.parts:
+            # Plain string paths: a library can hold hundreds of thousands of files and this
+            # runs next to the UI thread, so every syscall and object counts.
+            dirs[:] = [d for d in dirs if not d.startswith('.') and not os.path.islink(os.path.join(folder, d))
+                       and os.path.normcase(os.path.abspath(os.path.join(folder, d))) != data_key]
+            relative_folder = os.path.relpath(folder, base_text).replace(os.sep, '/')
+            if relative_folder == '.':
                 dirs[:] = [d for d in dirs if d in GENRES]
                 continue
-            genre = relative_folder.parts[0]
+            parts = relative_folder.split('/')
+            genre = parts[0]
+            folders.add(relative_folder)
+            entry = None
             if genre == 'USD':
-                entry = package_entry(folder) if len(relative_folder.parts)>1 else None
+                entry = package_entry(folder) if len(parts) > 1 else None
                 if entry:
                     names = [entry.name]
                     dirs[:] = []
                 else:
-                    names = [name for name in names if Path(name).suffix.lower()=='.usdz']
+                    names = [name for name in names if name.lower().endswith('.usdz')]
             for name in names:
                 if cancel():
                     return {"cancelled": True, "count": 0, "errors": errors}
-                p = Path(folder) / name
-                if p.is_symlink():
-                    continue
-                ext = p.suffix.lower()
-                kind = ('usd' if genre=='USD' else
-                        'texture' if genre=='Texture' and ext in IMAGES else
-                        'model' if genre=='3DModel' and (ext in MODELS or p.name.lower().endswith(('.bgeo.sc','.geo.sc'))) else None)
+                lowered = name.lower()
+                ext = os.path.splitext(lowered)[1]
+                kind = ('usd' if genre == 'USD' else
+                        'texture' if genre == 'Texture' and ext in IMAGES else
+                        'model' if genre == '3DModel' and (ext in MODELS or lowered.endswith(('.bgeo.sc', '.geo.sc'))) else None)
                 if not kind:
                     continue
                 try:
-                    stat = p.stat()
-                    rel = p.relative_to(base).as_posix()
+                    stat = os.lstat(os.path.join(folder, name))
+                    if S_ISLNK(stat.st_mode):
+                        continue
+                    rel = relative_folder + '/' + name
                     # A moved asset keeps its original id so tags survive; another file
                     # later appearing at the old path must not reuse that id.
                     aid = known.get(rel)
@@ -198,7 +217,7 @@ class Library:
                         if aid in taken:
                             aid = uuid.uuid4().hex
                         taken.add(aid)
-                    label = p.parent.name if kind=='usd' and entry else p.stem
+                    label = parts[-1] if kind == 'usd' and entry else name[:len(name) - len(os.path.splitext(name)[1])]
                     rows.append((aid, rid, rel, label, kind, stat.st_size, stat.st_mtime))
                 except OSError as exc:
                     errors.append(str(exc))
@@ -206,12 +225,36 @@ class Library:
         with self.connect() as db:
             if not errors:
                 db.execute("UPDATE assets SET present=0 WHERE root_id=?", (rid,))
+                db.execute("DELETE FROM folders WHERE root_id=?", (rid,))
+                db.executemany("INSERT OR IGNORE INTO folders VALUES (?,?)", [(rid, f) for f in folders])
             db.executemany('''INSERT INTO assets (id,root_id,relpath,label,kind,size,mtime)
                 VALUES (?,?,?,?,?,?,?) ON CONFLICT(root_id,relpath) DO UPDATE SET
                 kind=excluded.kind,override_kind=NULL,size=excluded.size,mtime=excluded.mtime,present=1''', rows)
         return {"cancelled": False, "count": len(rows), "errors": errors}
 
-    def relocate(self, root_id, changes):
+    def folders(self, rid):
+        """Folder paths of a root as seen by the last scan (USD packages are leaves), sorted.
+
+        Read from the index so the panel never walks the disk. Empty when the root was
+        indexed by an older version and has not been scanned since; see set_folders.
+        """
+        with self.connect() as db:
+            found = [r[0] for r in db.execute("SELECT relpath FROM folders WHERE root_id=?", (rid,))]
+        return found
+
+    def set_folders(self, rid, rels):
+        with self.connect() as db:
+            db.execute("DELETE FROM folders WHERE root_id=?", (rid,))
+            db.executemany("INSERT OR IGNORE INTO folders VALUES (?,?)", [(rid, r) for r in rels])
+
+    def add_folder(self, rid, rel):
+        """Record a folder (and its parents) created by the panel."""
+        parts = [p for p in rel.split('/') if p]
+        with self.connect() as db:
+            for i in range(1, len(parts) + 1):
+                db.execute("INSERT OR IGNORE INTO folders VALUES (?,?)", (rid, '/'.join(parts[:i])))
+
+    def relocate(self, root_id, changes, folder_moves=()):
         """Apply path changes from a completed move in one transaction.
 
         changes: dicts with id, relpath and thumbnail. Ids are kept so tags,
@@ -224,9 +267,15 @@ class Library:
                            (root_id, change['relpath'], change['id']))
                 db.execute("UPDATE assets SET relpath=?, thumbnail=? WHERE id=? AND root_id=?",
                            (change['relpath'], change['thumbnail'], change['id'], root_id))
+            for old, new in folder_moves:
+                db.execute("UPDATE OR REPLACE folders SET relpath=? || substr(relpath, ?) WHERE root_id=? AND (relpath=? OR substr(relpath, 1, ?)=?)",
+                           (new, len(old) + 1, root_id, old, len(old) + 1, old + '/'))
 
-    def assets(self, search="", root_id=None, kind=None, favorite=False, missing=False):
+    def assets(self, search="", root_id=None, kind=None, favorite=False, missing=False, folder=None):
         clauses, args = [], []
+        if folder:
+            # Everything below a folder, as an index range on (root_id, relpath): '/' + 1 is '0'.
+            clauses.append("a.relpath >= ? AND a.relpath < ?"); args.extend([folder.rstrip('/') + '/', folder.rstrip('/') + '0'])
         if not missing:
             clauses.append("a.present=1")
         if root_id:
@@ -247,6 +296,17 @@ class Library:
         sql += " ORDER BY a.label COLLATE NOCASE, a.relpath"
         with self.connect() as db:
             return [dict(r) for r in db.execute(sql, args)]
+
+    def assets_by_ids(self, ids):
+        rows = []
+        ids = list(dict.fromkeys(ids))
+        with self.connect() as db:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                rows += [dict(r) for r in db.execute(
+                    '''SELECT a.*, r.path AS root_path, r.label AS root_label, a.kind AS effective_kind
+                       FROM assets a JOIN roots r ON r.id=a.root_id WHERE a.id IN (%s)''' % ','.join('?' * len(chunk)), chunk)]
+        return rows
 
     def update(self, aid, **fields):
         allowed = {'label', 'override_kind', 'favorite', 'tags', 'thumbnail', 'notes'}

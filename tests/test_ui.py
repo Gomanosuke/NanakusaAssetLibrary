@@ -210,6 +210,61 @@ class LibraryUiTests(unittest.TestCase):
             self.assertTrue(widget.thumbnail_path(rows['with_preview']).samefile(generated))   # a generated thumbnail wins
             widget.close();widget.deleteLater()
 
+    def test_big_libraries_stay_responsive(self):
+        import time
+        from hutil.PySide import QtGui,QtCore
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for i in range(60):
+                d=root/'USD'/'Props'/f'pack{i:03d}';d.mkdir(parents=True);(d/f'pack{i:03d}.usd').write_text('x')
+                image=QtGui.QImage(64,64,QtGui.QImage.Format.Format_RGB32);image.fill(0x336699);image.save(str(d/'thumbnail.png'))
+            (root/'3DModel').mkdir()
+            for i in range(30):(root/'3DModel'/f'm{i:02d}.obj').write_text('x')
+            big=root/'Texture'/'huge.png';big.parent.mkdir(parents=True);big.write_bytes(bytes(3*1024*1024))
+            with patch.object(ui.LibraryWidget,'next_info') as next_info:
+                widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+                widget.library.scan(widget.library.roots()[0]['id']);widget.rebuild_tree();widget.refresh()
+                # Pictures arrive after refresh returns, in slices; items exist at once with flat placeholders.
+                self.assertEqual(widget.items.count(),widget.PAGE_SIZE if widget.PAGE_SIZE<91 else 91)
+                self.assertTrue(widget.icon_todo)
+                start=time.monotonic()
+                while (widget.icon_todo or widget.icon_timer.isActive()) and time.monotonic()-start<20:self.app.processEvents()
+                self.assertFalse(widget.icon_todo)
+                usd=next(i for i in range(widget.items.count()) if widget.items.item(i).data(ui.ROLE)['kind']=='usd')
+                self.assertNotEqual(widget.items.item(usd).icon().cacheKey(),widget.placeholder('usd').cacheKey())   # real thumbnail loaded
+                # A 3 MB original image is never decoded on the UI thread.
+                texture=next(r for r in widget.rows if r['kind']=='texture')
+                self.assertIsNone(widget.thumbnail_path(texture))
+                # Selecting quickly through assets starts no hython until the selection settles.
+                for i in range(5):widget.items.setCurrentRow(i)
+                self.assertTrue(widget.info_timer.isActive());next_info.assert_not_called()
+                widget.info_timer.stop();widget.start_info();self.assertEqual(next_info.call_count,1)
+                widget.close();widget.deleteLater()
+
+    def test_folder_tree_comes_from_the_index_and_missing_thumbnails_are_checked_in_slices(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail') as queue:
+            base=Path(folder);root=base/'asset'
+            for i in range(40):
+                p=root/'3DModel'/f'g{i%4}'/f'm{i:02d}.obj';p.parent.mkdir(parents=True,exist_ok=True);p.write_text('x')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id'])
+            with patch.object(ui.core,'visible_folders',side_effect=AssertionError('walked the disk')):
+                widget.rebuild_tree()   # folders are read from the index
+                widget.library.add_folder(widget.library.roots()[0]['id'],'3DModel/Fresh');widget.rebuild_tree()
+            it=QtWidgets.QTreeWidgetItemIterator(widget.tree);names=[]
+            while it.value():names.append(it.value().text(0));it+=1
+            self.assertIn('Fresh',names);self.assertIn('g3',names)
+            # An index made by an older version has no folder list: walk once and remember it.
+            rid=widget.library.roots()[0]['id'];widget.library.set_folders(rid,[])
+            widget.rebuild_tree();self.assertIn('3DModel/g0',widget.library.folders(rid))
+            widget.refresh();widget.generate_missing_thumbnails()
+            self.assertIsNotNone(widget.missing_scan)
+            steps=0
+            while widget.missing_scan is not None and steps<1000:self.app.processEvents();steps+=1
+            self.assertIsNone(widget.missing_scan);self.assertEqual(len([c for c in queue.call_args_list if c.kwargs.get('geometry')]),40)
+            self.assertIn('Queued 40',widget.status.text())
+            widget.close();widget.deleteLater()
+
     def test_catalog_creation_selection_and_registration_target(self):
         import hou
         with tempfile.TemporaryDirectory() as folder:
