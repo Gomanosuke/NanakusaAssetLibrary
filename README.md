@@ -3,7 +3,7 @@
 Houdini 22のSolaris / Karma XPU向け、プロジェクト共通のアセットブラウザーです。
 Python Panel、フォルダー表示、検索、タグ、お気に入り、D&D、Asset Catalog登録に対応します。
 
-現在のバージョンは **0.3.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
+現在のバージョンは **0.4.0** です。開発・修正を行うエージェントは [AGENTS.md](AGENTS.md) を参照してください。
 
 ## コードとデータの分離
 
@@ -62,7 +62,7 @@ nanakusa_asset_library.show()
    インストーラーは既存dataの自動移動を行いません。
 4. 既存インデックスを引き継ぐ場合は、新しい本体から`--prefs`と移動先の`--data`だけを指定してインストーラーを再実行します。
    この段階では`--library`で移動先を追加登録しないでください。
-5. Houdiniを起動し、素材ルートを移した場合は既存の登録を「設定 → ルートの場所を変更」で再リンクします。
+5. Houdiniを起動し、素材ルートを移した場合は既存の登録を「Libraries... → Relink Library...」で再リンクします。
    同じ素材を追加登録するだけでは、旧登録のタグやお気に入りは引き継がれません。
 6. 再スキャンして素材と保存先を確認します。GitHub Desktopで本体が見つからない場合はLocateで新しいclone先を指定します。
 
@@ -99,9 +99,17 @@ package JSONの`path`が本体、`env`の`NAL_DATA_DIR`がdataの指定です。
   形状を単一ファイルから読める形式が対象です。FBXの外部画像や元の材質は再構築しません。
 - **Texture**: PNG、JPEG、TIFF、HDR、EXRなどの画像。HDRやデカールもこの分類に置きます。
 
-素材を追加したら「再スキャン」を押してください。元ファイルの移動・改名・削除はしません。
-USDのパッケージ内は「新規フォルダー」の対象外です。UDIM・シーケンスの自動集約はありません。
-ルート移動後は「設定 → ルートの場所を変更」で再リンクできます。HIP内の既存パスは書き換えません。
+素材を追加したら「Rescan」を押してください。元ファイルの移動・改名・削除はしません。
+USDのパッケージ内は「Libraries... → New Folder...」の対象外です。UDIM・シーケンスの自動集約はありません。
+ルート移動後は「Libraries... → Relink Library...」で再リンクできます。HIP内の既存パスは書き換えません。
+
+## GUIと複数選択
+
+GUIは英語です。通常は検索・分類・お気に入り・フォルダー・Import Selected・Copy Pathsを表示します。
+ライブラリーの追加や再リンクは「Libraries...」、メタデータ・サムネイル・読み込み設定・Catalogは「Details」から開きます。
+Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで表示ページ内を全選択できます。
+D&D・Copy Paths・Generate Selected Thumbnailsは選択した全素材が対象です。
+メタデータ保存・任意サムネイル指定・Publishはactive asset（最後に選んだ1件）が対象です。
 
 ## D&D
 
@@ -111,13 +119,41 @@ USDのパッケージ内は「新規フォルダー」の対象外です。UDIM�
 | 3DModel | obj / SOPネットワーク | Geometry内の読み込みSOP、または読み込みSOP |
 | USD | stage / LOPネットワーク | Reference LOP |
 | USD | obj / SOPネットワーク | USD Import SOP |
-| Texture | テキスト入力欄 | ファイルパスを入力 |
+| 全種類 | テキスト入力欄（Network ViewのPパラメーターを含む） | ファイルパスを入力 |
 | Texture | Material Library / MaterialX Builderなどの材質階層 | UVを明示接続したMaterialX ImageとStandard Surface |
+
+複数素材のD&Dは1つのUndoで戻せます。LOP / SOPにはMergeを作り、読み込んだ全素材を表示します。
+複数パスのテキストはスペース区切り（空白を含むパスは引用符付き）です。
+1ファイルだけを受け付けるパラメーターには、1素材ずつドロップしてください。Houdiniのネイティブ入力欄ではその欄の標準D&D規則に従います。
+Import Selectedの複数読み込みも同じ一括処理です。USDはReference、既存LOPへの自動接続とPrim割り当て設定は単体読み込み専用です。
 
 Textureを通常のstageやobjへ落としてもノードは作りません。
 既存Builder内では新しいSurfaceを作成し、既存の出力接続は保持します。必要に応じて新しいSurfaceを出力へ接続してください。
-普通の画像はsRGB、HDR/EXRはlinear Rec.709として設定します。ノーマル等のデータ画像は用途に合わせてRawと接続先を調整してください。
+色画像はsRGB、HDR/EXRはlinear Rec.709、ノーマル・粗さなどのデータ画像はRawに設定します。
 FBXはFBX Skin Import、ABCはAlembic、GLBはglTF、VDB等はFile SOPで読み込みます。
+
+### PBR画像の自動接続
+
+同じフォルダーの同じセット名を持つ画像をまとめて材質階層へD&Dすると、MaterialXを1セット生成します。
+例: `stone_1K_albedo.tif`, `stone_1K_roughness.tif`, `stone_1K_normal.tif`。
+画像すべてのtexcoord入力は、セット内の1つのMtlX Texcoordノードを共有します。
+
+| 命名トークン例 | 接続先 |
+|---|---|
+| albedo / basecolor / diffuse | base_color |
+| roughness / rough | specular_roughness |
+| metallic / metalness | metalness |
+| normal / normalgl / nor_gl | MtlX Normal Map → normal |
+| height / displacement / disp | MtlX Displacement（初期scale 0.01） |
+| ao / ambient_occlusion | ベースカラーに乗算 |
+| opacity / alpha | opacity |
+| emission / emissive | emission_color |
+
+区切り文字は `_`・`-`・`.`・空白に対応し、大小文字は区別しません。1K / 2K等はセット名から除外します。
+用途名を判定できない画像は、個別のベースカラー材質として扱います。
+同一チャンネルの解像度違い等を同時選択した場合は、曖昧な接続を避けるためエラーにします。
+NormalはOpenGL形式を前提とし、DirectXと判定した画像は変換を求めます。Packed ORMの分解・UDIMの集約は対象外です。
+既存Builderの出力が接続済みなら保持するので、新しいSurfaceやDisplacementは必要に応じて接続してください。
 
 ## プレビューとサムネイル
 
@@ -135,22 +171,22 @@ USDの配置は[Component Builder](https://www.sidefx.com/docs/houdini/solaris/c
 USD仕様全体で必須のファイル名という意味ではありません。既存の`thumbnail.jpg`も認識します。
 素材の隣へ書き込める権限が必要です。生成失敗時は既存サムネイルを保持します。
 
-USD・3DModelは「選択素材のサムネイルを生成」で作成できます。
-「表示対象の不足サムネイルを生成」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
-既存サムネイルがある素材は一括生成でスキップします。「サムネイル生成を中止」で待機分を解除できます。
+USD・3DModelは「Details → Generate Selected Thumbnails」で作成できます。
+「Generate Missing Thumbnails」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
+既存サムネイルがある素材は一括生成でスキップします。「Cancel Thumbnails」で待機分を解除できます。
 
 形状のサムネイルは別プロセスのhythonとKarma CPUで512×512にレンダリングします。
 形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
 GPUを占有せず4 CPUスレッドを使います。Houdini / Karmaの利用可能なライセンスが必要です。
 USDの材質と依存ファイルを参照し、最初のフレームを描画します。欠落した依存ファイルや読み込み不能な形状はエラーとして表示します。
-ボリュームの見た目は元データの密度・材質に依存します。任意の画像を「サムネイル指定」で割り当てることもできます。
+ボリュームの見た目は元データの密度・材質に依存します。任意の画像を「Choose Thumbnail...」で割り当てることもできます。
 元ファイル更新後は再スキャンして生成してください。USD内の依存画像だけを更新した場合は選択素材を再生成してください。
 
 ## USD / Asset Catalog
 
-USDを選択して「USDをCatalogへ登録」でHoudini Asset Catalogのデータベースへ登録できます。
+USDを選択して「Details → Add USD to Catalog」でHoudini Asset Catalogのデータベースへ登録できます。
 同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `_catalog` に保存します（素材分類としては表示しません）。
-「素材を静的USD化」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
+「Publish Static USD...」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
 外部依存を持つUSDを他PCへ渡すときは、その依存ファイルと相対パスも保ってください。
 
 ## 検証
@@ -168,8 +204,8 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.3.0ではHoudini 22.0.447 / Windowsで28件のテストが通過しました。
-保存先の分離、モデル・USDの隣への出力、縦横比の維持、画像変換時の黒帯防止を検証しています。
+0.4.0ではHoudini 22.0.447 / Windowsで33件のテストが通過しました。
+保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
 検証結果はこのバージョン時点の記録です。変更後は影響するテストと実際の利用経路を確認してください。
 
 ## 実装の構成
@@ -180,7 +216,8 @@ hython -m unittest discover -s tests
 | `core.py` | 固定分類の走査、SQLite、メタデータ |
 | `storage.py` | dataの決定、サムネイルの保存先・検出 |
 | `ui.py` | パネル、正方形プレビュー、生成キュー |
-| `dragdrop.py` | D&Dの形式と読み込み先判定 |
+| `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定 |
+| `pbr.py` | ファイル名によるPBR用途・セットの判定 |
 | `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成 |
 

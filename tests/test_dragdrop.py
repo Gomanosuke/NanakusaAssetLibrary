@@ -2,6 +2,7 @@ from pathlib import Path
 import sys,tempfile,unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 import hou
+from unittest.mock import patch
 from pxr import Usd,UsdGeom
 from nanakusa_asset_library import dragdrop as dd
 
@@ -15,6 +16,52 @@ class DropTests(unittest.TestCase):
         mime=dd.mime_data(self.obj,'model','mesh')
         self.assertEqual(mime.text(),self.obj.as_posix());self.assertEqual(dd.parse(mime)['path'],self.obj.as_posix())
         self.assertEqual(mime.urls()[0].toLocalFile(),self.obj.as_posix())
+
+    def test_batch_mime_all_kinds_and_spaces(self):
+        entries=[{'path':str(self.root/name),'kind':kind,'label':kind} for name,kind in [('mesh file.obj','model'),('asset.usd','usd'),('color.png','texture')]]
+        mime=dd.mime_data_many(entries)
+        self.assertEqual(len(dd.parse_items(mime)),3)
+        self.assertEqual(len(mime.urls()),3)
+        self.assertIn('"'+(self.root/'mesh file.obj').as_posix()+'"',mime.text())
+
+    def test_batch_merges_geometry_and_rolls_back_failure(self):
+        data={'kind':'model','path':str(self.obj),'label':'mesh'}
+        nodes=dd.import_payloads([data,dict(data,label='other')],self.lop)
+        merge=self.lop.displayNode()
+        self.assertEqual(merge.type().name(),'merge');self.assertEqual(list(merge.inputs()),nodes)
+        self.assertEqual(sum(p.IsA(UsdGeom.Mesh) for p in merge.stage().Traverse()),2)
+        before=set(self.lop.children())
+        original=dd.ops.import_into_context
+        calls=[]
+        def fail_second(*args):
+            calls.append(1)
+            if len(calls)==2:raise RuntimeError('synthetic failure')
+            return original(*args)
+        with patch.object(dd.ops,'import_into_context',side_effect=fail_second):
+            with self.assertRaises(RuntimeError):dd.import_payloads([data,data],self.lop)
+        self.assertEqual(set(self.lop.children()),before)
+        self.assertEqual(self.lop.displayNode(),merge)
+
+    def test_pbr_batch_shared_uv_and_output_preservation(self):
+        mat=self.lop.createNode('materiallibrary')
+        payloads=[]
+        for channel in ('albedo','normal','roughness','metallic','height','ao','opacity','emission'):
+            path=self.root/('stone_1K_'+channel+'.tif');path.write_bytes(b'placeholder')
+            payloads.append({'path':str(path),'kind':'texture','label':path.stem})
+        builder,=dd.import_payloads(payloads,mat)
+        images=[n for n in builder.children() if n.type().name()=='mtlximage']
+        self.assertEqual(len(images),8)
+        self.assertEqual(len({n.input(3) for n in images}),1)
+        shader=next(n for n in builder.children() if n.type().name()=='mtlxstandard_surface')
+        self.assertEqual(shader.input(shader.inputIndex('normal')).type().name().split('::')[0],'mtlxnormalmap')
+        self.assertEqual(shader.input(shader.inputIndex('base_color')).type().name(),'mtlxmultiply')
+        self.assertEqual(shader.input(shader.inputIndex('specular_roughness')).outputDataTypes(),('float',))
+        self.assertEqual(builder.node('normal_image').parm('filecolorspace').eval(),'Raw')
+        original=builder.node('surface_output').input(0)
+        positions={n:n.position() for n in builder.children()}
+        dd.import_payloads(payloads,builder)
+        self.assertEqual(builder.node('surface_output').input(0),original)
+        self.assertTrue(all(n.position()==pos for n,pos in positions.items()))
     def test_obj_stage_and_sop_drops(self):
         data={'kind':'model','path':str(self.obj),'label':'mesh'}
         geo=dd.import_payload(data,self.net);self.assertEqual(geo.type().name(),'geo')

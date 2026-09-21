@@ -34,8 +34,12 @@ def _read_geometry(parent, path, kind):
     return node
 
 def _texture_material(parent, path, label):
+    return texture_material(parent, {'base_color':Path(path).as_posix()}, label)
+
+def texture_material(parent, maps, label):
     """Material Library -> full builder; inside a builder -> surface + UV graph."""
     import hou, voptoolutils
+    existing=set(parent.children())
     builder_parent=parent.type().name() in ('materiallibrary','matnet') or parent.path()=='/mat'
     if builder_parent:
         builder=voptoolutils._setupMtlXBuilderSubnet(destination_node=parent,name=safe_name(label))
@@ -45,13 +49,31 @@ def _texture_material(parent, path, label):
         builder=parent
         shader=builder.createNode('mtlxstandard_surface',safe_name(label)+'_surface')
         result=shader
-    image=builder.createNode('mtlximage',safe_name(label)+'_image')
-    image.parm('signature').set('color3')
-    image.parm('file').set(Path(path).as_posix())
-    image.parm('filecolorspace').set('lin_rec709' if Path(path).suffix.lower() in ('.hdr','.exr') else 'srgb_texture')
     uv=builder.createNode('mtlxtexcoord',safe_name(label)+'_uv')
-    image.setNamedInput('texcoord',uv,'out')
-    shader.setNamedInput('base_color',image,'out')
+    images={}
+    for channel,path in maps.items():
+        image=builder.createNode('mtlximage',channel+'_image')
+        image.parm('signature').set('vector3' if channel=='normal' else ('color3' if channel in ('base_color','emission','opacity') else 'float'))
+        image.parm('file').set(Path(path).as_posix())
+        image.parm('filecolorspace').set(('lin_rec709' if Path(path).suffix.lower() in ('.hdr','.exr') else 'srgb_texture') if channel in ('base_color','emission') else 'Raw')
+        image.setNamedInput('texcoord',uv,'out');images[channel]=image
+        if channel=='normal':
+            normal=builder.createNode('mtlxnormalmap','normal_decode');normal.setNamedInput('in',image,'out')
+            shader.setNamedInput('normal',normal,'out')
+        elif channel=='displacement':
+            disp=next((n for n in builder.children() if builder_parent and n.type().name()=='mtlxdisplacement'),None)
+            if disp is None:disp=builder.createNode('mtlxdisplacement',safe_name(label)+'_displacement')
+            disp.setNamedInput('displacement',image,'out');disp.parm('scale').set(.01)
+            outputs=[n for n in builder.children() if n.type().name()=='subnetconnector' and n.parm('parmname') and n.parm('parmname').eval()=='displacement']
+            if outputs and (builder_parent or not outputs[0].inputs()):outputs[0].setInput(0,disp)
+        elif channel!='ao':
+            shader.setNamedInput({'roughness':'specular_roughness','emission':'emission_color'}.get(channel,channel),image,'out')
+            if channel=='emission':shader.parm('emission').set(1)
+    if 'ao' in images:
+        multiply=builder.createNode('mtlxmultiply','base_color_ao');multiply.parm('signature').set('color3')
+        if 'base_color' in images:multiply.setNamedInput('in1',images['base_color'],'out')
+        else:multiply.parmTuple('in1').set((1,1,1))
+        multiply.setNamedInput('in2',images['ao'],'out');shader.setNamedInput('base_color',multiply,'out')
     if not builder_parent:
         # Never replace an existing surface connection. Use an empty output only.
         outputs=[n for n in builder.children() if n.type().name()=='subnetconnector' and n.parm('parmname') and n.parm('parmname').eval()=='surface']
@@ -59,7 +81,10 @@ def _texture_material(parent, path, label):
             outputs[0].setInput(0,shader)
         else:
             hou.ui.setStatusMessage('MaterialX surface created; connect it to the builder output when needed.') if hou.isUIAvailable() else None
-    for n in (shader,image,uv):n.moveToGoodPosition()
+    if builder_parent:builder.layoutChildren()
+    else:
+        for node in set(builder.children())-existing:
+            node.moveToGoodPosition(move_inputs=False,move_outputs=False,move_unconnected=False)
     return result
 
 def import_into_context(path, kind, label, parent):

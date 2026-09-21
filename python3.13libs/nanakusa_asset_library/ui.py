@@ -11,7 +11,7 @@ import hou
 from . import core, houdini_ops as ops, dragdrop, storage
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
-KINDS = {'': 'すべての種類', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'}
+KINDS = {'': 'All Types', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'}
 _windows = []
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
 
@@ -91,9 +91,9 @@ class GeometryThumbnailJob(QtCore.QThread):
             try:
                 while process.poll() is None:
                     if self.isInterruptionRequested():
-                        raise RuntimeError('生成を中止しました')
+                        raise RuntimeError('Generation cancelled')
                     if time.monotonic()-started > 240:
-                        raise RuntimeError('サムネイル処理が制限時間を超えました')
+                        raise RuntimeError('Thumbnail generation timed out')
                     self.msleep(100)
             finally:
                 if process.poll() is None:
@@ -119,7 +119,7 @@ class GeometryThumbnailJob(QtCore.QThread):
                 self.execute([str(self.bin/('hoiiotool'+suffix)), '--threads', '2', str(base/'render.exr'),
                     '--colorconvert', 'lin_rec709', 'srgb_texture', '-d', 'uint8', '-o', str(base/'preview.png')], base/'convert.log')
                 if QtGui.QImage(str(base/'preview.png')).isNull():
-                    raise RuntimeError('レンダー結果を画像として読み込めません')
+                    raise RuntimeError('Could not decode the rendered image')
                 temporary = self.dest.with_suffix('.tmp')
                 temporary.write_bytes((base/'preview.png').read_bytes())
                 os.replace(temporary, self.dest)
@@ -135,18 +135,18 @@ def _keep_job(job):
 class ManifestDialog(QtWidgets.QDialog):
     def __init__(self, folder, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('PBR / デカールセットを登録')
+        self.setWindowTitle('Register PBR / Decal Set')
         self.resize(700, 440)
         layout = QtWidgets.QVBoxLayout(self)
-        note = QtWidgets.QLabel('候補を確認して必要なマップを指定してください。元画像は変更しません。\nNormalはOpenGL形式。Packed ORMやDirectX Normalは事前に変換してください。')
+        note = QtWidgets.QLabel('Review the suggested maps. Source images are unchanged.\nUse OpenGL normals. Convert packed ORM and DirectX normals first.')
         note.setWordWrap(True); layout.addWidget(note)
         form = QtWidgets.QFormLayout(); layout.addLayout(form)
         self.name = QtWidgets.QLineEdit(Path(folder).name)
-        form.addRow('セット名', self.name)
+        form.addRow('Set Name', self.name)
         self.kind = QtWidgets.QComboBox(); self.kind.addItems(['PBR', 'Decal'])
-        form.addRow('種類', self.kind)
+        form.addRow('Type', self.kind)
         self.color = QtWidgets.QComboBox(); self.color.addItems(['srgb_texture', 'ACEScg', 'lin_rec709', 'Raw'])
-        form.addRow('カラー画像の色空間', self.color)
+        form.addRow('Color Image Space', self.color)
         self.maps = {}
         suggestions = core.suggest_maps(folder)
         for channel in core.MAP_ALIASES:
@@ -163,7 +163,7 @@ class ManifestDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
     def browse(self, field, folder):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '画像を選択', str(folder))
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Select Image', str(folder))
         if path:
             field.setText(path)
 
@@ -197,11 +197,22 @@ class LibraryWidget(QtWidgets.QWidget):
         layout.addWidget(button)
         return button
 
+    def event(self,event):
+        # Houdini's Python Panel can retain keyboard focus on the root widget.
+        if event.type()==QtCore.QEvent.Type.ShortcutOverride and event.matches(QtGui.QKeySequence.StandardKey.SelectAll):
+            event.accept();return True
+        return super().event(event)
+
+    def keyPressEvent(self,event):
+        if event.matches(QtGui.QKeySequence.StandardKey.SelectAll):
+            self.items.selectAll();event.accept();return
+        super().keyPressEvent(event)
+
     def safe(self, callback):
         try:
             return callback()
         except Exception as exc:
-            self.status.setText('エラー: ' + str(exc))
+            self.status.setText('Error: ' + str(exc))
             dialog = QtWidgets.QMessageBox(self)
             dialog.setWindowTitle('Asset Library'); dialog.setText(str(exc))
             dialog.setDetailedText(traceback.format_exc()); dialog.exec()
@@ -212,29 +223,28 @@ class LibraryWidget(QtWidgets.QWidget):
         title = QtWidgets.QLabel('NanakusaAssetLibrary  /  Karma XPU')
         title.setStyleSheet('font-size: 17px; font-weight: bold; padding: 6px;')
         heading.addWidget(title); heading.addStretch()
-        self._button('ライブラリー追加', self.add_root, heading)
-        self.scan_button = self._button('再スキャン', self.scan, heading)
-        self.cancel_button = self._button('中止', self.cancel_scan, heading); self.cancel_button.setEnabled(False)
+        self.more=QtWidgets.QToolButton(); self.more.setText('Details'); self.more.setCheckable(True); heading.addWidget(self.more)
+        self.scan_button = self._button('Rescan', self.scan, heading)
+        self.cancel_button = self._button('Cancel', self.cancel_scan, heading); self.cancel_button.setVisible(False)
         outer.addLayout(heading)
         filters = QtWidgets.QHBoxLayout()
-        self.search = QtWidgets.QLineEdit(); self.search.setPlaceholderText('名前・パス・タグを検索…')
+        self.search = QtWidgets.QLineEdit(); self.search.setPlaceholderText('Search names, paths, tags...')
         self.search_timer = QtCore.QTimer(self); self.search_timer.setSingleShot(True); self.search_timer.setInterval(180)
         self.search.textChanged.connect(lambda: self.search_timer.start())
         self.search_timer.timeout.connect(self.reset_page)
         self.kind = QtWidgets.QComboBox()
         for key, label in KINDS.items(): self.kind.addItem(label,key)
         self.kind.currentIndexChanged.connect(self.reset_page)
-        self.favorite = QtWidgets.QCheckBox('★ お気に入り'); self.favorite.toggled.connect(self.reset_page)
-        self.recursive = QtWidgets.QCheckBox('下位フォルダーを含む'); self.recursive.setChecked(True); self.recursive.toggled.connect(self.reset_page)
-        filters.addWidget(self.search,1); filters.addWidget(self.kind); filters.addWidget(self.favorite); filters.addWidget(self.recursive)
+        self.favorite = QtWidgets.QCheckBox('★ Favorites'); self.favorite.toggled.connect(self.reset_page)
+        self.recursive = QtWidgets.QCheckBox('Include Subfolders'); self.recursive.setChecked(True); self.recursive.toggled.connect(self.reset_page)
+        filters.addWidget(self.search,1); filters.addWidget(self.kind); filters.addWidget(self.favorite)
         outer.addLayout(filters)
         split = QtWidgets.QSplitter(); outer.addWidget(split,1)
         left = QtWidgets.QWidget(); leftbox=QtWidgets.QVBoxLayout(left); leftbox.setContentsMargins(0,0,0,0)
-        self.tree = QtWidgets.QTreeWidget(); self.tree.setHeaderLabel('ライブラリー / フォルダー')
+        self.tree = QtWidgets.QTreeWidget(); self.tree.setHeaderLabel('Libraries / Folders')
         self.tree.currentItemChanged.connect(self.reset_page); leftbox.addWidget(self.tree,1)
         folderbuttons=QtWidgets.QHBoxLayout()
-        self._button('新規フォルダー', self.new_folder, folderbuttons)
-        self._button('設定', self.root_menu, folderbuttons); leftbox.addLayout(folderbuttons)
+        self._button('Libraries...', self.root_menu, folderbuttons); leftbox.addLayout(folderbuttons)
         split.addWidget(left)
         center=QtWidgets.QWidget(); centerbox=QtWidgets.QVBoxLayout(center); centerbox.setContentsMargins(0,0,0,0)
         self.items = dragdrop.AssetList(self.library); self.items.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
@@ -242,51 +252,61 @@ class LibraryWidget(QtWidgets.QWidget):
         self.items.setMovement(QtWidgets.QListView.Movement.Static)
         self.items.setDragEnabled(True)
         self.items.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
+        self.items.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.items.setIconSize(QtCore.QSize(144,144)); self.items.setGridSize(QtCore.QSize(168,192))
         self.items.setWordWrap(True); self.items.setSpacing(5)
         self.items.currentItemChanged.connect(self.selection_changed)
+        self.items.itemSelectionChanged.connect(self.selection_changed)
         self.items.itemDoubleClicked.connect(lambda item: self.safe(self.import_selected))
         centerbox.addWidget(self.items,1)
-        nav=QtWidgets.QHBoxLayout(); self._button('前へ',lambda:self.turn_page(-1),nav)
+        nav=QtWidgets.QHBoxLayout(); self._button('Previous',lambda:self.turn_page(-1),nav)
         self.page_label=QtWidgets.QLabel(); nav.addWidget(self.page_label,1)
-        self._button('次へ',lambda:self.turn_page(1),nav); centerbox.addLayout(nav)
+        self._button('Next',lambda:self.turn_page(1),nav); centerbox.addLayout(nav)
         split.addWidget(center)
-        details=QtWidgets.QWidget(); details.setMinimumWidth(235)
+        details=QtWidgets.QWidget(); details.setMinimumWidth(280)
         db=QtWidgets.QVBoxLayout(details)
-        self.preview=QtWidgets.QLabel('素材を選択'); self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumHeight(240)
+        self.preview=QtWidgets.QLabel('Select an asset'); self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumHeight(240)
         db.addWidget(self.preview)
         self.info=QtWidgets.QLabel(); self.info.setWordWrap(True); self.info.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse); db.addWidget(self.info)
+        metadata_note=QtWidgets.QLabel('Metadata applies to the active asset only.'); metadata_note.setWordWrap(True); db.addWidget(metadata_note)
         form=QtWidgets.QFormLayout(); db.addLayout(form)
-        self.label=QtWidgets.QLineEdit(); form.addRow('表示名',self.label)
-        self.tags=QtWidgets.QLineEdit(); self.tags.setPlaceholderText('wood outdoor red'); form.addRow('タグ',self.tags)
-        self.override=QtWidgets.QComboBox(); self.override.addItem('フォルダー分類に従う',None)
-        self.override.setEnabled(False); form.addRow('種類',self.override)
-        self.star=QtWidgets.QCheckBox('お気に入り'); form.addRow('',self.star)
-        self._button('メタデータ保存',self.save_metadata,db)
-        self._button('サムネイル指定',self.choose_thumbnail,db)
-        self._button('選択素材のサムネイルを生成',self.generate_thumbnail,db)
-        self._button('表示対象の不足サムネイルを生成',self.generate_missing_thumbnails,db)
-        self._button('サムネイル生成を中止',self.cancel_thumbnails,db)
-        self._button('フォルダーを開く',self.reveal,db)
+        self.label=QtWidgets.QLineEdit(); form.addRow('Label',self.label)
+        self.tags=QtWidgets.QLineEdit(); self.tags.setPlaceholderText('wood outdoor red'); form.addRow('Tags',self.tags)
+        self.override=QtWidgets.QComboBox(); self.override.addItem('From Folder',None)
+        self.override.setEnabled(False); form.addRow('Type',self.override)
+        self.star=QtWidgets.QCheckBox('Favorites'); form.addRow('',self.star)
+        self._button('Save Metadata',self.save_metadata,db)
+        self._button('Choose Thumbnail...',self.choose_thumbnail,db)
+        self._button('Generate Selected Thumbnails',self.generate_thumbnail,db)
+        self._button('Generate Missing Thumbnails',self.generate_missing_thumbnails,db)
+        self._button('Cancel Thumbnails',self.cancel_thumbnails,db)
+        self._button('Show in Explorer',self.reveal,db)
         db.addStretch()
         detail_scroll=QtWidgets.QScrollArea();detail_scroll.setWidgetResizable(True);detail_scroll.setWidget(details)
+        detail_scroll.setMinimumWidth(320)
         split.addWidget(detail_scroll); split.setSizes([230,600,270])
+        detail_scroll.setVisible(False); self.more.toggled.connect(detail_scroll.setVisible)
+        self.advanced=QtWidgets.QWidget(); advanced=QtWidgets.QVBoxLayout(self.advanced); advanced.setContentsMargins(0,0,0,0)
+        advanced.addWidget(self.recursive)
         destrow=QtWidgets.QHBoxLayout()
-        destrow.addWidget(QtWidgets.QLabel('読み込み先'))
+        destrow.addWidget(QtWidgets.QLabel('Import Target'))
         self.target=QtWidgets.QLineEdit('/stage'); destrow.addWidget(self.target,1)
-        self.connect_input=QtWidgets.QCheckBox('選択LOPの後に接続'); self.connect_input.setChecked(True); destrow.addWidget(self.connect_input)
+        self.connect_input=QtWidgets.QCheckBox('Connect After Selected LOP'); self.connect_input.setChecked(True); destrow.addWidget(self.connect_input)
         self.usdmode=QtWidgets.QComboBox(); self.usdmode.addItems(['USD Reference','USD Sublayer']); destrow.addWidget(self.usdmode)
-        outer.addLayout(destrow)
-        assignrow=QtWidgets.QHBoxLayout(); assignrow.addWidget(QtWidgets.QLabel('材質の割当先Prim（任意）'))
-        self.assign=QtWidgets.QLineEdit(); self.assign.setPlaceholderText('/assets/chair/**'); assignrow.addWidget(self.assign,1); outer.addLayout(assignrow)
+        advanced.addLayout(destrow)
+        assignrow=QtWidgets.QHBoxLayout(); assignrow.addWidget(QtWidgets.QLabel('Material Prim Pattern (optional)'))
+        self.assign=QtWidgets.QLineEdit(); self.assign.setPlaceholderText('/assets/chair/**'); assignrow.addWidget(self.assign,1); advanced.addLayout(assignrow)
         actions=QtWidgets.QHBoxLayout()
-        self._button('Solarisへ読み込む',self.import_selected,actions)
-        self._button('パスをコピー',self.copy_path,actions)
-        self._button('USDをCatalogへ登録',self.add_catalog,actions)
-        self._button('素材を静的USD化',self.publish_asset,actions)
-        self._button('Catalogを開く',self.open_catalog,actions)
+        self._button('Import Selected',self.import_selected,actions)
+        self._button('Copy Paths',self.copy_path,actions)
+        catalog_actions=QtWidgets.QHBoxLayout()
+        self._button('Add USD to Catalog',self.add_catalog,catalog_actions)
+        self._button('Publish Static USD...',self.publish_asset,catalog_actions)
+        self._button('Open Catalog',self.open_catalog,catalog_actions)
+        advanced.addLayout(catalog_actions)
+        outer.addWidget(self.advanced); self.advanced.setVisible(False); self.more.toggled.connect(self.advanced.setVisible)
         outer.addLayout(actions)
-        self.status=QtWidgets.QLabel('D&D: モデル/USD → ネットワーク | Texture → 入力欄（材質階層ではMaterialXを作成）'); self.status.setWordWrap(True); outer.addWidget(self.status)
+        self.status=QtWidgets.QLabel('Drop: Model / USD to a network | Texture to fields or material networks'); self.status.setWordWrap(True); outer.addWidget(self.status)
 
     def current_folder(self):
         item=self.tree.currentItem()
@@ -295,7 +315,7 @@ class LibraryWidget(QtWidgets.QWidget):
     def rebuild_tree(self):
         selected=self.current_folder()
         self.tree.blockSignals(True); self.tree.clear()
-        allitem=QtWidgets.QTreeWidgetItem(['すべてのライブラリー']); self.tree.addTopLevelItem(allitem)
+        allitem=QtWidgets.QTreeWidgetItem(['All Libraries']); self.tree.addTopLevelItem(allitem)
         chosen=allitem
         for root in self.library.roots():
             top=QtWidgets.QTreeWidgetItem([root['label']]); data=(root['id'],'',root['path']); top.setData(0,ROLE,data); top.setToolTip(0,root['path']); self.tree.addTopLevelItem(top)
@@ -372,30 +392,36 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def selected(self):
         item=self.items.currentItem()
-        if not item:raise ValueError('素材を選択してください')
+        if not item:raise ValueError('Select an asset.')
         return item.data(ROLE)
+
+    def selected_rows(self):
+        rows=[item.data(ROLE) for item in self.items.selectedItems()]
+        if not rows:raise ValueError('Select one or more assets.')
+        return rows
 
     def selection_changed(self,*args):
         if not self.items.currentItem():
-            self.preview.clear(); self.info.clear(); return
+            self.preview.clear(); self.info.clear(); self.status.setText('Select assets. Ctrl / Shift: multi-select.'); return
         row=self.selected()
         self.preview.setPixmap(self.icon_for(row).pixmap(240,240))
         display_path=Path(row['relpath']).parent.as_posix() if row['kind']=='usd' else row['relpath']
         self.info.setText(f"{row['root_label']} / {display_path}\n{row['size']/1048576:.2f} MB")
         self.label.setText(row['label']); self.tags.setText(row['tags']); self.star.setChecked(bool(row['favorite']))
         self.override.setCurrentIndex(max(0,self.override.findData(row['override_kind'])))
+        self.status.setText(f'{len(self.items.selectedItems())} selected | Ctrl / Shift: multi-select | Drag to a field or network')
 
     def save_metadata(self):
         row=self.selected(); self.library.update(row['id'],label=self.label.text().strip() or row['label'],tags=self.tags.text(),favorite=int(self.star.isChecked()),override_kind=self.override.currentData())
-        self.refresh(); self.status.setText('メタデータを保存しました。元ファイルは変更していません。')
+        self.refresh(); self.status.setText('Metadata saved. Source files are unchanged.')
 
     def add_root(self):
-        path=QtWidgets.QFileDialog.getExistingDirectory(self,'ライブラリーのルートフォルダー',self.default_root)
+        path=QtWidgets.QFileDialog.getExistingDirectory(self,'Library Root Folder',self.default_root)
         if path:
             source_root=Path(__file__).resolve().parents[2]
             candidate=Path(path).resolve()
             if candidate.is_relative_to(source_root) or source_root.is_relative_to(candidate):
-                raise ValueError('コードフォルダーとライブラリーは独立した場所を指定してください')
+                raise ValueError('Keep the code and asset library in separate folders.')
             self.library.add_root(path)
             if not self.default_root:
                 self.default_root=path; self.settings['publish_root']=path; self.save_settings()
@@ -412,55 +438,58 @@ class LibraryWidget(QtWidgets.QWidget):
         roots=self.library.roots(); folder=self.current_folder()
         if folder:roots=[r for r in roots if r['id']==folder[0]]
         self.job=ScanJob(self.library,roots); self.job.done.connect(self.scan_done)
-        self.scan_button.setEnabled(False); self.cancel_button.setEnabled(True); self.status.setText('スキャン中… 元ファイルの読み取りのみ。キャンセルできます。')
+        self.scan_button.setEnabled(False); self.cancel_button.setVisible(True); self.status.setText('Scanning... Source files are read only. You can cancel.')
         _keep_job(self.job)
 
     def cancel_scan(self):
         if self.job:self.job.requestInterruption()
 
     def scan_done(self,results):
-        self.scan_button.setEnabled(True); self.cancel_button.setEnabled(False)
+        self.scan_button.setEnabled(True); self.cancel_button.setVisible(False)
         self.rebuild_tree(); self.refresh()
         messages=[]
         for name,result in results:
-            messages.append(name+': '+('中止' if result.get('cancelled') else str(result['count'])+' 件')+(' / '+ '; '.join(result['errors'][:3]) if result.get('errors') else ''))
-        self.status.setText(' | '.join(messages) or 'スキャン対象なし')
+            messages.append(name+': '+('Cancel' if result.get('cancelled') else str(result['count'])+' assets')+(' / '+ '; '.join(result['errors'][:3]) if result.get('errors') else ''))
+        self.status.setText(' | '.join(messages) or 'No libraries to scan')
 
     def new_folder(self):
         folder=self.current_folder()
-        if not folder:raise ValueError('親フォルダーを左側で選択してください')
-        if not folder[1]:raise ValueError('最上位は USD / Texture / 3DModel の固定分類です。分類の下を選択してください。')
+        if not folder:raise ValueError('Select the parent folder on the left.')
+        if not folder[1]:raise ValueError('Choose a folder under USD, Texture or 3DModel. These top-level categories are fixed.')
         if folder[1].startswith('USD/') and core.package_entry(core.inside(folder[2],folder[1])):
-            raise ValueError('USDパッケージの内部はライブラリーから変更しません')
-        name,ok=QtWidgets.QInputDialog.getText(self,'新規フォルダー','名前（/ 区切りで階層も作成できます）')
+            raise ValueError('Cannot create folders inside a USD package.')
+        name,ok=QtWidgets.QInputDialog.getText(self,'New Folder','Name (use / for nested folders)')
         if ok and name.strip():
             path=core.inside(core.inside(folder[2],folder[1]),name.strip()); path.mkdir(parents=True,exist_ok=True)
-            self.rebuild_tree(); self.status.setText('作成: '+str(path))
+            self.rebuild_tree(); self.status.setText('Created: '+str(path))
 
     def root_menu(self):
         menu=QtWidgets.QMenu(self)
-        menu.addAction('フォルダーを開く',lambda:self.safe(self.reveal))
-        menu.addAction('ルートの場所を変更',lambda:self.safe(self.relink))
-        menu.addAction('このライブラリーをUSD / Catalogの保存先にする',lambda:self.safe(self.set_publish_root))
-        menu.addAction('ライブラリー登録を解除（ファイルは保持）',lambda:self.safe(self.remove_root))
-        menu.addAction('インデックスをバックアップ',lambda:self.status.setText(str(self.library.backup_index())))
+        menu.addAction('Add Library...',lambda:self.safe(self.add_root))
+        menu.addAction('New Folder...',lambda:self.safe(self.new_folder))
+        menu.addSeparator()
+        menu.addAction('Show in Explorer',lambda:self.safe(self.reveal))
+        menu.addAction('Relink Library...',lambda:self.safe(self.relink))
+        menu.addAction('Use Library for USD / Catalog Output',lambda:self.safe(self.set_publish_root))
+        menu.addAction('Remove Library Registration...',lambda:self.safe(self.remove_root))
+        menu.addAction('Back Up Index',lambda:self.status.setText(str(self.library.backup_index())))
         menu.exec(QtGui.QCursor.pos())
 
     def set_publish_root(self):
         folder=self.current_folder()
-        if not folder:raise ValueError('ライブラリーを選択してください')
+        if not folder:raise ValueError('Select a library.')
         self.default_root=folder[2]; self.settings['publish_root']=self.default_root; self.save_settings()
-        self.status.setText('USD / Catalog保存先: '+self.default_root)
+        self.status.setText('USD / Catalog output: '+self.default_root)
 
     def relink(self):
         folder=self.current_folder()
-        if not folder:raise ValueError('ライブラリーを選択してください')
-        path=QtWidgets.QFileDialog.getExistingDirectory(self,'移動後のルートフォルダー',folder[2])
+        if not folder:raise ValueError('Select a library.')
+        path=QtWidgets.QFileDialog.getExistingDirectory(self,'New Library Root Folder',folder[2])
         if path:
             source_root=Path(__file__).resolve().parents[2]
             candidate=Path(path).resolve()
             if candidate.is_relative_to(source_root) or source_root.is_relative_to(candidate):
-                raise ValueError('コードフォルダーとライブラリーは独立した場所を指定してください')
+                raise ValueError('Keep the code and asset library in separate folders.')
             self.library.backup_index(); self.library.relink_root(folder[0],path)
             if self.default_root and core.path_key(self.default_root)==core.path_key(folder[2]):
                 self.default_root=path; self.settings['publish_root']=path; self.save_settings()
@@ -468,8 +497,8 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def remove_root(self):
         folder=self.current_folder()
-        if not folder:raise ValueError('ライブラリーを選択してください')
-        result=QtWidgets.QMessageBox.question(self,'登録解除','このライブラリーの登録とタグ情報を解除しますか？\n元ファイルは保持し、インデックスをバックアップします。')
+        if not folder:raise ValueError('Select a library.')
+        result=QtWidgets.QMessageBox.question(self,'Remove Library','Remove this library registration and its tag metadata?\nSource files are kept. The index will be backed up.')
         if result==QtWidgets.QMessageBox.StandardButton.Yes:
             self.library.backup_index(); self.library.remove_root(folder[0]); self.rebuild_tree(); self.refresh()
 
@@ -477,19 +506,21 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.items.currentItem():path=self.library.resolve(self.selected()).parent
         else:
             folder=self.current_folder()
-            if not folder:raise ValueError('フォルダーを選択してください')
+            if not folder:raise ValueError('Select a folder.')
             path=core.inside(folder[2],folder[1])
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
 
     def choose_thumbnail(self):
-        row=self.selected(); path,_=QtWidgets.QFileDialog.getOpenFileName(self,'サムネイル画像',str(self.library.resolve(row).parent),'Images (*.png *.jpg *.jpeg)')
+        row=self.selected(); path,_=QtWidgets.QFileDialog.getOpenFileName(self,'Thumbnail Image',str(self.library.resolve(row).parent),'Images (*.png *.jpg *.jpeg)')
         if path:self.library.update(row['id'],thumbnail=path); self.refresh()
 
     def generate_thumbnail(self):
-        row=self.selected(); path=self.library.resolve(row)
-        if row['id'] in self.thumb_pending:return
-        self.thumb_failed.discard(row['id'])
-        self.queue_thumbnail(row,geometry=True,force=True); self.status.setText('サムネイル生成を予約しました（形状は別プロセスのKarma CPUで描画）')
+        rows=self.selected_rows()
+        for row in rows:
+            self.library.resolve(row)
+            self.thumb_failed.discard(row['id'])
+            self.queue_thumbnail(row,geometry=True,force=True)
+        self.status.setText(f'Queued {len(rows)} thumbnails. Geometry renders in a separate Karma CPU process.')
 
     def generate_missing_thumbnails(self):
         count=0
@@ -497,42 +528,52 @@ class LibraryWidget(QtWidgets.QWidget):
             if not self.thumbnail_path(row) and row['id'] not in self.thumb_pending:
                 self.thumb_failed.discard(row['id'])
                 self.queue_thumbnail(row,geometry=True); count+=1
-        self.status.setText(f'不足サムネイル {count} 件を予約しました。検索・フォルダーの表示対象全ページを順番に処理します。')
+        self.status.setText(f'Queued {count} missing thumbnails. All pages matching the search and folder filters are included.')
 
     def cancel_thumbnails(self):
         for row in self.thumb_queue:self.thumb_pending.discard(row['id'])
         self.thumb_queue.clear()
         if self.thumb_job:self.thumb_job.requestInterruption()
-        self.status.setText('中止しました。画像変換中の場合は現在の1件の終了を待ちます。')
+        self.status.setText('Cancelled. An active image conversion will finish first.')
 
     def thumbnail_done(self,aid,path,error):
         self.thumb_pending.discard(aid)
         if error:
-            self.thumb_failed.add(aid);self.status.setText('サムネイル生成失敗: '+error)
+            self.thumb_failed.add(aid);self.status.setText('Thumbnail failed: '+error)
         else:
             for i in range(self.items.count()):
                 item=self.items.item(i);row=item.data(ROLE)
                 if row['id']==aid:item.setIcon(self.icon_for(row))
             self.selection_changed()
-            self.status.setText(f'サムネイル生成完了（残り {len(self.thumb_queue)} 件）')
+            self.status.setText(f'Thumbnail complete ({len(self.thumb_queue)} remaining)')
 
     def copy_path(self):
-        path=self.library.resolve(self.selected()).as_posix()
+        path=dragdrop.paths_text([self.library.resolve(row) for row in self.selected_rows()])
         QtWidgets.QApplication.clipboard().setText(path)
-        self.status.setText('パスをコピーしました: '+path)
+        self.status.setText('Copied paths: '+path)
 
     def import_selected(self):
+        rows=self.selected_rows()
+        if len(rows)>1:
+            parent=hou.node(self.target.text())
+            if parent is None:raise ValueError('Import target does not exist.')
+            if all(row['kind']=='texture' for row in rows) and not dragdrop.is_material_context(parent):
+                self.copy_path();return
+            payloads=[{'path':self.library.resolve(row),'kind':row['effective_kind'],'label':row['label']} for row in rows]
+            nodes=dragdrop.import_payloads(payloads,parent)
+            self.status.setText(f'Imported {len(nodes)} assets into {parent.path()}')
+            return nodes
         row=self.selected(); source=self.library.resolve(row)
         if row['kind']=='texture':
-            self.copy_path();self.status.setText('Textureは入力欄へD&Dしてください。材質ネットワークへのD&DではMaterialXを作成します。');return
+            self.copy_path();self.status.setText('Drop textures into a field for paths, or into a material network for MaterialX.');return
         upstream=None
         if self.connect_input.isChecked():
             nodes=[n for n in hou.selectedNodes() if n.parent().path()==self.target.text() and n.type().category()==hou.lopNodeTypeCategory()]
-            if len(nodes)>1:raise ValueError('接続元LOPは1つだけ選択してください')
+            if len(nodes)>1:raise ValueError('Select only one upstream LOP.')
             if nodes:upstream=nodes[0]
         node=ops.import_asset(source,row['effective_kind'],row['label'],self.target.text(),upstream,'sublayer' if self.usdmode.currentIndex() else 'reference',self.assign.text())
         node.setSelected(True,clear_all_selected=True); node.setDisplayFlag(True)
-        self.status.setText('読み込み完了: '+node.path()+('（FBX/glTFの元マテリアルは自動再構築しません）' if source.suffix.lower() in {'.fbx','.gltf','.glb'} else ''))
+        self.status.setText('Imported: '+node.path()+(' (FBX/glTF source materials are not rebuilt automatically)' if source.suffix.lower() in {'.fbx','.gltf','.glb'} else ''))
         return node
 
     def create_manifest(self):
@@ -542,9 +583,9 @@ class LibraryWidget(QtWidgets.QWidget):
         dialog=ManifestDialog(base,self)
         if dialog.exec()!=QtWidgets.QDialog.DialogCode.Accepted:return
         name=dialog.name.text().strip()
-        if not name or any(c in name for c in '/\\:*?"<>|'):raise ValueError('有効なセット名を入力してください')
+        if not name or any(c in name for c in '/\\:*?"<>|'):raise ValueError('Enter a valid set name.')
         maps={key:field.text().strip() for key,field in dialog.maps.items() if field.text().strip()}
-        if not maps:raise ValueError('マップを1枚以上指定してください')
+        if not maps:raise ValueError('Choose at least one map.')
         dest=base/(name+('.decal.json' if dialog.kind.currentIndex() else '.pbr.json'))
         resolved={}
         for key,value in maps.items():
@@ -554,22 +595,22 @@ class LibraryWidget(QtWidgets.QWidget):
             except ValueError:resolved[key]=p.as_posix()
         data={'schema':1,'maps':resolved,'color_space':dialog.color.currentText(),'displacement_scale':dialog.scale.value()}
         with dest.open('x',encoding='utf-8') as stream:json.dump(data,stream,ensure_ascii=False,indent=2)
-        self.scan(); self.status.setText('セットを保存: '+str(dest))
+        self.scan(); self.status.setText('Set saved: '+str(dest))
 
     def catalog_path(self):
-        if not self.default_root:raise ValueError('ライブラリーを追加し、設定からUSD / Catalog保存先を指定してください')
+        if not self.default_root:raise ValueError('Add a library and choose its USD / Catalog output location in Libraries.')
         return Path(self.default_root)/'_catalog'/'solaris_assets.db'
 
     def add_catalog(self):
         row=self.selected(); path=self.library.resolve(row)
         thumb=self.thumbnail_path(row)
         item,added=ops.register_catalog(path,self.catalog_path(),row['label'],row['tags'],str(thumb) if thumb else '')
-        self.status.setText(('Catalogに登録: ' if added else '登録済み（重複なし）: ')+row['label'])
+        self.status.setText(('Added to Catalog: ' if added else 'Already registered: ')+row['label'])
         return item
 
     def open_catalog(self):
         path=self.catalog_path()
-        if not path.exists():raise ValueError('先にUSDをCatalogへ登録してください')
+        if not path.exists():raise ValueError('Add a USD asset to the Catalog first.')
         source=hou.AssetGalleryDataSource(path.as_posix())
         hou.ui.setSharedLayoutDataSource(source)
         pane=hou.ui.curDesktop().createFloatingPaneTab(hou.paneTabType.PythonPanel)
@@ -577,18 +618,18 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def publish_asset(self):
         row=self.selected(); path=self.library.resolve(row)
-        if not self.default_root:raise ValueError('USD保存先のライブラリーを設定してください')
+        if not self.default_root:raise ValueError('Choose a library for USD output.')
         base=Path(self.default_root)/'USD'/ops.safe_name(row['label'])
-        dest,_=QtWidgets.QFileDialog.getSaveFileName(self,'現在フレームの素材単体をUSD化（画像は元ファイルを参照）',str(base/(ops.safe_name(row['label'])+'.usd')),'USD (*.usd *.usda *.usdc)')
+        dest,_=QtWidgets.QFileDialog.getSaveFileName(self,'Publish Asset at Current Frame (textures remain linked)',str(base/(ops.safe_name(row['label'])+'.usd')),'USD (*.usd *.usda *.usdc)')
         if not dest:return
-        if Path(dest).exists():raise FileExistsError('別バージョンの名前を指定してください。既存USDは上書きしません。')
+        if Path(dest).exists():raise FileExistsError('Choose a new version name. Existing USD files will not be overwritten.')
         # Isolated temporary network: never export the user's entire shot.
         network=hou.node('/obj').createNode('lopnet','sal_publish')
         try:
             node=ops.import_asset(path,row['effective_kind'],row['label'],network.path())
             ops.export_stage(node,dest)
         finally:network.destroy()
-        self.scan(); self.status.setText('USDを書き出しました: '+dest+' / 再スキャン後にCatalog登録できます')
+        self.scan(); self.status.setText('USD exported: '+dest+' / Add to Catalog after rescanning')
 
 def show_window():
     dialog=QtWidgets.QDialog(hou.qt.mainWindow())
