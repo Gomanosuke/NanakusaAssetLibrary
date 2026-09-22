@@ -1,6 +1,6 @@
 from pathlib import Path
 import json,sys,tempfile,time,unittest
-from unittest.mock import patch
+from unittest.mock import patch,MagicMock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 from hutil.PySide import QtWidgets
 from nanakusa_asset_library import ui
@@ -637,5 +637,28 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(restored.catalog_path().resolve(),first.resolve())
             self.assertEqual(restored.catalogs.currentText(),'Props.db')
             restored.close();restored.deleteLater()
+
+    def test_open_catalog_uses_the_asset_gallery_data_source_not_the_layout_one(self):
+        # hou.ui has two similarly named setters. setSharedLayoutDataSource feeds the Labs Layout
+        # tool's own gallery, not the 'asset_gallery' Python Panel interface open_catalog() shows;
+        # calling it left that interface without a data source (it fell back to a blank
+        # placeholder) and froze every native Houdini menu/popup in the session - confirmed live
+        # in a disposable Houdini instance, and fixed by calling setSharedAssetGalleryDataSource
+        # instead. hou.ui does not exist in batch hython, so it is mocked here (create=True) to
+        # check open_catalog() calls the right one without needing a live UI session.
+        # ignore_cleanup_errors: hou.AssetGalleryDataSource (used indirectly by catalog_path's
+        # .db file) keeps the file open past this test, same as elsewhere in this suite.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            base=Path(folder);root=base/'asset';root.mkdir()
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.catalog_path().parent.mkdir(parents=True,exist_ok=True)
+            widget.catalog_path().write_bytes(b'')
+            fake_ui=MagicMock()
+            with patch.object(ui.hou,'ui',fake_ui,create=True):
+                widget.open_catalog()
+            fake_ui.setSharedAssetGalleryDataSource.assert_called_once()
+            fake_ui.setSharedLayoutDataSource.assert_not_called()
+            fake_ui.curDesktop.return_value.createFloatingPaneTab.assert_called_once_with(ui.hou.paneTabType.PythonPanel)
+            widget.close();widget.deleteLater()
 
 if __name__=='__main__':unittest.main()

@@ -38,6 +38,7 @@
 - 右側の大きなプレビューは常時表示し、編集項目はTagsとFavoriteだけにする。タグはEnterまたはフォーカス移動で保存する。
 - 素材情報は別プロセスで取得し、選択変更後の古い結果を表示しない。形状の集計で作業HIPを変更しない。
 - Catalog選択欄はasset/CatalogのDBを検出する。選択先はルートごとに保存し、Add Catalog / Open Catalogの双方で同じ選択を使う。新規作成で既存DBを上書きしない。
+- **`open_catalog`は`hou.ui.setSharedAssetGalleryDataSource`を使うこと。似た名前の`setSharedLayoutDataSource`（Labs Layoutツール用の別データソース）と間違えると、`asset_gallery`インターフェースが空のプレースホルダーになるだけでなく、以後セッション内のHoudiniネイティブメニュー・ポップアップが（自作パネル自身のメニューを除き）全滅する。**原因調査済みの実バグ（2026-09-23、使い捨てhoudinifx.exeで再現・修正確認）。`tests/test_ui.py`の`test_open_catalog_uses_the_asset_gallery_data_source_not_the_layout_one`（hou.uiをMagicMockでモック）が呼び出し先を固定するが、実際のUIフリーズ自体はhython batchでは再現できないため、この関数を触るときは使い捨てhoudinifx.exeで手動確認する。
 - Import Selected / Copy Pathsは右クリックに置き、Add CatalogはUSD選択時のみ表示する。
 - Ctrl / Shiftの複数選択を保持してD&D・Copy Paths・サムネイル生成を行う。メタデータ編集はactive assetのみ。
 - 全種類で文字列入力欄にはパスを渡す。Network ViewのPパラメーターは独立したネイティブ描画領域なので、グラフと誤判定してイベントを横取りしない。

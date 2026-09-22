@@ -1547,7 +1547,15 @@ class LibraryWidget(QtWidgets.QWidget):
         path=self.catalog_path()
         if not path.exists():raise ValueError('Add a USD asset to the Catalog first.')
         source=hou.AssetGalleryDataSource(path.as_posix())
-        hou.ui.setSharedLayoutDataSource(source)
+        # hou.ui has two similarly-named setters: setSharedLayoutDataSource feeds the Labs Layout
+        # tool's own gallery, not this one. Calling it here (instead of
+        # setSharedAssetGalleryDataSource) left the 'asset_gallery' Python Panel interface with no
+        # data source of its own: it silently fell back to its blank "Quick Start" placeholder, and
+        # every native Houdini menu/popup elsewhere in the session stopped responding to clicks
+        # (custom Qt widgets, including this panel's own menus, were unaffected) until the session
+        # was restarted. Regression-tested live: reproduced with setSharedLayoutDataSource, confirmed
+        # fixed with setSharedAssetGalleryDataSource, in a disposable Houdini instance.
+        hou.ui.setSharedAssetGalleryDataSource(source)
         pane=hou.ui.curDesktop().createFloatingPaneTab(hou.paneTabType.PythonPanel)
         pane.setActiveInterface(hou.pypanel.interfaceByName('asset_gallery'))
 
