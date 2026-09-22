@@ -195,6 +195,12 @@ class AssetList(QtWidgets.QListWidget):
         self.setDragEnabled(True)
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Debounced so a fast multi-notch scroll saves settings once, not per notch (mirrors
+        # mouseReleaseEvent below only emitting iconSizeFinished once the drag ends).
+        self._wheel_timer=QtCore.QTimer(self)
+        self._wheel_timer.setSingleShot(True)
+        self._wheel_timer.setInterval(300)
+        self._wheel_timer.timeout.connect(lambda:self.iconSizeFinished.emit(self.iconSize().width()))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -227,6 +233,15 @@ class AssetList(QtWidgets.QListWidget):
             self.iconSizeFinished.emit(self.iconSize().width())
             event.accept();return
         super().mouseReleaseEvent(event)
+
+    # Ctrl + wheel resizes the icons too: up = larger, down = smaller, one step per notch.
+    def wheelEvent(self, event):
+        if event.modifiers()&QtCore.Qt.KeyboardModifier.ControlModifier:
+            notches=event.angleDelta().y()/120
+            self.apply_icon_size(self.iconSize().width()+notches*24)
+            self._wheel_timer.start()
+            event.accept();return
+        super().wheelEvent(event)
 
     def expand(self, item):
         """Rows an item stands for; the library widget expands a PBR stack into its images."""

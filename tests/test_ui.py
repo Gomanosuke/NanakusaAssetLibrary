@@ -208,6 +208,33 @@ class LibraryUiTests(unittest.TestCase):
             again=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
             self.assertEqual(again.items.iconSize().width(),512);again.close();again.deleteLater()
 
+    def test_ctrl_wheel_resizes_icons_and_remembers_the_size_once_scrolling_settles(self):
+        from hutil.PySide import QtCore,QtGui
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for rel in ('3DModel/a.obj','3DModel/b.obj'):
+                p=root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('placeholder')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            items=widget.items;self.assertEqual(items.iconSize().width(),144)
+            def wheel(delta_y,mods=QtCore.Qt.KeyboardModifier.ControlModifier):
+                pos=QtCore.QPointF(100,100)
+                return QtGui.QWheelEvent(pos,pos,QtCore.QPoint(0,0),QtCore.QPoint(0,delta_y),
+                    QtCore.Qt.MouseButton.NoButton,mods,QtCore.Qt.ScrollPhase.NoScrollPhase,False)
+            items.wheelEvent(wheel(120));self.assertEqual(items.iconSize().width(),168)   # up = larger, one notch
+            self.assertNotIn('icon_size',widget.settings)   # not saved yet: debounced
+            items.wheelEvent(wheel(-120));self.assertEqual(items.iconSize().width(),144)   # down = smaller
+            items.wheelEvent(wheel(2400));self.assertEqual(items.iconSize().width(),512)   # 20 notches: clamped
+            self.assertEqual(items._wheel_timer.remainingTime()>0,True)   # still pending
+            items._wheel_timer.timeout.emit()   # fire the debounce directly instead of sleeping in a test
+            self.assertEqual(widget.settings['icon_size'],512);self.assertEqual(widget.icon_edge(),512)
+            # Plain wheel scrolling (no Ctrl) scrolls the list instead of resizing.
+            items.wheelEvent(wheel(120,mods=QtCore.Qt.KeyboardModifier.NoModifier))
+            self.assertEqual(items.iconSize().width(),512)
+            widget.close();widget.deleteLater()
+            again=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            self.assertEqual(again.items.iconSize().width(),512);again.close();again.deleteLater()
+
     def test_usdz_preview_is_shown_cached_and_never_overrides_a_generated_thumbnail(self):
         import zipfile
         import base64

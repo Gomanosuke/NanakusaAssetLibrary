@@ -115,7 +115,7 @@
 
 ## 一覧のアイコンサイズ
 
-- Ctrl+中ボタンドラッグの処理はdragdrop.AssetListに置く。範囲は64〜512px、サイズはsettings.jsonのicon_sizeへ保存する。256pxを超える時だけ、大きい元画像（icon_edge）で一覧を作り直す。
+- Ctrl+中ボタンドラッグとCtrl+ホイール（1ノッチ24px、保存は300msデバウンス）の処理はdragdrop.AssetListに置く。範囲は64〜512px、サイズはsettings.jsonのicon_sizeへ保存する。256pxを超える時だけ、大きい元画像（icon_edge）で一覧を作り直す。
 
 ## PBRスタックとマテリアル配置
 

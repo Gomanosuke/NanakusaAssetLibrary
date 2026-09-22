@@ -163,7 +163,7 @@ USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・Up
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
 Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで読み込み済みの素材を全選択できます（一覧はページ分けせず、スクロールで続きを読み込む）。
-素材一覧でCtrl+マウス中ボタンをドラッグすると、アイコンサイズを変更できます（右・上へ動かすと大きく、左・下へ動かすと小さくなります。64〜512px）。
+素材一覧でCtrl+マウス中ボタンをドラッグすると、アイコンサイズを変更できます（右・上へ動かすと大きく、左・下へ動かすと小さくなります。64〜512px）。Ctrl+ホイールでも1ノッチ24pxずつ変更でき、保存（`iconSizeFinished`）はホイール操作が300ms止まってから1回だけ行います。
 サイズは`settings.json`に保存し、次回も引き継ぎます。256pxを超える場合は、鮮明に表示するため一覧を作り直します。
 D&D・Copy Paths・Generate Selected Thumbnailsは選択した全素材が対象です。
 右側の編集項目はTagsとFavoriteのみで、active asset（最後に選んだ1件）が対象です。
