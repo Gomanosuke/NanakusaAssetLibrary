@@ -249,20 +249,22 @@ class LibraryUiTests(unittest.TestCase):
                 widget.items.setCurrentRow(next(i for i in range(widget.items.count()) if widget.item_row(widget.items.item(i))['id']==row['id']))
 
             select(usda)
-            self.assertIn('Generate Selected Proxies',[a.text() for a in widget.build_asset_menu().actions()])
+            labels=[a.text() for a in widget.build_asset_menu().actions()]
+            self.assertIn('Generate Selected Proxies...',labels);self.assertIn('Generate Selected LODs...',labels)
             select(usdz)
-            self.assertIn('Generate Selected Proxies',[a.text() for a in widget.build_asset_menu().actions()])   # .usdz is repackaged with its proxy inside
+            self.assertIn('Generate Selected Proxies...',[a.text() for a in widget.build_asset_menu().actions()])   # .usdz is repackaged with its proxy inside
             select(obj)
-            self.assertNotIn('Generate Selected Proxies',[a.text() for a in widget.build_asset_menu().actions()])   # not a USD kind
+            self.assertNotIn('Generate Selected Proxies...',[a.text() for a in widget.build_asset_menu().actions()])   # not a USD kind
 
-            widget.queue_proxy(obj);self.assertNotIn(obj['id'],widget.proxy_pending)   # not a USD kind: never queued
+            widget.queue_proxy(obj,300);self.assertNotIn(obj['id'],widget.proxy_pending)   # not a USD kind: never queued
+            widget.queue_lod(obj,4,50.0);self.assertNotIn(obj['id'],widget.lod_pending)
 
             with patch.object(ui,'ProxyJob') as job_cls:
                 job=job_cls.return_value
-                widget.queue_proxy(usda)
+                widget.queue_proxy(usda,300)
                 self.assertIn(usda['id'],widget.proxy_pending)
                 self.app.processEvents()
-                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'proxy')
+                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'proxy',300)
                 self.assertIs(widget.proxy_job,job)
                 job.done.connect.assert_called_once_with(widget.proxy_done)
 
@@ -273,6 +275,52 @@ class LibraryUiTests(unittest.TestCase):
             widget.proxy_done('missing-id','','disk full')
             self.assertIn('missing-id',widget.proxy_failed)
             self.assertIn('Proxy generation failed',widget.status.text())
+
+            with patch.object(ui,'LodJob') as job_cls:
+                job=job_cls.return_value
+                widget.queue_lod(usda,4,50.0)
+                self.assertIn(usda['id'],widget.lod_pending)
+                self.app.processEvents()
+                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'lod',4,50.0)
+                self.assertIs(widget.lod_job,job)
+                job.done.connect.assert_called_once_with(widget.lod_done)
+
+            widget.lod_done(usda['id'],'LODs added (1 mesh(es), 4 levels)','')
+            self.assertNotIn(usda['id'],widget.lod_pending)
+            self.assertIn('LODs added',widget.status.text())
+
+            widget.lod_done('missing-id','','disk full')
+            self.assertIn('missing-id',widget.lod_failed)
+            self.assertIn('LOD generation failed',widget.status.text())
+            widget.close();widget.deleteLater()
+
+    def test_proxy_and_lod_dialogs_remember_the_last_value_and_cancel_queues_nothing(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            (root/'USD'/'chair').mkdir(parents=True);(root/'USD'/'chair'/'chair.usda').write_text('x')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            widget.items.setCurrentRow(0);widget.items.selectAll()
+
+            with patch.object(ui.QtWidgets.QInputDialog,'getInt',return_value=(150,False)) as dlg:
+                widget.generate_proxy()
+                dlg.assert_called_once()
+                self.assertEqual(dlg.call_args.args[3],ui.proxy_gen.TARGET_TRIANGLES)   # default shown
+            self.assertEqual(widget.proxy_queue,ui.deque())   # cancelled: nothing queued
+            self.assertNotIn('proxy_target_triangles',widget.settings)
+
+            with patch.object(ui.QtWidgets.QInputDialog,'getInt',return_value=(150,True)):
+                widget.generate_proxy()
+            self.assertEqual(widget.settings['proxy_target_triangles'],150)
+            with patch.object(ui.QtWidgets.QInputDialog,'getInt') as dlg2:
+                dlg2.return_value=(150,False)
+                widget.ask_proxy_target()
+                self.assertEqual(dlg2.call_args.args[3],150)   # remembers the last value as the new default
+
+            with patch.object(ui.QtWidgets.QInputDialog,'getInt',return_value=(3,True)),\
+                 patch.object(ui.QtWidgets.QInputDialog,'getDouble',return_value=(25.0,True)):
+                widget.generate_lod()
+            self.assertEqual(widget.settings['lod_levels'],3);self.assertEqual(widget.settings['lod_reduction'],25.0)
             widget.close();widget.deleteLater()
 
     def test_big_libraries_stay_responsive(self):
@@ -316,6 +364,15 @@ class LibraryUiTests(unittest.TestCase):
             for i in range(40):
                 p=root/'3DModel'/f'g{i%4}'/f'm{i:02d}.obj';p.parent.mkdir(parents=True,exist_ok=True);p.write_text('x')
             widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            rid0=widget.library.roots()[0]['id']
+            if rid0 in widget.folder_migrations:
+                # __init__ started its own background migration (the index was empty at that
+                # point); let it finish before patching visible_folders, or it can race into the
+                # patch and raise inside the background thread instead of just walking the disk.
+                init_job=next(j for j in ui._jobs if isinstance(j,ui.FolderMigrationJob) and j.root['id']==rid0)
+                init_job.wait(5000)
+                steps=0
+                while rid0 in widget.folder_migrations and steps<200:self.app.processEvents();steps+=1
             widget.library.scan(widget.library.roots()[0]['id'])
             with patch.object(ui.core,'visible_folders',side_effect=AssertionError('walked the disk')):
                 widget.rebuild_tree()   # folders are read from the index
@@ -415,11 +472,11 @@ class LibraryUiTests(unittest.TestCase):
             stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
 
             got=[]
-            job=ui.ProxyJob('aid',source,backups)
+            job=ui.ProxyJob('aid',source,backups,ui.proxy_gen.TARGET_TRIANGLES)
             job.done.connect(lambda *a:got.append(a))
             job.run()
             self.assertEqual(got,[('aid','Proxy added (1 mesh(es))','')])
-            leftovers=[p.name for p in source.parent.iterdir() if 'nanakusa_proxy_tmp' in p.name]
+            leftovers=[p.name for p in source.parent.iterdir() if 'nanakusa_generate_tmp' in p.name]
             self.assertEqual(leftovers,[])   # the temp file next to the source is always cleaned up
             backed_up=list(backups.iterdir())
             self.assertEqual(len(backed_up),1)

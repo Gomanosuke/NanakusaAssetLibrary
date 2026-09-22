@@ -86,11 +86,16 @@
 - サムネイルのDome Lightはresources/meadow_2_8k.exr（Exposure -0.5、上軸まわり-30度）、Distant LightはExposure 1。値の変更はthumbnail_scene.pyの定数で行う。
 - HDRIはライブラリーのassetではなく本体側のresourcesへコピーして使う（ユーザーの指示: 移動してもサムネイルが作れなくならないように）。容量が大きいためGitへは入れない（*.exrを除外）。resources/README.mdに手順を残す。HDRIがない場合は白いDome Lightへ戻す。
 
-## Proxyの生成
+## Proxy / LODの生成
 
-- proxy_gen.pyが別プロセス（hython）で`purpose=proxy`を追加する。対象資産自身の入口ファイルだけを編集し、参照・ペイロード先には触れない。ターゲット三角形数はproxy_gen.pyのTARGET_TRIANGLES定数（既定300）。
+- proxy_gen.py（purpose=proxy）とlod_gen.py（lod variant set）が別プロセス（hython）で追加する。対象資産自身の入口ファイルだけを編集し、参照・ペイロード先には触れない。ファイル入出力（プレーンUSD/`.usdz`の展開・再パッケージ）はproxy_gen.pyのgenerate_plain/generate_usdzをlod_gen.pyが再利用する。
+- デシメート前に`fuse`（UV・材質境界の分離頂点を結合。結合しないと境界の断片が個別に潰れて形が崩れる）と`divide`（三角形化。しないとpolyreduceの目標数＝プリミティブ数になり、四角形主体のメッシュで指定数のおよそ2倍が残る）を必ず通す。値はどちらも`_decimate`内で計算・固定。数値を変える時はここを見る。
+- proxyは対象メッシュの束縛材質からbase colorテクスチャを検出できれば、UVでサンプルした色を頂点カラー（primvars:displayColor、vertex補間）としてattribfrommap相当で焼き込む（0〜1にクランプ）。見つからなければ無地のまま。LODでは焼き込みをしない。
+- lod_gen.pyはvariant追加前に対象メッシュの点・面カウント属性をClear()する。USDの合成順（Local > VariantSets > References）で、消さないとどのLODを選んでも元のローカル値が勝ってしまい切り替わらない。
 - `.usdz`はUsdUtils.ExtractUsdzPackageで展開し、アーカイブ先頭エントリ（usdz仕様のルートレイヤー）を編集してからUsdUtils.CreateNewUsdzPackageで再パッケージする。手動でのzip操作はしない。
-- ui.pyのProxyJobが結果を検証してから、data/backups/proxy/へ元ファイルをバックアップし、os.replaceで置き換える。失敗・スキップ時は元ファイルを一切変更しない（proxy_gen.py単体はSave()せずExport/CreateNewUsdzPackageで新規ファイルに書き出すだけ）。
+- ui.pyの`_MeshGenerateJob`（ProxyJob/LodJobの共通基底）が結果を検証してから、data/backups/proxy/またはdata/backups/lod/へ元ファイルをバックアップし、os.replaceで置き換える。失敗・スキップ時は元ファイルを一切変更しない（生成スクリプト単体はSave()せずExport/CreateNewUsdzPackageで新規ファイルに書き出すだけ）。
+- **一時出力ファイルは元ファイルと同じフォルダーに書く**（tempfile.TemporaryDirectory()配下ではない）。os.replaceはWindowsで別ドライブ間の置き換えができない（WinError 17）。素材ライブラリーとシステムTEMPが別ドライブの構成で実際に踏んだ既知の不具合（バックアップだけ作られ元ファイルは変更されないまま失敗する）。
+- 実行時にダイアログで値を聞く（target triangles / levels / reduction%）。値はsettings.jsonに保存し次回の初期値にする。ダイアログをテストする時はQtWidgets.QInputDialog.getInt/getDoubleをpatchする。
 
 ## 一覧のアイコンサイズ
 

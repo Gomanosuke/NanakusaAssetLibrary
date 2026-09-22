@@ -182,12 +182,25 @@ Explorerで動かさなくても、パネルの中で階層を整理できます
 
 proxy（`purpose=proxy`）が無いUSDは、Scene Viewでも重いレンダー用の形状がそのまま表示されます。この機能は、簡易化した形状をproxyとして追加します。
 
-- 右クリックの **Generate Selected Proxies** で、選択したUSD資産（`.usdz` を含む）に生成します。Libraries... の **Generate Missing Proxies** は、条件に合うUSD資産をまとめてキューへ入れます。**Cancel Proxies** で待機中の分を止められます。
+- 右クリックの **Generate Selected Proxies...** で、選択したUSD資産（`.usdz` を含む）に生成します。Libraries... の **Generate Missing Proxies...** は、条件に合うUSD資産をまとめてキューへ入れます。**Cancel Proxies** で待機中の分を止められます。
+- 実行時に「Target triangles per mesh」（メッシュ1つあたりの目標三角形数、既定300）をダイアログで指定します。前回の値は次回の初期値として憶えています。
 - 生成は別プロセス（hython）で行い、Houdiniは止まりません。
-- 各メッシュを目安300三角形程度までデシメートし、`purpose=proxy` の兄弟プリムとして追加します。元のジオメトリには `purpose=render` を設定します（Scene Viewがproxyを優先して表示するため）。
+- 各メッシュを目標の三角形数までデシメートし、`purpose=proxy` の兄弟プリムとして追加します。元のジオメトリには `purpose=render` を設定します（Scene Viewがproxyを優先して表示するため）。
+  - デシメート前にUVや材質の境目で分かれた近接頂点を結合するため、離れた部品がバラバラに潰れて形が崩れることはありません。
+  - 目標の三角形数は正確な三角形数として扱います（四角形・多角形主体のメッシュでも、削減後の枚数がおおよそ2倍になってしまうことはありません）。
+- 元のレンダーメッシュにbase colorテクスチャの材質が設定されている場合、そのテクスチャの色をproxyの頂点カラー（`primvars:displayColor`）へ焼き込みます（Attribute from Map相当）。proxyだけを表示していても、元の資材の色味が大まかに分かります。テクスチャが無い・材質が無い資産は、これまでどおり無地のproxyになります。
 - **USDファイル自体を書き換えます。** 参照・ペイロード先の別ファイルには触れず、その資産自身の入口ファイルにだけproxyを追加します。書き換え前に必ず `data/backups/proxy/` へ元ファイルをバックアップします。
 - `.usdz` は一旦展開し、パッケージのルートレイヤーだけを編集してから、USD標準の方法（`UsdUtils.CreateNewUsdzPackage`）で参照ファイルごと再パッケージします。中の他のファイル（テクスチャ等）はそのまま引き継がれます。
 - 既に `purpose=proxy` を持つ資産、メッシュが無い資産は自動でスキップされます（ファイルは変更されません）。
+
+## LODの生成
+
+USDに複数段階の詳細度（LOD）を追加できます。proxyとは別の仕組みで、USDの標準的なvariant setで切り替えます。
+
+- 右クリックの **Generate Selected LODs...** で、選択したUSD資産に生成します。Libraries... の **Generate Missing LODs...** はまとめてキューへ入れます。**Cancel LODs** で待機中の分を止められます。
+- 実行時に「Number of levels」（段階数、LOD0が元の形状、既定4）と「Triangles kept per level」（1段階ごとに前段階の何%を残すか、既定50%）をダイアログで指定します。前回の値を憶えています。
+- 各メッシュに `lod` という名前のvariant setを作り、`LOD0`（元の形状）から `LOD{段階数-1}`（最も簡易）までを切り替えられるようにします。初期選択はLOD0です。
+- proxyと同様、書き込みは資産自身の入口ファイルのみ、`.usdz`は展開・再パッケージ、既にLODがある資産はスキップ、バックアップは `data/backups/lod/` に保存します。
 
 ## USD / Asset Catalog
 

@@ -12,7 +12,7 @@ import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded
+from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen, lod_gen
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STACK_ROLE = dragdrop.STACK_ROLE   # ids of the assets a list item stands for
@@ -224,41 +224,47 @@ class GeometryThumbnailJob(QtCore.QThread):
         except Exception as exc:
             self.done.emit(self.asset_id, '', str(exc))
 
-class ProxyJob(QtCore.QThread):
-    """Add a decimated purpose=proxy sibling to each render mesh of a USD file.
+class _MeshGenerateJob(QtCore.QThread):
+    """Shared plumbing for ProxyJob and LodJob.
 
-    Generation runs in a separate hython process (proxy_gen.py) and only ever writes to a
-    temporary file; the source asset is backed up and swapped in here only after that succeeds,
-    so a crash or a locked file never leaves the asset half-written.
+    Generation runs in a separate hython process (a worker script named by the `script` class
+    attribute) and only ever writes to a temporary file next to the source; the source asset is
+    backed up and swapped in here only after that succeeds, so a crash or a locked file never
+    leaves the asset half-written. The swap uses os.replace, which Windows refuses across drives,
+    so the temp file lives beside the source rather than in the system TEMP directory.
     """
     done = QtCore.Signal(str, str, str)   # asset_id, message (skip reason or summary), error
-    def __init__(self, asset_id, source, backup_dir):
+    script = ''         # set by the subclass: worker script filename, next to this file
+    label = 'Generation'   # set by the subclass: used in cancelled/timeout/no-output messages
+
+    def __init__(self, asset_id, source, backup_dir, extra_args=()):
         super().__init__()
         self.asset_id, self.source, self.backup_dir = asset_id, str(source), Path(backup_dir)
+        self.extra_args = [str(a) for a in extra_args]
         self.bin = Path(hou.getenv('HFS'))/'bin'
 
+    def summary(self, result):
+        raise NotImplementedError
+
     def run(self):
-        # The output must be swapped in with os.replace, which Windows refuses across drives;
-        # writing it next to the source (not in the system TEMP drive) keeps the swap on one
-        # volume no matter where the library lives.
         source = Path(self.source)
-        temp_usd = source.with_name(source.stem+'.nanakusa_proxy_tmp'+source.suffix)
+        temp_usd = source.with_name(source.stem+'.nanakusa_generate_tmp'+source.suffix)
         try:
-            with tempfile.TemporaryDirectory(prefix='nanakusa_proxy_') as folder:
+            with tempfile.TemporaryDirectory(prefix='nanakusa_generate_') as folder:
                 base = Path(folder)
                 suffix = '.exe' if os.name == 'nt' else ''
                 result_path = base/'result.json'
-                log = base/'proxy.log'
+                log = base/'generate.log'
                 with log.open('wb') as stream:
-                    process = subprocess.Popen([str(self.bin/('hython'+suffix)), str(Path(__file__).with_name('proxy_gen.py')),
-                        self.source, str(temp_usd), str(result_path)], stdout=stream, stderr=stream, **background())
+                    process = subprocess.Popen([str(self.bin/('hython'+suffix)), str(Path(__file__).with_name(self.script)),
+                        self.source, str(temp_usd), str(result_path), *self.extra_args], stdout=stream, stderr=stream, **background())
                     started = time.monotonic()
                     try:
                         while process.poll() is None:
                             if self.isInterruptionRequested():
-                                raise RuntimeError('Proxy generation cancelled')
+                                raise RuntimeError(self.label+' cancelled')
                             if time.monotonic()-started > 240:
-                                raise RuntimeError('Proxy generation timed out')
+                                raise RuntimeError(self.label+' timed out')
                             self.msleep(100)
                     finally:
                         if process.poll() is None:
@@ -272,18 +278,37 @@ class ProxyJob(QtCore.QThread):
                     self.done.emit(self.asset_id, result['skipped'], '')
                     return
                 if not temp_usd.is_file() or temp_usd.stat().st_size == 0:
-                    raise RuntimeError('Proxy generation produced no output')
+                    raise RuntimeError(self.label+' produced no output')
                 self.backup_dir.mkdir(parents=True, exist_ok=True)
                 backup = self.backup_dir/(source.stem+'_backup_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+source.suffix)
                 shutil.copy2(self.source, backup)
                 os.replace(str(temp_usd), self.source)
-            self.done.emit(self.asset_id, f"Proxy added ({len(result['proxied'])} mesh(es))", '')
+            self.done.emit(self.asset_id, self.summary(result), '')
         except Exception as exc:
             self.done.emit(self.asset_id, '', str(exc))
         finally:
             if temp_usd.is_file():
                 try: temp_usd.unlink()
                 except OSError: pass
+
+
+class ProxyJob(_MeshGenerateJob):
+    """Add a decimated purpose=proxy sibling to each render mesh of a USD file (proxy_gen.py)."""
+    script, label = 'proxy_gen.py', 'Proxy generation'
+    def __init__(self, asset_id, source, backup_dir, target_triangles):
+        super().__init__(asset_id, source, backup_dir, (target_triangles,))
+    def summary(self, result):
+        return f"Proxy added ({len(result['proxied'])} mesh(es))"
+
+
+class LodJob(_MeshGenerateJob):
+    """Add a "lod" variant set (LOD0..LOD{levels-1}) to each render mesh of a USD file (lod_gen.py)."""
+    script, label = 'lod_gen.py', 'LOD generation'
+    def __init__(self, asset_id, source, backup_dir, levels, reduction):
+        super().__init__(asset_id, source, backup_dir, (levels, reduction))
+    def summary(self, result):
+        levels = len(result['lods'][0]['triangles']) if result['lods'] else 0
+        return f"LODs added ({len(result['lods'])} mesh(es), {levels} levels)"
 
 
 class FolderMigrationJob(QtCore.QThread):
@@ -373,6 +398,11 @@ class LibraryWidget(QtWidgets.QWidget):
         self.proxy_failed = set()
         self.proxy_job = None
         self.missing_proxy_scan = None
+        self.lod_queue = deque()
+        self.lod_pending = set()
+        self.lod_failed = set()
+        self.lod_job = None
+        self.missing_lod_scan = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
         self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
@@ -619,6 +649,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.job and self.job.isRunning():raise ValueError('Wait for the scan to finish before moving assets.')
         if self.thumb_pending:raise ValueError('Wait for thumbnail generation to finish (or use Libraries... > Cancel Thumbnails) before moving assets.')
         if self.proxy_pending:raise ValueError('Wait for proxy generation to finish (or use Libraries... > Cancel Proxies) before moving assets.')
+        if self.lod_pending:raise ValueError('Wait for LOD generation to finish (or use Libraries... > Cancel LODs) before moving assets.')
         self.save_metadata()
         root_id,dest_rel,_=target;select=None
         if 'assets' in payload:
@@ -842,17 +873,17 @@ class LibraryWidget(QtWidgets.QWidget):
     def thumbnail_finished(self):
         self.thumb_job=None;self.next_thumbnail()
 
-    def queue_proxy(self,row):
+    def queue_proxy(self,row,target_triangles):
         aid=row['id']
         if row['kind']!='usd' or aid in self.proxy_pending or aid in self.proxy_failed:return
-        self.proxy_pending.add(aid);self.proxy_queue.append(row)
+        self.proxy_pending.add(aid);self.proxy_queue.append((row,target_triangles))
         QtCore.QTimer.singleShot(0,self.next_proxy)
 
     def next_proxy(self):
         if self.proxy_job is not None or not self.proxy_queue:return
-        row=self.proxy_queue.popleft()
+        row,target_triangles=self.proxy_queue.popleft()
         source=Path(row['root_path'])/row['relpath']
-        self.proxy_job=ProxyJob(row['id'],source,self.data_dir/'backups'/'proxy')
+        self.proxy_job=ProxyJob(row['id'],source,self.data_dir/'backups'/'proxy',target_triangles)
         self.proxy_job.done.connect(self.proxy_done)
         self.proxy_job.finished.connect(self.proxy_finished)
         _keep_job(self.proxy_job)
@@ -866,6 +897,31 @@ class LibraryWidget(QtWidgets.QWidget):
             self.proxy_failed.add(aid);self.status.setText('Proxy generation failed: '+error)
         else:
             self.status.setText((message or 'Already has a proxy')+f' ({len(self.proxy_queue)} remaining)')
+
+    def queue_lod(self,row,levels,reduction):
+        aid=row['id']
+        if row['kind']!='usd' or aid in self.lod_pending or aid in self.lod_failed:return
+        self.lod_pending.add(aid);self.lod_queue.append((row,levels,reduction))
+        QtCore.QTimer.singleShot(0,self.next_lod)
+
+    def next_lod(self):
+        if self.lod_job is not None or not self.lod_queue:return
+        row,levels,reduction=self.lod_queue.popleft()
+        source=Path(row['root_path'])/row['relpath']
+        self.lod_job=LodJob(row['id'],source,self.data_dir/'backups'/'lod',levels,reduction)
+        self.lod_job.done.connect(self.lod_done)
+        self.lod_job.finished.connect(self.lod_finished)
+        _keep_job(self.lod_job)
+
+    def lod_finished(self):
+        self.lod_job=None;self.next_lod()
+
+    def lod_done(self,aid,message,error):
+        self.lod_pending.discard(aid)
+        if error:
+            self.lod_failed.add(aid);self.status.setText('LOD generation failed: '+error)
+        else:
+            self.status.setText((message or 'Already has LODs')+f' ({len(self.lod_queue)} remaining)')
 
     def icon_for(self,row):
         path=self.thumbnail_path(row)
@@ -1019,7 +1075,8 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addSeparator()
         action('Generate Selected Thumbnails',self.generate_thumbnail)
         if all(row['kind']=='usd' for row in rows):
-            action('Generate Selected Proxies',self.generate_proxy)
+            action('Generate Selected Proxies...',self.generate_proxy)
+            action('Generate Selected LODs...',self.generate_lod)
         if len(rows)==1:
             action('Choose Thumbnail...',self.choose_thumbnail)
             action('Publish Static USD...',self.publish_asset)
@@ -1088,8 +1145,10 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addSeparator()
         menu.addAction('Generate Missing Thumbnails',lambda:self.safe(self.generate_missing_thumbnails))
         menu.addAction('Cancel Thumbnails',lambda:self.safe(self.cancel_thumbnails))
-        menu.addAction('Generate Missing Proxies',lambda:self.safe(self.generate_missing_proxies))
+        menu.addAction('Generate Missing Proxies...',lambda:self.safe(self.generate_missing_proxies))
         menu.addAction('Cancel Proxies',lambda:self.safe(self.cancel_proxies))
+        menu.addAction('Generate Missing LODs...',lambda:self.safe(self.generate_missing_lods))
+        menu.addAction('Cancel LODs',lambda:self.safe(self.cancel_lods))
         menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
         menu.addAction('Select Catalog...',lambda:self.safe(self.select_catalog))
         menu.addAction('New Catalog...',lambda:self.safe(self.new_catalog))
@@ -1142,21 +1201,42 @@ class LibraryWidget(QtWidgets.QWidget):
             self.queue_thumbnail(row,geometry=True,force=True)
         self.status.setText(f'Queued {len(rows)} thumbnails. Geometry renders in a separate Karma CPU process.')
 
+    def ask_proxy_target(self):
+        default=int(self.settings.get('proxy_target_triangles',proxy_gen.TARGET_TRIANGLES))
+        value,ok=QtWidgets.QInputDialog.getInt(self,'Generate Proxy','Target triangles per mesh:',default,4,2000000)
+        if not ok:return None
+        self.settings['proxy_target_triangles']=value;self.save_settings()
+        return value
+
+    def ask_lod_settings(self):
+        levels_default=int(self.settings.get('lod_levels',lod_gen.DEFAULT_LEVELS))
+        levels,ok=QtWidgets.QInputDialog.getInt(self,'Generate LODs','Number of levels (LOD0 is the original):',levels_default,2,10)
+        if not ok:return None
+        reduction_default=float(self.settings.get('lod_reduction',lod_gen.DEFAULT_REDUCTION))
+        reduction,ok=QtWidgets.QInputDialog.getDouble(self,'Generate LODs','Triangles kept per level, of the level above (%):',reduction_default,1.0,99.0,1)
+        if not ok:return None
+        self.settings['lod_levels']=levels;self.settings['lod_reduction']=reduction;self.save_settings()
+        return levels,reduction
+
     def generate_proxy(self):
         rows=[r for r in self.selected_rows() if r['kind']=='usd']
         if not rows:raise ValueError('Select one or more USD assets.')
+        target=self.ask_proxy_target()
+        if target is None:return
         for row in rows:
             self.library.resolve(row)
             self.proxy_failed.discard(row['id'])
-            self.queue_proxy(row)
-        self.status.setText(f'Queued {len(rows)} proxy job(s). Each USD file is overwritten in place (a backup is kept in data/backups/proxy).')
+            self.queue_proxy(row,target)
+        self.status.setText(f'Queued {len(rows)} proxy job(s) (target {target} triangles). Each USD file is overwritten in place (a backup is kept in data/backups/proxy).')
 
     def generate_missing_proxies(self):
         if self.missing_proxy_scan is not None:return
+        target=self.ask_proxy_target()
+        if target is None:return
         # Whether a USD already has a proxy can only be known by opening it, which is too slow to
         # check here for every asset; each queued job checks its own file and skips quickly if so.
         filters=dict(self.filters());filters['kind']='usd'
-        self.missing_proxy_scan={'batches':self.library.iter_rows(**filters),'batch':[],'index':0,'count':0,'seen':0}
+        self.missing_proxy_scan={'batches':self.library.iter_rows(**filters),'batch':[],'index':0,'count':0,'seen':0,'target':target}
         QtCore.QTimer.singleShot(0,self.missing_proxy_step)
 
     def missing_proxy_step(self):
@@ -1173,16 +1253,62 @@ class LibraryWidget(QtWidgets.QWidget):
                 scan['index']=0
             row=scan['batch'][scan['index']];scan['index']+=1;scan['seen']+=1
             if row['id'] not in self.proxy_pending:
-                self.proxy_failed.discard(row['id']);self.queue_proxy(row);scan['count']+=1
+                self.proxy_failed.discard(row['id']);self.queue_proxy(row,scan['target']);scan['count']+=1
         self.status.setText(f"Checking USD assets... {scan['seen']} / {self.total}")
         QtCore.QTimer.singleShot(0,self.missing_proxy_step)
 
     def cancel_proxies(self):
         self.missing_proxy_scan=None
-        for row in self.proxy_queue:self.proxy_pending.discard(row['id'])
+        for row,_ in self.proxy_queue:self.proxy_pending.discard(row['id'])
         self.proxy_queue.clear()
         if self.proxy_job:self.proxy_job.requestInterruption()
         self.status.setText('Cancelled. An active proxy generation will finish first.')
+
+    def generate_lod(self):
+        rows=[r for r in self.selected_rows() if r['kind']=='usd']
+        if not rows:raise ValueError('Select one or more USD assets.')
+        settings=self.ask_lod_settings()
+        if settings is None:return
+        levels,reduction=settings
+        for row in rows:
+            self.library.resolve(row)
+            self.lod_failed.discard(row['id'])
+            self.queue_lod(row,levels,reduction)
+        self.status.setText(f'Queued {len(rows)} LOD job(s) ({levels} levels, {reduction:g}% kept per level). Each USD file is overwritten in place (a backup is kept in data/backups/lod).')
+
+    def generate_missing_lods(self):
+        if self.missing_lod_scan is not None:return
+        settings=self.ask_lod_settings()
+        if settings is None:return
+        levels,reduction=settings
+        filters=dict(self.filters());filters['kind']='usd'
+        self.missing_lod_scan={'batches':self.library.iter_rows(**filters),'batch':[],'index':0,'count':0,'seen':0,'levels':levels,'reduction':reduction}
+        QtCore.QTimer.singleShot(0,self.missing_lod_step)
+
+    def missing_lod_step(self):
+        scan=self.missing_lod_scan
+        if scan is None:return
+        deadline=time.monotonic()+0.015
+        while time.monotonic()<deadline:
+            if scan['index']>=len(scan['batch']):
+                scan['batch']=next(scan['batches'],None)
+                if scan['batch'] is None:
+                    self.missing_lod_scan=None
+                    self.status.setText(f"Queued {scan['count']} LOD jobs. Everything matching the search and folder filters is included.")
+                    return
+                scan['index']=0
+            row=scan['batch'][scan['index']];scan['index']+=1;scan['seen']+=1
+            if row['id'] not in self.lod_pending:
+                self.lod_failed.discard(row['id']);self.queue_lod(row,scan['levels'],scan['reduction']);scan['count']+=1
+        self.status.setText(f"Checking USD assets... {scan['seen']} / {self.total}")
+        QtCore.QTimer.singleShot(0,self.missing_lod_step)
+
+    def cancel_lods(self):
+        self.missing_lod_scan=None
+        for row,_,_ in self.lod_queue:self.lod_pending.discard(row['id'])
+        self.lod_queue.clear()
+        if self.lod_job:self.lod_job.requestInterruption()
+        self.status.setText('Cancelled. An active LOD generation will finish first.')
 
     def generate_missing_thumbnails(self):
         if self.missing_scan is not None:return

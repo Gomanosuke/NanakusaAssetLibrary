@@ -1,5 +1,6 @@
 from pathlib import Path
 import math
+import os
 import sys
 import tempfile
 import unittest
@@ -22,7 +23,54 @@ def grid_mesh(stage, path, n):
     return mesh,proxy_gen._triangle_count(counts)
 
 
+def seam_split_grids(n=10, gap=0.0):
+    """Two n x n grids side by side, sharing an edge but as separate, non-welded points - the
+    way many FBX/Sketchfab exports split a surface at every UV or material seam."""
+    def grid(x0):
+        pts,idx={},{}
+        for j in range(n+1):
+            for i in range(n+1):
+                idx[(i,j)]=len(pts);pts[idx[(i,j)]]=(x0+i,j,0.0)
+        counts,indices=[],[]
+        for j in range(n):
+            for i in range(n):
+                a,b,c,d=idx[(i,j)],idx[(i+1,j)],idx[(i+1,j+1)],idx[(i,j+1)]
+                counts.append(4);indices.extend([a,b,c,d])
+        return [pts[k] for k in range(len(pts))],counts,indices
+    p1,c1,i1=grid(0);p2,c2,i2=grid(n+gap)
+    offset=len(p1)
+    return p1+p2,c1+c2,i1+[x+offset for x in i2]
+
+
 class ProxyGenTests(unittest.TestCase):
+    def test_seam_split_pieces_are_fused_before_reducing_and_keep_the_combined_shape(self):
+        points,counts,indices=seam_split_grids()
+        original_extent=max(p[0] for p in points)-min(p[0] for p in points)
+        out_points,out_counts,out_indices,_=proxy_gen._decimate(points,counts,indices,40)
+        reduced_extent=max(p[0] for p in out_points)-min(p[0] for p in out_points)
+        # Without fusing the seam first, polyreduce shrinks each disconnected island on its own
+        # and the combined shape collapses; fused, the full width of both grids is preserved.
+        self.assertGreater(reduced_extent,original_extent*0.9)
+        self.assertLess(len(out_points),len(points))   # still meaningfully reduced
+
+    def test_target_is_triangles_not_primitives_for_an_all_quad_mesh(self):
+        # polyreduce's own "Output Polygon Count" counts primitives; an all-quad mesh has half as
+        # many primitives as triangles, so without triangulating first a target of, say, 500
+        # triangles left the mesh at 500 quads (1000 triangles) - twice as heavy as requested.
+        n=30
+        pts=[(i,j,0.0) for j in range(n) for i in range(n)]
+        counts,indices=[],[]
+        for j in range(n-1):
+            for i in range(n-1):
+                a=j*n+i;b=a+1;c=a+n+1;d=a+n
+                counts.append(4);indices.extend([a,b,c,d])
+        original=proxy_gen._triangle_count(counts)
+        target=500
+        self.assertLess(target,original)
+        out_points,out_counts,out_indices,_=proxy_gen._decimate(pts,counts,indices,target)
+        self.assertAlmostEqual(proxy_gen._triangle_count(out_counts),target,delta=5)
+
+
     def test_small_mesh_is_copied_and_heavy_mesh_is_decimated_to_the_target(self):
         with tempfile.TemporaryDirectory() as folder:
             src=Path(folder)/'asset.usda';dest=Path(folder)/'out.usda'
@@ -85,6 +133,112 @@ class ProxyGenTests(unittest.TestCase):
             check=Usd.Stage.Open(str(Path(folder)/'out.usda'))
             self.assertEqual(check.GetPrimAtPath('/Asset/geo_proxy').GetTypeName(),'Xform')
             self.assertEqual(check.GetPrimAtPath('/Asset/geo_proxy_').GetTypeName(),'Mesh')
+
+
+def textured_quad(stage, path, tex_path):
+    """A UsdPreviewSurface-bound quad whose left half samples red and right half samples blue."""
+    import OpenImageIO as oiio
+    spec=oiio.ImageSpec(8,8,3,oiio.UINT8);buf=oiio.ImageBuf(spec)
+    for y in range(8):
+        for x in range(8):buf.setpixel(x,y,[1.0,0.0,0.0] if x<4 else [0.0,0.0,1.0])
+    Path(tex_path).parent.mkdir(parents=True,exist_ok=True);buf.write(str(tex_path))
+    mesh=UsdGeom.Mesh.Define(stage,path)
+    mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0),(0,1,0)])
+    mesh.CreateFaceVertexCountsAttr([4]);mesh.CreateFaceVertexIndicesAttr([0,1,2,3])
+    UsdGeom.PrimvarsAPI(mesh).CreatePrimvar('st',Sdf.ValueTypeNames.TexCoord2fArray,UsdGeom.Tokens.faceVarying).Set([(0,0),(1,0),(1,1),(0,1)])
+    mat=UsdShade.Material.Define(stage,path+'/mtl')
+    surf=UsdShade.Shader.Define(stage,path+'/mtl/surface');surf.CreateIdAttr('UsdPreviewSurface')
+    tex=UsdShade.Shader.Define(stage,path+'/mtl/tex');tex.CreateIdAttr('UsdUVTexture')
+    tex.CreateInput('file',Sdf.ValueTypeNames.Asset).Set(os.path.relpath(str(tex_path),Path(stage.GetRootLayer().realPath).parent).replace('\\','/'))
+    reader=UsdShade.Shader.Define(stage,path+'/mtl/reader');reader.CreateIdAttr('UsdPrimvarReader_float2')
+    reader.CreateInput('varname',Sdf.ValueTypeNames.Token).Set('st')
+    tex.CreateInput('st',Sdf.ValueTypeNames.Float2).ConnectToSource(reader.ConnectableAPI(),'result')
+    surf.CreateInput('diffuseColor',Sdf.ValueTypeNames.Color3f).ConnectToSource(tex.ConnectableAPI(),'rgb')
+    mat.CreateSurfaceOutput().ConnectToSource(surf.ConnectableAPI(),'surface')
+    UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim())
+    UsdShade.MaterialBindingAPI(mesh.GetPrim()).Bind(mat)
+    return mesh
+
+
+class ProxyGenColorTests(unittest.TestCase):
+    def test_base_color_texture_is_baked_onto_the_proxy_as_a_vertex_color(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            src=Path(folder)/'asset.usda';dest=Path(folder)/'out.usda'
+            stage=Usd.Stage.CreateNew(str(src));xform=UsdGeom.Xform.Define(stage,'/Asset')
+            textured_quad(stage,'/Asset/geo',Path(folder)/'textures'/'albedo.png')
+            stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
+            result=generate(src,dest)
+            self.assertEqual(result['proxied'],['/Asset/geo'])
+            check=Usd.Stage.Open(str(dest))
+            proxy=UsdGeom.Mesh(check.GetPrimAtPath('/Asset/geo_proxy'))
+            cpv=proxy.GetDisplayColorPrimvar()
+            self.assertTrue(cpv);self.assertEqual(cpv.GetInterpolation(),'vertex')
+            colors=cpv.ComputeFlattened()
+            self.assertEqual(len(colors),4)
+            # points 0,3 are u=0 (red); points 1,2 are u=1 (blue)
+            self.assertGreater(colors[0][0],colors[0][2]);self.assertGreater(colors[3][0],colors[3][2])
+            self.assertGreater(colors[1][2],colors[1][0]);self.assertGreater(colors[2][2],colors[2][0])
+            for c in colors:
+                for channel in c:self.assertGreaterEqual(channel,0.0);self.assertLessEqual(channel,1.0)
+
+    def test_baked_colors_survive_decimation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            src=Path(folder)/'asset.usda';dest=Path(folder)/'out.usda'
+            stage=Usd.Stage.CreateNew(str(src));xform=UsdGeom.Xform.Define(stage,'/Asset')
+            import OpenImageIO as oiio
+            tex_path=Path(folder)/'textures'/'albedo.png';tex_path.parent.mkdir(parents=True)
+            spec=oiio.ImageSpec(8,8,3,oiio.UINT8);buf=oiio.ImageBuf(spec)
+            for y in range(8):
+                for x in range(8):buf.setpixel(x,y,[1.0,0.0,0.0] if x<4 else [0.0,0.0,1.0])
+            buf.write(str(tex_path))
+            n=30
+            mesh=UsdGeom.Mesh.Define(stage,'/Asset/geo')
+            points=[(i,j,0.0) for j in range(n) for i in range(n)]
+            counts,indices,uvs=[],[],[]
+            for j in range(n-1):
+                for i in range(n-1):
+                    a=j*n+i;b=a+1;c=a+n+1;d=a+n
+                    counts.append(4);indices.extend([a,b,c,d])
+                    u0,u1=i/(n-1),(i+1)/(n-1);v0,v1=j/(n-1),(j+1)/(n-1)
+                    uvs.extend([(u0,v0),(u1,v0),(u1,v1),(u0,v1)])
+            mesh.CreatePointsAttr(points);mesh.CreateFaceVertexCountsAttr(counts);mesh.CreateFaceVertexIndicesAttr(indices)
+            UsdGeom.PrimvarsAPI(mesh).CreatePrimvar('st',Sdf.ValueTypeNames.TexCoord2fArray,UsdGeom.Tokens.faceVarying).Set(uvs)
+            mat=UsdShade.Material.Define(stage,'/Asset/mtl')
+            surf=UsdShade.Shader.Define(stage,'/Asset/mtl/surface');surf.CreateIdAttr('UsdPreviewSurface')
+            tex=UsdShade.Shader.Define(stage,'/Asset/mtl/tex');tex.CreateIdAttr('UsdUVTexture')
+            tex.CreateInput('file',Sdf.ValueTypeNames.Asset).Set('./textures/albedo.png')
+            reader=UsdShade.Shader.Define(stage,'/Asset/mtl/reader');reader.CreateIdAttr('UsdPrimvarReader_float2')
+            reader.CreateInput('varname',Sdf.ValueTypeNames.Token).Set('st')
+            tex.CreateInput('st',Sdf.ValueTypeNames.Float2).ConnectToSource(reader.ConnectableAPI(),'result')
+            surf.CreateInput('diffuseColor',Sdf.ValueTypeNames.Color3f).ConnectToSource(tex.ConnectableAPI(),'rgb')
+            mat.CreateSurfaceOutput().ConnectToSource(surf.ConnectableAPI(),'surface')
+            UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim());UsdShade.MaterialBindingAPI(mesh.GetPrim()).Bind(mat)
+            self.assertGreater(proxy_gen._triangle_count(counts),proxy_gen.TARGET_TRIANGLES)
+            stage.SetDefaultPrim(UsdGeom.Xform.Define(stage,'/Asset').GetPrim());stage.GetRootLayer().Save()
+
+            result=generate(src,dest)
+            check=Usd.Stage.Open(str(dest))
+            proxy=UsdGeom.Mesh(check.GetPrimAtPath('/Asset/geo_proxy'))
+            colors=proxy.GetDisplayColorPrimvar().ComputeFlattened()
+            self.assertLess(len(colors),len(points))   # decimated
+            reds=sum(1 for c in colors if c[0]>c[2]);blues=sum(1 for c in colors if c[2]>c[0])
+            self.assertGreater(reds,0);self.assertGreater(blues,0)   # both halves still represented
+            for c in colors:
+                for channel in c:self.assertGreaterEqual(channel,0.0);self.assertLessEqual(channel,1.0)
+
+    def test_no_bound_material_leaves_the_proxy_without_display_color(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=Path(folder)/'asset.usda';dest=Path(folder)/'out.usda'
+            stage=Usd.Stage.CreateNew(str(src));xform=UsdGeom.Xform.Define(stage,'/Asset')
+            mesh=UsdGeom.Mesh.Define(stage,'/Asset/geo')
+            mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0),(0,1,0)])
+            mesh.CreateFaceVertexCountsAttr([4]);mesh.CreateFaceVertexIndicesAttr([0,1,2,3])
+            stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
+            generate(src,dest)
+            check=Usd.Stage.Open(str(dest))
+            proxy=UsdGeom.Mesh(check.GetPrimAtPath('/Asset/geo_proxy'))
+            self.assertFalse(proxy.GetDisplayColorPrimvar().HasValue())
+
 
 class ProxyGenUsdzTests(unittest.TestCase):
     def package(self, folder, extra=lambda stage,xform:None):
