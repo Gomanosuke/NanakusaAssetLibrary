@@ -17,7 +17,7 @@ def inspect(source, kind):
         finally:
             image.close()
     import hou
-    from pxr import Usd, UsdGeom
+    from pxr import Usd, UsdGeom, UsdShade
     network = None
     try:
         if kind == 'usd':
@@ -34,7 +34,8 @@ def inspect(source, kind):
             raise ValueError('Could not open asset stage')
         frame = stage.GetStartTimeCode() if stage.HasAuthoredTimeCodeRange() else 1
         time = Usd.TimeCode(frame)
-        meshes = faces = points = volumes = prims = 0
+        meshes = faces = points = volumes = prims = materials = 0
+        has_proxy = False
         for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
             prims += 1
             if prim.IsA(UsdGeom.Mesh):
@@ -42,13 +43,26 @@ def inspect(source, kind):
                 meshes += 1
                 faces += len(mesh.GetFaceVertexCountsAttr().Get(time) or [])
                 points += len(mesh.GetPointsAttr().Get(time) or [])
+                if UsdGeom.Imageable(prim).ComputePurpose() == UsdGeom.Tokens.proxy:
+                    has_proxy = True
             elif prim.GetTypeName() == 'Volume':
                 volumes += 1
+            elif prim.IsA(UsdShade.Material):
+                materials += 1
         result = {'Polygons': f'{faces:,}', 'Points': f'{points:,}', 'Meshes': meshes}
         if volumes:
             result['Volumes'] = volumes
         if kind == 'usd':
             result['USD prims'] = prims
+            result['Proxy'] = 'Yes' if has_proxy else 'No'
+            result['Up axis'] = UsdGeom.GetStageUpAxis(stage)
+            if materials:
+                result['Materials'] = materials
+            bounds = UsdGeom.BBoxCache(time, ['default', 'render'], useExtentsHint=True)
+            box = bounds.ComputeWorldBound(stage.GetPseudoRoot()).ComputeAlignedRange()
+            if not box.IsEmpty():
+                size = box.GetSize()
+                result['Size'] = f'{size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f}'
         result['Sample frame'] = f'{frame:g}'
         return result
     finally:

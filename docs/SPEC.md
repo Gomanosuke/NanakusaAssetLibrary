@@ -157,6 +157,9 @@ Textureの一覧では、同じ素材の画像（albedo・roughness・normalな�
 ## GUIと複数選択
 
 GUIは英語です。右側には大きな正方形プレビューと素材情報を常時表示します。
+素材情報（`asset_info.py`、選択が落ち着いてから別プロセスのhythonで取得しキャッシュする）は、種類ごとに項目が異なる。
+テクスチャはResolution・Channels・Pixel type。3DModel・USDはPolygons・Points・Meshes（Volumeがあれば数も）。
+USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
 Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで読み込み済みの素材を全選択できます（一覧はページ分けせず、スクロールで続きを読み込む）。
@@ -252,6 +255,23 @@ USDの上方向軸（Y-up / Z-up）は、構図とライティングに反映し
 既存のサムネイルには、右クリックのGenerate Selected Thumbnailsを実行して更新してください。
 形状の境界から斜め前方のカメラと照明を自動設定するため、作業中のHIPにはノードを追加しません。
 GPUを占有せず4 CPUスレッドを使います。Houdini / Karmaの利用可能なライセンスが必要です。
+
+## Proxyの生成
+
+`purpose=proxy`が無いUSDはScene Viewでもレンダー用の形状がそのまま表示される。`proxy_gen.py`が別プロセス（hython）で簡易形状のproxyを追加する。
+
+- 対象はUSD種別の資産全て（`.usd`/`.usda`/`.usdc`/`.usdz`）。既に`purpose=proxy`を持つ資産、メッシュが無い資産は`{'skipped': 理由}`を返しスキップする。
+- 対象の入口ファイル自身（`Usd.Stage.Open`のルートレイヤー）だけを編集する。参照・ペイロード先の別ファイルは変更しない。
+- 各`UsdGeom.Mesh`を、三角形換算で`TARGET_TRIANGLES`（既定300）を超える場合のみ、Houdiniの`polyreduce::2.0`（Output Polygon Count）でデシメートする。小さいメッシュはそのまま複製する。
+- 結果は元プリムの兄弟として`<name>_proxy`に追加し、`purpose=proxy`を設定する。元プリムには`purpose=render`を明示する（Scene Viewでproxyが優先されるため）。名前衝突時は`_`を付けて回避する。
+- 出力は常に新規ファイルへの書き出し（`Sdf.Layer.Export`）。元ファイルへの`Save()`は行わない。
+- `.usdz`は`UsdUtils.ExtractUsdzPackage`で展開し、アーカイブの先頭エントリ（usdz仕様のルートレイヤー）だけを編集する。展開先で参照は相対パスのまま解決できる。編集後は`UsdUtils.CreateNewUsdzPackage`で参照ファイルごと再パッケージする。
+
+`ui.py`の`ProxyJob`が`hython proxy_gen.py <元ファイル> <一時出力> <結果JSON>`を実行し、成功時のみ`data/backups/proxy/`へ元ファイルをバックアップしてから、一時出力で元ファイルを置き換える（`os.replace`）。失敗時・スキップ時は元ファイルを一切変更しない。
+
+右クリックの「Generate Selected Proxies」は選択したUSD資産に生成する。
+「Libraries... → Generate Missing Proxies」は、現在の検索・フォルダー・種類の条件に一致するUSD資産を全てキューへ入れる（既に`purpose=proxy`があるかどうかはファイルを開かないと分からないため、UIスレッドでは判定せず、各ジョブが自分のファイルを見て判断する）。「Libraries... → Cancel Proxies」で待機分を解除できる。
+フォルダー移動・素材移動は、待機中のproxy生成がある間はできない（`Cancel Proxies`で解除するか完了を待つ）。
 USDの材質と依存ファイルを参照し、最初のフレームを描画します。欠落した依存ファイルや読み込み不能な形状はエラーとして表示します。
 ボリュームの見た目は元データの密度・材質に依存します。任意の画像を「Choose Thumbnail...」で割り当てることもできます。
 元ファイル更新後は再スキャンして生成してください。USD内の依存画像だけを更新した場合は選択素材を再生成してください。
@@ -312,7 +332,8 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定、フォルダーツリー |
 | `pbr.py` | ファイル名によるPBR用途・セットの判定、スタック表示用のグループ化 |
 | `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
-| `asset_info.py` | 別プロセスの画像・形状情報取得 |
+| `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・上方向軸・マテリアル数・サイズも） |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
+| `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、USDZの展開・再パッケージ |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。

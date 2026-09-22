@@ -86,6 +86,12 @@
 - サムネイルのDome Lightはresources/meadow_2_8k.exr（Exposure -0.5、上軸まわり-30度）、Distant LightはExposure 1。値の変更はthumbnail_scene.pyの定数で行う。
 - HDRIはライブラリーのassetではなく本体側のresourcesへコピーして使う（ユーザーの指示: 移動してもサムネイルが作れなくならないように）。容量が大きいためGitへは入れない（*.exrを除外）。resources/README.mdに手順を残す。HDRIがない場合は白いDome Lightへ戻す。
 
+## Proxyの生成
+
+- proxy_gen.pyが別プロセス（hython）で`purpose=proxy`を追加する。対象資産自身の入口ファイルだけを編集し、参照・ペイロード先には触れない。ターゲット三角形数はproxy_gen.pyのTARGET_TRIANGLES定数（既定300）。
+- `.usdz`はUsdUtils.ExtractUsdzPackageで展開し、アーカイブ先頭エントリ（usdz仕様のルートレイヤー）を編集してからUsdUtils.CreateNewUsdzPackageで再パッケージする。手動でのzip操作はしない。
+- ui.pyのProxyJobが結果を検証してから、data/backups/proxy/へ元ファイルをバックアップし、os.replaceで置き換える。失敗・スキップ時は元ファイルを一切変更しない（proxy_gen.py単体はSave()せずExport/CreateNewUsdzPackageで新規ファイルに書き出すだけ）。
+
 ## 一覧のアイコンサイズ
 
 - Ctrl+中ボタンドラッグの処理はdragdrop.AssetListに置く。範囲は64〜512px、サイズはsettings.jsonのicon_sizeへ保存する。256pxを超える時だけ、大きい元画像（icon_edge）で一覧を作り直す。

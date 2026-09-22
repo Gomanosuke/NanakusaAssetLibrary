@@ -1,8 +1,10 @@
 """Dockable Python Panel and floating window for Houdini 22 / PySide6."""
 from collections import OrderedDict, deque
+from datetime import datetime
 from pathlib import Path
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -222,6 +224,68 @@ class GeometryThumbnailJob(QtCore.QThread):
         except Exception as exc:
             self.done.emit(self.asset_id, '', str(exc))
 
+class ProxyJob(QtCore.QThread):
+    """Add a decimated purpose=proxy sibling to each render mesh of a USD file.
+
+    Generation runs in a separate hython process (proxy_gen.py) and only ever writes to a
+    temporary file; the source asset is backed up and swapped in here only after that succeeds,
+    so a crash or a locked file never leaves the asset half-written.
+    """
+    done = QtCore.Signal(str, str, str)   # asset_id, message (skip reason or summary), error
+    def __init__(self, asset_id, source, backup_dir):
+        super().__init__()
+        self.asset_id, self.source, self.backup_dir = asset_id, str(source), Path(backup_dir)
+        self.bin = Path(hou.getenv('HFS'))/'bin'
+
+    def run(self):
+        # The output must be swapped in with os.replace, which Windows refuses across drives;
+        # writing it next to the source (not in the system TEMP drive) keeps the swap on one
+        # volume no matter where the library lives.
+        source = Path(self.source)
+        temp_usd = source.with_name(source.stem+'.nanakusa_proxy_tmp'+source.suffix)
+        try:
+            with tempfile.TemporaryDirectory(prefix='nanakusa_proxy_') as folder:
+                base = Path(folder)
+                suffix = '.exe' if os.name == 'nt' else ''
+                result_path = base/'result.json'
+                log = base/'proxy.log'
+                with log.open('wb') as stream:
+                    process = subprocess.Popen([str(self.bin/('hython'+suffix)), str(Path(__file__).with_name('proxy_gen.py')),
+                        self.source, str(temp_usd), str(result_path)], stdout=stream, stderr=stream, **background())
+                    started = time.monotonic()
+                    try:
+                        while process.poll() is None:
+                            if self.isInterruptionRequested():
+                                raise RuntimeError('Proxy generation cancelled')
+                            if time.monotonic()-started > 240:
+                                raise RuntimeError('Proxy generation timed out')
+                            self.msleep(100)
+                    finally:
+                        if process.poll() is None:
+                            process.terminate()
+                            try: process.wait(timeout=5)
+                            except subprocess.TimeoutExpired: process.kill(); process.wait()
+                if process.returncode:
+                    raise RuntimeError(log.read_text(encoding='utf-8', errors='replace')[-2000:])
+                result = json.loads(result_path.read_text(encoding='utf-8'))
+                if result.get('skipped'):
+                    self.done.emit(self.asset_id, result['skipped'], '')
+                    return
+                if not temp_usd.is_file() or temp_usd.stat().st_size == 0:
+                    raise RuntimeError('Proxy generation produced no output')
+                self.backup_dir.mkdir(parents=True, exist_ok=True)
+                backup = self.backup_dir/(source.stem+'_backup_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+source.suffix)
+                shutil.copy2(self.source, backup)
+                os.replace(str(temp_usd), self.source)
+            self.done.emit(self.asset_id, f"Proxy added ({len(result['proxied'])} mesh(es))", '')
+        except Exception as exc:
+            self.done.emit(self.asset_id, '', str(exc))
+        finally:
+            if temp_usd.is_file():
+                try: temp_usd.unlink()
+                except OSError: pass
+
+
 class FolderMigrationJob(QtCore.QThread):
     """One-time folder listing for an index made before folders were recorded by the scan.
 
@@ -304,6 +368,11 @@ class LibraryWidget(QtWidgets.QWidget):
         self.thumb_pending = set()
         self.thumb_failed = set()
         self.thumb_job = None
+        self.proxy_queue = deque()
+        self.proxy_pending = set()
+        self.proxy_failed = set()
+        self.proxy_job = None
+        self.missing_proxy_scan = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
         self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
@@ -515,7 +584,7 @@ class LibraryWidget(QtWidgets.QWidget):
         job=FolderMigrationJob(self.library,root)
         job.done.connect(self.folder_migration_done)
         self.folder_migration_jobs[rid]=job
-        _keep_job(job);job.start()
+        _keep_job(job)
 
     def folder_migration_done(self,rid):
         self.folder_migrations.discard(rid)
@@ -549,6 +618,7 @@ class LibraryWidget(QtWidgets.QWidget):
     def organize_drop(self,payload,target):
         if self.job and self.job.isRunning():raise ValueError('Wait for the scan to finish before moving assets.')
         if self.thumb_pending:raise ValueError('Wait for thumbnail generation to finish (or use Libraries... > Cancel Thumbnails) before moving assets.')
+        if self.proxy_pending:raise ValueError('Wait for proxy generation to finish (or use Libraries... > Cancel Proxies) before moving assets.')
         self.save_metadata()
         root_id,dest_rel,_=target;select=None
         if 'assets' in payload:
@@ -772,6 +842,31 @@ class LibraryWidget(QtWidgets.QWidget):
     def thumbnail_finished(self):
         self.thumb_job=None;self.next_thumbnail()
 
+    def queue_proxy(self,row):
+        aid=row['id']
+        if row['kind']!='usd' or aid in self.proxy_pending or aid in self.proxy_failed:return
+        self.proxy_pending.add(aid);self.proxy_queue.append(row)
+        QtCore.QTimer.singleShot(0,self.next_proxy)
+
+    def next_proxy(self):
+        if self.proxy_job is not None or not self.proxy_queue:return
+        row=self.proxy_queue.popleft()
+        source=Path(row['root_path'])/row['relpath']
+        self.proxy_job=ProxyJob(row['id'],source,self.data_dir/'backups'/'proxy')
+        self.proxy_job.done.connect(self.proxy_done)
+        self.proxy_job.finished.connect(self.proxy_finished)
+        _keep_job(self.proxy_job)
+
+    def proxy_finished(self):
+        self.proxy_job=None;self.next_proxy()
+
+    def proxy_done(self,aid,message,error):
+        self.proxy_pending.discard(aid)
+        if error:
+            self.proxy_failed.add(aid);self.status.setText('Proxy generation failed: '+error)
+        else:
+            self.status.setText((message or 'Already has a proxy')+f' ({len(self.proxy_queue)} remaining)')
+
     def icon_for(self,row):
         path=self.thumbnail_path(row)
         if path:
@@ -923,6 +1018,8 @@ class LibraryWidget(QtWidgets.QWidget):
         if all(row['kind']=='usd' for row in rows):action('Add Catalog',self.add_catalog)
         menu.addSeparator()
         action('Generate Selected Thumbnails',self.generate_thumbnail)
+        if all(row['kind']=='usd' for row in rows):
+            action('Generate Selected Proxies',self.generate_proxy)
         if len(rows)==1:
             action('Choose Thumbnail...',self.choose_thumbnail)
             action('Publish Static USD...',self.publish_asset)
@@ -991,6 +1088,8 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addSeparator()
         menu.addAction('Generate Missing Thumbnails',lambda:self.safe(self.generate_missing_thumbnails))
         menu.addAction('Cancel Thumbnails',lambda:self.safe(self.cancel_thumbnails))
+        menu.addAction('Generate Missing Proxies',lambda:self.safe(self.generate_missing_proxies))
+        menu.addAction('Cancel Proxies',lambda:self.safe(self.cancel_proxies))
         menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
         menu.addAction('Select Catalog...',lambda:self.safe(self.select_catalog))
         menu.addAction('New Catalog...',lambda:self.safe(self.new_catalog))
@@ -1042,6 +1141,48 @@ class LibraryWidget(QtWidgets.QWidget):
             self.thumb_failed.discard(row['id'])
             self.queue_thumbnail(row,geometry=True,force=True)
         self.status.setText(f'Queued {len(rows)} thumbnails. Geometry renders in a separate Karma CPU process.')
+
+    def generate_proxy(self):
+        rows=[r for r in self.selected_rows() if r['kind']=='usd']
+        if not rows:raise ValueError('Select one or more USD assets.')
+        for row in rows:
+            self.library.resolve(row)
+            self.proxy_failed.discard(row['id'])
+            self.queue_proxy(row)
+        self.status.setText(f'Queued {len(rows)} proxy job(s). Each USD file is overwritten in place (a backup is kept in data/backups/proxy).')
+
+    def generate_missing_proxies(self):
+        if self.missing_proxy_scan is not None:return
+        # Whether a USD already has a proxy can only be known by opening it, which is too slow to
+        # check here for every asset; each queued job checks its own file and skips quickly if so.
+        filters=dict(self.filters());filters['kind']='usd'
+        self.missing_proxy_scan={'batches':self.library.iter_rows(**filters),'batch':[],'index':0,'count':0,'seen':0}
+        QtCore.QTimer.singleShot(0,self.missing_proxy_step)
+
+    def missing_proxy_step(self):
+        scan=self.missing_proxy_scan
+        if scan is None:return
+        deadline=time.monotonic()+0.015
+        while time.monotonic()<deadline:
+            if scan['index']>=len(scan['batch']):
+                scan['batch']=next(scan['batches'],None)
+                if scan['batch'] is None:
+                    self.missing_proxy_scan=None
+                    self.status.setText(f"Queued {scan['count']} proxy jobs. Everything matching the search and folder filters is included.")
+                    return
+                scan['index']=0
+            row=scan['batch'][scan['index']];scan['index']+=1;scan['seen']+=1
+            if row['id'] not in self.proxy_pending:
+                self.proxy_failed.discard(row['id']);self.queue_proxy(row);scan['count']+=1
+        self.status.setText(f"Checking USD assets... {scan['seen']} / {self.total}")
+        QtCore.QTimer.singleShot(0,self.missing_proxy_step)
+
+    def cancel_proxies(self):
+        self.missing_proxy_scan=None
+        for row in self.proxy_queue:self.proxy_pending.discard(row['id'])
+        self.proxy_queue.clear()
+        if self.proxy_job:self.proxy_job.requestInterruption()
+        self.status.setText('Cancelled. An active proxy generation will finish first.')
 
     def generate_missing_thumbnails(self):
         if self.missing_scan is not None:return

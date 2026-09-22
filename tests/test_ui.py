@@ -233,6 +233,48 @@ class LibraryUiTests(unittest.TestCase):
             self.assertTrue(widget.thumbnail_path(rows['with_preview']).samefile(generated))   # a generated thumbnail wins
             widget.close();widget.deleteLater()
 
+    def test_generate_proxy_is_offered_for_usd_kinds_and_queues_a_background_job(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            (root/'USD'/'chair').mkdir(parents=True);(root/'USD'/'chair'/'chair.usda').write_text('x')
+            import zipfile
+            with zipfile.ZipFile(root/'USD'/'lamp.usdz','w') as z:z.writestr('a.usdc','x')
+            (root/'3DModel').mkdir();(root/'3DModel'/'table.obj').write_text('x')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            rows={r['label']:r for r in widget.rows}
+            usda,usdz,obj=rows['chair'],rows['lamp'],rows['table']
+
+            def select(row):
+                widget.items.setCurrentRow(next(i for i in range(widget.items.count()) if widget.item_row(widget.items.item(i))['id']==row['id']))
+
+            select(usda)
+            self.assertIn('Generate Selected Proxies',[a.text() for a in widget.build_asset_menu().actions()])
+            select(usdz)
+            self.assertIn('Generate Selected Proxies',[a.text() for a in widget.build_asset_menu().actions()])   # .usdz is repackaged with its proxy inside
+            select(obj)
+            self.assertNotIn('Generate Selected Proxies',[a.text() for a in widget.build_asset_menu().actions()])   # not a USD kind
+
+            widget.queue_proxy(obj);self.assertNotIn(obj['id'],widget.proxy_pending)   # not a USD kind: never queued
+
+            with patch.object(ui,'ProxyJob') as job_cls:
+                job=job_cls.return_value
+                widget.queue_proxy(usda)
+                self.assertIn(usda['id'],widget.proxy_pending)
+                self.app.processEvents()
+                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'proxy')
+                self.assertIs(widget.proxy_job,job)
+                job.done.connect.assert_called_once_with(widget.proxy_done)
+
+            widget.proxy_done(usda['id'],'Proxy added (1 mesh(es))','')
+            self.assertNotIn(usda['id'],widget.proxy_pending)
+            self.assertIn('Proxy added',widget.status.text())
+
+            widget.proxy_done('missing-id','','disk full')
+            self.assertIn('missing-id',widget.proxy_failed)
+            self.assertIn('Proxy generation failed',widget.status.text())
+            widget.close();widget.deleteLater()
+
     def test_big_libraries_stay_responsive(self):
         import time
         from hutil.PySide import QtGui,QtCore
@@ -358,6 +400,32 @@ class LibraryUiTests(unittest.TestCase):
             with patch.object(ui.ScanJob,'scan_root',side_effect=RuntimeError('boom')):
                 got.clear();job=ui.ScanJob(library,library.roots());job.done.connect(got.append);job.run()
             self.assertIn('boom',got[0][0][1]['errors'][0])
+
+    def test_proxy_job_swaps_the_file_in_next_to_the_source_not_the_system_temp_drive(self):
+        # os.replace() refuses to move a file across drives on Windows; writing the generated
+        # proxy into the system TEMP directory (a different drive from most real libraries) and
+        # then trying to swap it into place used to fail there every time, silently leaving a
+        # matching, useless backup behind and the source untouched. Regression for that bug.
+        from pxr import Usd, UsdGeom
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder);source=base/'asset.usda';backups=base/'backups'
+            stage=Usd.Stage.CreateNew(str(source));xform=UsdGeom.Xform.Define(stage,'/Asset')
+            mesh=UsdGeom.Mesh.Define(stage,'/Asset/geo')
+            mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0),(0,1,0)]);mesh.CreateFaceVertexCountsAttr([4]);mesh.CreateFaceVertexIndicesAttr([0,1,2,3])
+            stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
+
+            got=[]
+            job=ui.ProxyJob('aid',source,backups)
+            job.done.connect(lambda *a:got.append(a))
+            job.run()
+            self.assertEqual(got,[('aid','Proxy added (1 mesh(es))','')])
+            leftovers=[p.name for p in source.parent.iterdir() if 'nanakusa_proxy_tmp' in p.name]
+            self.assertEqual(leftovers,[])   # the temp file next to the source is always cleaned up
+            backed_up=list(backups.iterdir())
+            self.assertEqual(len(backed_up),1)
+            stage.Reload()   # the file changed on disk in a separate hython process; this process's cached layer has not
+            self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo')).ComputePurpose(),'render')
+            self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo_proxy')).ComputePurpose(),'proxy')
 
     def test_folder_items_are_created_only_when_a_folder_is_opened(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
