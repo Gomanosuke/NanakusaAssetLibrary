@@ -159,7 +159,7 @@ Textureの一覧では、同じ素材の画像（albedo・roughness・normalな�
 GUIは英語です。右側には大きな正方形プレビューと素材情報を常時表示します。
 素材情報（`asset_info.py`、選択が落ち着いてから別プロセスのhythonで取得しキャッシュする）は、種類ごとに項目が異なる。
 テクスチャはResolution・Channels・Pixel type。3DModel・USDはPolygons・Points・Meshes（Volumeがあれば数も）。
-USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・**LOD（Yes (N levels)/No、`lod` variant setの有無と段階数。最初に見つかったメッシュの段階数を代表値とする）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
+USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
 Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで読み込み済みの素材を全選択できます（一覧はページ分けせず、スクロールで続きを読み込む）。
@@ -259,27 +259,26 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
 ボリュームの見た目は元データの密度・材質に依存します。任意の画像を「Choose Thumbnail...」で割り当てることもできます。
 元ファイル更新後は再スキャンして生成してください。USD内の依存画像だけを更新した場合は選択素材を再生成してください。
 
-## Proxy / LODの生成
+## Proxyの生成
 
-`purpose=proxy`が無いUSDはScene Viewでもレンダー用の形状がそのまま表示される。`proxy_gen.py`（proxy）と`lod_gen.py`（LOD、`lod` variant set）が別プロセス（hython）で簡易形状を追加する。両者は`_decimate`（デシメート・色焼き込み共通処理）と、プレーンUSD/`.usdz`のファイル入出力（`generate_plain`/`generate_usdz`）を`proxy_gen.py`から共有する。
+`purpose=proxy`が無いUSDはScene Viewでもレンダー用の形状がそのまま表示される。`proxy_gen.py`が別プロセス（hython）で簡易形状を追加する。
 
-- 対象はUSD種別の資産全て（`.usd`/`.usda`/`.usdc`/`.usdz`）。proxyは既に`purpose=proxy`を持つ資産、LODは既に`lod` variant setを持つ資産、メッシュが無い資産は`{'skipped': 理由}`を返しスキップする。
+- 対象はUSD種別の資産全て（`.usd`/`.usda`/`.usdc`/`.usdz`）。既に`purpose=proxy`を持つ資産、メッシュが無い資産は`{'skipped': 理由}`を返しスキップする。
 - 対象の入口ファイル自身（`Usd.Stage.Open`のルートレイヤー）だけを編集する。参照・ペイロード先の別ファイルは変更しない。
 - デシメートはHoudiniの`polyreduce::2.0`（Output Polygon Count）を使う。事前に2つの前処理をしている：
   - `fuse`（Snap Distance、対角線の0.02%）でUV・材質境界の分離頂点を結合してから減らす。結合しないと、境界で分かれた各断片が個別に潰れて形が崩れる。
   - `divide`（Convex Polygons、最大3辺）で三角形化してから減らす。`polyreduce`の目標数はプリミティブ数であり、四角形・多角形主体のメッシュのまま渡すと、指定した三角形数のおよそ2倍が残ってしまう。
-- **proxy**: 各`UsdGeom.Mesh`を、三角形換算で`target_triangles`（ダイアログで指定、既定`TARGET_TRIANGLES`=300）を超える場合のみデシメートする。小さいメッシュはそのまま複製する。結果は元プリムの兄弟として`<name>_proxy`に追加し、`purpose=proxy`を設定する。元プリムには`purpose=render`を明示する（Scene Viewでproxyが優先されるため）。名前衝突時は`_`を付けて回避する。
+- 各`UsdGeom.Mesh`を、三角形換算で`target_triangles`（ダイアログで指定、既定`TARGET_TRIANGLES`=300）を超える場合のみデシメートする。小さいメッシュはそのまま複製する。結果は元プリムの兄弟として`<name>_proxy`に追加し、`purpose=proxy`を設定する。元プリムには`purpose=render`を明示する（Scene Viewでproxyが優先されるため）。名前衝突時は`_`を付けて回避する。
   - 元プリムの束縛材質からbase colorテクスチャを検出できた場合（`UsdPreviewSurface`の`diffuseColor`/`baseColor`が`UsdUVTexture`に接続され、`file`が解決できる形）、そのUV primvar（`UsdPrimvarReader`の`varname`、既定`st`。`faceVarying`/`vertex`/`uniform`/`constant`のいずれの補間にも対応）を使い、Houdiniの`attribfrommap`相当でテクスチャ色を頂点（点）ごとにサンプルし、`primvars:displayColor`（vertex補間）としてproxyへ焼き込む。デシメート後も色は点属性としてそのまま補間で引き継がれる（`polyreduce`が境界で多少オーバーシュートすることがあるため0〜1にクランプする）。材質・テクスチャが見つからない場合は無地のまま。
-- **LOD**: `lod_gen.py`の`DEFAULT_LEVELS`（既定4）・`DEFAULT_REDUCTION`（既定50%、1段階ごとに前段階の何%の三角形数を残すか）はダイアログで指定できる。各メッシュに`lod` variant setを作り、`LOD0`（元の形状、無加工）から`LOD{levels-1}`まで追加し、選択を`LOD0`に戻す。**元のジオメトリ値はvariant set追加前に`Clear()`で消す**（USDの合成順はLocal > VariantSets > References なので、消さずに残すと、どのvariantを選んでも元の値が優先されてしまい切り替わらない。参照ファイル由来のジオメトリなら元々ローカルな値が無いので影響しない）。色の焼き込みはLODでは行わない。
 - 出力は常に新規ファイルへの書き出し（`Sdf.Layer.Export`）。元ファイルへの`Save()`は行わない。
 - `.usdz`は`UsdUtils.ExtractUsdzPackage`で展開し、アーカイブの先頭エントリ（usdz仕様のルートレイヤー）だけを編集する。展開先で参照・テクスチャは相対パスのまま解決できる。編集後は`UsdUtils.CreateNewUsdzPackage`で参照ファイルごと再パッケージする。
 
-`ui.py`の`_MeshGenerateJob`（`ProxyJob`/`LodJob`の共通基底）が`hython <script> <元ファイル> <一時出力> <結果JSON> [追加引数...]`を実行し、成功時のみ`data/backups/proxy/`または`data/backups/lod/`へ元ファイルをバックアップしてから、一時出力で元ファイルを置き換える（`os.replace`）。失敗時・スキップ時は元ファイルを一切変更しない。
+`ui.py`の`ProxyJob`が`hython proxy_gen.py <元ファイル> <一時出力> <結果JSON> <target_triangles>`を実行し、成功時のみ`data/backups/proxy/`へ元ファイルをバックアップしてから、一時出力で元ファイルを置き換える（`os.replace`）。失敗時・スキップ時は元ファイルを一切変更しない。
 **一時出力は元ファイルと同じフォルダーに書く**（`<stem>.nanakusa_generate_tmp<suffix>`）。システムのTEMPフォルダーに書いてから`os.replace`すると、TEMPと素材ライブラリーが別ドライブの場合にWindowsが受け付けず（`WinError 17`）、置き換えが毎回失敗する（原因調査済みの実バグ。失敗時もバックアップだけは先に作られてしまうため、直った後の再生成で不要なバックアップが残る）。
 
-右クリックの「Generate Selected Proxies...」「Generate Selected LODs...」は選択したUSD資産に生成する。実行前にダイアログで値を確認し、Cancelなら何もしない。値は`settings.json`（`proxy_target_triangles`、`lod_levels`、`lod_reduction`）に保存し、次回の初期値にする。
-「Libraries... → Generate Missing Proxies...」「Generate Missing LODs...」は、現在の検索・フォルダー・種類の条件に一致するUSD資産を全てキューへ入れる（既に`purpose=proxy`/`lod`があるかどうかはファイルを開かないと分からないため、UIスレッドでは判定せず、各ジョブが自分のファイルを見て判断する）。「Cancel Proxies」「Cancel LODs」で待機分を解除できる。
-フォルダー移動・素材移動は、待機中のproxy/LOD生成がある間はできない（該当のCancelで解除するか完了を待つ）。
+右クリックの「Generate Selected Proxies...」は選択したUSD資産に生成する。実行前にダイアログで値を確認し、Cancelなら何もしない。値は`settings.json`（`proxy_target_triangles`）に保存し、次回の初期値にする。
+「Libraries... → Generate Missing Proxies...」は、現在の検索・フォルダー・種類の条件に一致するUSD資産を全てキューへ入れる（既に`purpose=proxy`があるかどうかはファイルを開かないと分からないため、UIスレッドでは判定せず、各ジョブが自分のファイルを見て判断する）。「Cancel Proxies」で待機分を解除できる。
+フォルダー移動・素材移動は、待機中のproxy生成がある間はできない（該当のCancelで解除するか完了を待つ）。
 
 ## USD / Asset Catalog
 
@@ -337,9 +336,8 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定、フォルダーツリー |
 | `pbr.py` | ファイル名によるPBR用途・セットの判定、スタック表示用のグループ化 |
 | `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
-| `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・LOD有無/段階数・上方向軸・マテリアル数・サイズも） |
+| `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・上方向軸・マテリアル数・サイズも） |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
-| `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ（lod_gen.pyと共有） |
-| `lod_gen.py` | 別プロセスでのLOD（`lod` variant set）生成。proxy_gen.pyのデシメート・ファイル入出力を再利用 |
+| `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。

@@ -242,11 +242,11 @@ def _add_proxies(stage, target_triangles):
     return {'proxied': proxied}
 
 
-def generate_plain(source, destination, add_fn):
+def _generate_plain(source, destination, add_fn):
     """Open a plain USD file, run `add_fn(stage)`, and Export() the result to a new file.
 
-    Shared with lod_gen.py: `add_fn` does the actual editing and returns the same
-    {'skipped': reason} or {...: [...]} shape that becomes the caller's result.
+    `add_fn` does the actual editing and returns the {'skipped': reason} or {...: [...]} shape
+    that becomes the caller's result.
     """
     from pxr import Usd
 
@@ -263,11 +263,8 @@ def generate_plain(source, destination, add_fn):
     return result
 
 
-def generate_usdz(source, destination, add_fn):
-    """Extract a .usdz, run `add_fn(stage)` on its root layer, and repackage it.
-
-    Shared with lod_gen.py; see generate_plain.
-    """
+def _generate_usdz(source, destination, add_fn):
+    """Extract a .usdz, run `add_fn(stage)` on its root layer, and repackage it. See _generate_plain."""
     from pxr import Usd, UsdUtils
 
     with zipfile.ZipFile(str(source)) as archive:
@@ -303,8 +300,8 @@ def generate_usdz(source, destination, add_fn):
 def generate(source, destination, target_triangles=TARGET_TRIANGLES):
     add_fn = lambda stage: _add_proxies(stage, target_triangles)
     if Path(source).suffix.lower() == '.usdz':
-        return generate_usdz(source, destination, add_fn)
-    return generate_plain(source, destination, add_fn)
+        return _generate_usdz(source, destination, add_fn)
+    return _generate_plain(source, destination, add_fn)
 
 
 if __name__ == '__main__':

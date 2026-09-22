@@ -44,7 +44,6 @@ class AssetInfoTests(unittest.TestCase):
             stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
             info=inspect(path,'usd')
             self.assertEqual(info['Proxy'],'No')
-            self.assertEqual(info['LOD'],'No')
             self.assertEqual(info['Up axis'],'Z')
             self.assertEqual(info['Materials'],1)
             self.assertEqual(info['Size'],'2.00 x 4.00 x 0.00')
@@ -56,28 +55,12 @@ class AssetInfoTests(unittest.TestCase):
             stage.GetRootLayer().Save()
             self.assertEqual(inspect(path,'usd')['Proxy'],'Yes')
 
-    def test_usd_reports_lod_level_count(self):
-        from pxr import Usd,UsdGeom
-        with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'asset.usda';stage=Usd.Stage.CreateNew(str(path))
-            xform=UsdGeom.Xform.Define(stage,'/Asset')
-            mesh=UsdGeom.Mesh.Define(stage,'/Asset/geo')
-            vset=mesh.GetPrim().GetVariantSets().AddVariantSet('lod')
-            for name in ('LOD0','LOD1','LOD2'):
-                vset.AddVariant(name);vset.SetVariantSelection(name)
-                with vset.GetVariantEditContext():
-                    mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0)])
-                    mesh.CreateFaceVertexCountsAttr([3]);mesh.CreateFaceVertexIndicesAttr([0,1,2])
-            vset.SetVariantSelection('LOD0')
-            stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
-            self.assertEqual(inspect(path,'usd')['LOD'],'Yes (3 levels)')
-
     def test_empty_usd_reports_no_size(self):
         from pxr import Usd,UsdGeom
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'empty.usda';stage=Usd.Stage.CreateNew(str(path))
             UsdGeom.Xform.Define(stage,'/Asset');stage.GetRootLayer().Save()
             info=inspect(path,'usd')
-            self.assertNotIn('Size',info);self.assertNotIn('Materials',info);self.assertEqual(info['Proxy'],'No');self.assertEqual(info['LOD'],'No')
+            self.assertNotIn('Size',info);self.assertNotIn('Materials',info);self.assertEqual(info['Proxy'],'No')
 
 if __name__=='__main__':unittest.main()

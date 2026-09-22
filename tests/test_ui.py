@@ -250,14 +250,13 @@ class LibraryUiTests(unittest.TestCase):
 
             select(usda)
             labels=[a.text() for a in widget.build_asset_menu().actions()]
-            self.assertIn('Generate Selected Proxies...',labels);self.assertIn('Generate Selected LODs...',labels)
+            self.assertIn('Generate Selected Proxies...',labels)
             select(usdz)
             self.assertIn('Generate Selected Proxies...',[a.text() for a in widget.build_asset_menu().actions()])   # .usdz is repackaged with its proxy inside
             select(obj)
             self.assertNotIn('Generate Selected Proxies...',[a.text() for a in widget.build_asset_menu().actions()])   # not a USD kind
 
             widget.queue_proxy(obj,300);self.assertNotIn(obj['id'],widget.proxy_pending)   # not a USD kind: never queued
-            widget.queue_lod(obj,4,50.0);self.assertNotIn(obj['id'],widget.lod_pending)
 
             with patch.object(ui,'ProxyJob') as job_cls:
                 job=job_cls.return_value
@@ -275,26 +274,9 @@ class LibraryUiTests(unittest.TestCase):
             widget.proxy_done('missing-id','','disk full')
             self.assertIn('missing-id',widget.proxy_failed)
             self.assertIn('Proxy generation failed',widget.status.text())
-
-            with patch.object(ui,'LodJob') as job_cls:
-                job=job_cls.return_value
-                widget.queue_lod(usda,4,50.0)
-                self.assertIn(usda['id'],widget.lod_pending)
-                self.app.processEvents()
-                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'lod',4,50.0)
-                self.assertIs(widget.lod_job,job)
-                job.done.connect.assert_called_once_with(widget.lod_done)
-
-            widget.lod_done(usda['id'],'LODs added (1 mesh(es), 4 levels)','')
-            self.assertNotIn(usda['id'],widget.lod_pending)
-            self.assertIn('LODs added',widget.status.text())
-
-            widget.lod_done('missing-id','','disk full')
-            self.assertIn('missing-id',widget.lod_failed)
-            self.assertIn('LOD generation failed',widget.status.text())
             widget.close();widget.deleteLater()
 
-    def test_proxy_and_lod_dialogs_remember_the_last_value_and_cancel_queues_nothing(self):
+    def test_proxy_dialog_remembers_the_last_value_and_cancel_queues_nothing(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
             base=Path(folder);root=base/'asset'
             (root/'USD'/'chair').mkdir(parents=True);(root/'USD'/'chair'/'chair.usda').write_text('x')
@@ -316,11 +298,6 @@ class LibraryUiTests(unittest.TestCase):
                 dlg2.return_value=(150,False)
                 widget.ask_proxy_target()
                 self.assertEqual(dlg2.call_args.args[3],150)   # remembers the last value as the new default
-
-            with patch.object(ui.QtWidgets.QInputDialog,'getInt',return_value=(3,True)),\
-                 patch.object(ui.QtWidgets.QInputDialog,'getDouble',return_value=(25.0,True)):
-                widget.generate_lod()
-            self.assertEqual(widget.settings['lod_levels'],3);self.assertEqual(widget.settings['lod_reduction'],25.0)
             widget.close();widget.deleteLater()
 
     def test_big_libraries_stay_responsive(self):
@@ -484,29 +461,6 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo')).ComputePurpose(),'render')
             self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo_proxy')).ComputePurpose(),'proxy')
 
-    def test_lod_job_runs_as_a_real_subprocess_without_import_errors(self):
-        # lod_gen.py imported proxy_gen with `from . import proxy_gen`, a relative import that only
-        # works when the module is loaded as part of the nanakusa_asset_library package. hython runs
-        # this file directly as a script (see _MeshGenerateJob.run()), which has no parent package,
-        # so every real LOD job failed immediately with "attempted relative import with no known
-        # parent package" - invisible to tests that only import lod_gen directly or mock LodJob.
-        # Regression: run the actual subprocess, the way the UI does.
-        from pxr import Usd, UsdGeom
-        with tempfile.TemporaryDirectory() as folder:
-            base=Path(folder);source=base/'asset.usda';backups=base/'backups'
-            stage=Usd.Stage.CreateNew(str(source));xform=UsdGeom.Xform.Define(stage,'/Asset')
-            mesh=UsdGeom.Mesh.Define(stage,'/Asset/geo')
-            mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0),(0,1,0)]);mesh.CreateFaceVertexCountsAttr([4]);mesh.CreateFaceVertexIndicesAttr([0,1,2,3])
-            stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
-
-            got=[]
-            job=ui.LodJob('aid',source,backups,ui.lod_gen.DEFAULT_LEVELS,ui.lod_gen.DEFAULT_REDUCTION)
-            job.done.connect(lambda *a:got.append(a))
-            job.run()
-            self.assertEqual(got,[('aid','LODs added (1 mesh(es), 4 levels)','')])
-            stage.Reload()
-            self.assertTrue(stage.GetPrimAtPath('/Asset/geo').GetVariantSets().HasVariantSet('lod'))
-
     def test_folder_items_are_created_only_when_a_folder_is_opened(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
             base=Path(folder);root=base/'asset'
@@ -544,8 +498,8 @@ class LibraryUiTests(unittest.TestCase):
         options=ui.background()
         if os.name=='nt':
             # Windows' background process mode, not just a below-normal CPU class: it also lowers
-            # disk I/O priority, which CPU class alone does not (a long proxy/LOD queue was
-            # observed competing with the panel's own reads and freezing it for several seconds).
+            # disk I/O priority, which CPU class alone does not (a long proxy queue was observed
+            # competing with the panel's own reads and freezing it for several seconds).
             self.assertTrue(options['creationflags']&ui.PROCESS_MODE_BACKGROUND_BEGIN and options['creationflags']&subprocess.CREATE_NO_WINDOW)
         else:self.assertIn('preexec_fn',options)
 
