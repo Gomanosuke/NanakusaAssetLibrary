@@ -162,6 +162,9 @@ GUIは英語です。右側には大きな正方形プレビューと素材情�
 USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
+上部は1行のツールバー（検索・種類・Stack PBR Sets・Favorites・Options・Rescan）。パネルにフォーカスがある時の`Ctrl+F`は検索欄へ移動します（QShortcutではなくkeyPressEventで処理し、Houdini全体のホットキーを奪わない）。
+「Libraries...」メニューはLibrary / Generate / Cancel Background Jobs / Catalogのセクションに分け、Cancel項目は対象の待機・実行中件数を表示し、何もない時は無効にする。
+サムネイル・Proxy・Element Switch（生成・削除）が残っている間は、ステータス欄の上に「Background: …」行（`jobs_bar`、400msごとに`update_jobs_bar`で件数を更新）と「Cancel All」（`cancel_all_jobs`）を表示する。
 Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで読み込み済みの素材を全選択できます（一覧はページ分けせず、スクロールで続きを読み込む）。
 素材一覧でCtrl+マウス中ボタンをドラッグすると、アイコンサイズを変更できます（右・上へ動かすと大きく、左・下へ動かすと小さくなります。64〜512px）。Ctrl+ホイールでも1ノッチ24pxずつ変更でき、保存（`iconSizeFinished`）はホイール操作が300ms止まってから1回だけ行います。
 サイズは`settings.json`に保存し、次回も引き継ぎます。256pxを超える場合は、鮮明に表示するため一覧を作り直します。

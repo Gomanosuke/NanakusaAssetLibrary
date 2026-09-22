@@ -490,7 +490,7 @@ class LibraryWidget(QtWidgets.QWidget):
         return button
 
     def closeEvent(self,event):
-        for timer in (self.scroll_timer,self.icon_timer,self.info_timer,self.folder_timer,self.search_timer):timer.stop()
+        for timer in (self.scroll_timer,self.icon_timer,self.info_timer,self.folder_timer,self.search_timer,self.jobs_timer):timer.stop()
         self.missing_scan=None;self.close_stream()
         self.icon_todo.clear();self.icon_pool.clear();self.icon_pool.waitForDone(2000)
         # A folder migration only reads/writes the index; stop it and wait briefly so it never
@@ -500,13 +500,15 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def event(self,event):
         # Houdini's Python Panel can retain keyboard focus on the root widget.
-        if event.type()==QtCore.QEvent.Type.ShortcutOverride and event.matches(QtGui.QKeySequence.StandardKey.SelectAll):
+        if event.type()==QtCore.QEvent.Type.ShortcutOverride and (event.matches(QtGui.QKeySequence.StandardKey.SelectAll) or event.matches(QtGui.QKeySequence.StandardKey.Find)):
             event.accept();return True
         return super().event(event)
 
     def keyPressEvent(self,event):
         if event.matches(QtGui.QKeySequence.StandardKey.SelectAll):
             self.items.selectAll();event.accept();return
+        if event.matches(QtGui.QKeySequence.StandardKey.Find):   # a key press, not a QShortcut: never Houdini-wide
+            self.search.setFocus();self.search.selectAll();event.accept();return
         super().keyPressEvent(event)
 
     def safe(self, callback):
@@ -520,16 +522,10 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def _setup(self):
         outer = QtWidgets.QVBoxLayout(self)
-        heading = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel('NanakusaAssetLibrary  /  Karma XPU')
-        title.setStyleSheet('font-size: 17px; font-weight: bold; padding: 6px;')
-        heading.addWidget(title); heading.addStretch()
-        self.more=QtWidgets.QToolButton(); self.more.setText('Options'); self.more.setCheckable(True); heading.addWidget(self.more)
-        self.scan_button = self._button('Rescan', self.scan, heading)
-        self.cancel_button = self._button('Cancel', self.cancel_scan, heading); self.cancel_button.setVisible(False)
-        outer.addLayout(heading)
+        # One toolbar row (search, filters, options, rescan): the list gets the height a title row used to take.
         filters = QtWidgets.QHBoxLayout()
-        self.search = QtWidgets.QLineEdit(); self.search.setPlaceholderText('Search names, paths, tags...')
+        self.search = QtWidgets.QLineEdit(); self.search.setPlaceholderText('Search names, paths, tags...  (Ctrl+F)')
+        self.search.setClearButtonEnabled(True)
         self.search_timer = QtCore.QTimer(self); self.search_timer.setSingleShot(True); self.search_timer.setInterval(180)
         self.search.textChanged.connect(lambda: self.search_timer.start())
         self.search_timer.timeout.connect(self.reset_page)
@@ -542,6 +538,11 @@ class LibraryWidget(QtWidgets.QWidget):
         self.stack.setToolTip('Show the images of one PBR set (albedo, roughness, normal...) as a single item. Dragging a stack drags all of its images.')
         self.stack.toggled.connect(self.stack_toggled)
         filters.addWidget(self.search,1); filters.addWidget(self.kind); filters.addWidget(self.stack); filters.addWidget(self.favorite)
+        self.more=QtWidgets.QToolButton(); self.more.setText('Options'); self.more.setCheckable(True); filters.addWidget(self.more)
+        self.more.setToolTip('Import target, USD reference / sublayer, material prim pattern, subfolders')
+        self.scan_button = self._button('Rescan', self.scan, filters)
+        self.scan_button.setToolTip('Re-index the selected library (all libraries when "All Libraries" is selected). Source files are only read.')
+        self.cancel_button = self._button('Cancel Scan', self.cancel_scan, filters); self.cancel_button.setVisible(False)
         outer.addLayout(filters)
         split = QtWidgets.QSplitter(); outer.addWidget(split,1)
         left = QtWidgets.QWidget(); leftbox=QtWidgets.QVBoxLayout(left); leftbox.setContentsMargins(0,0,0,0)
@@ -610,6 +611,13 @@ class LibraryWidget(QtWidgets.QWidget):
         assignrow=QtWidgets.QHBoxLayout(); assignrow.addWidget(QtWidgets.QLabel('Material Prim Pattern (optional)'))
         self.assign=QtWidgets.QLineEdit(); self.assign.setPlaceholderText('/assets/chair/**'); assignrow.addWidget(self.assign,1); advanced.addLayout(assignrow)
         outer.addWidget(self.advanced); self.advanced.setVisible(False); self.more.toggled.connect(self.advanced.setVisible)
+        # Background work (thumbnails, proxies, element switches) at a glance, with one way to stop it all.
+        self.jobs_bar=QtWidgets.QWidget(); jobs=QtWidgets.QHBoxLayout(self.jobs_bar); jobs.setContentsMargins(0,0,0,0)
+        self.jobs_label=QtWidgets.QLabel(); jobs.addWidget(self.jobs_label,1)
+        self.jobs_cancel=self._button('Cancel All',self.cancel_all_jobs,jobs)
+        self.jobs_cancel.setToolTip('Drop every queued thumbnail / proxy / element switch job. Jobs already running finish first.')
+        outer.addWidget(self.jobs_bar); self.jobs_bar.setVisible(False)
+        self.jobs_timer=QtCore.QTimer(self); self.jobs_timer.setInterval(400); self.jobs_timer.timeout.connect(self.update_jobs_bar); self.jobs_timer.start()
         self.status=QtWidgets.QLabel('Drop: Model / USD to a network | Texture to fields or material networks'); self.status.setWordWrap(True); outer.addWidget(self.status)
 
     def current_folder(self):
@@ -1239,19 +1247,25 @@ class LibraryWidget(QtWidgets.QWidget):
         finally:menu.deleteLater()
 
     def build_asset_menu(self):
-        rows=self.selected_rows();menu=QtWidgets.QMenu(self)
-        def action(label,callback):menu.addAction(label,lambda:self.safe(callback))
-        action('Import Selected',self.import_selected);action('Copy Paths',self.copy_path)
+        rows=self.selected_rows();menu=QtWidgets.QMenu(self);menu.setToolTipsVisible(True)
+        usd=bool(rows) and all(row['kind']=='usd' for row in rows)
+        def action(label,callback,tip=''):
+            item=menu.addAction(label,lambda:self.safe(callback))
+            if tip:item.setToolTip(tip)
+        menu.addSection(f'{len(rows)} selected' if len(rows)!=1 else rows[0]['label'])
+        action('Import Selected',self.import_selected,'Same as double-click: into the Import Target set in Options.');action('Copy Paths',self.copy_path)
         action('Show in Explorer',self.reveal)
-        if all(row['kind']=='usd' for row in rows):action('Add Catalog',self.add_catalog)
-        menu.addSeparator()
+        if usd:action('Add Catalog',self.add_catalog)
+        menu.addSection('Thumbnail')
         action('Generate Selected Thumbnails',self.generate_thumbnail)
-        if all(row['kind']=='usd' for row in rows):
-            action('Generate Selected Proxies...',self.generate_proxy)
-            action('Generate Selected Element Switch...',self.generate_element)
-            action('Delete Element Switch',self.generate_element_delete)
+        if len(rows)==1:action('Choose Thumbnail...',self.choose_thumbnail)
+        if usd:
+            menu.addSection('USD (edits the file; a backup is kept)')
+            action('Generate Selected Proxies...',self.generate_proxy,'Adds a decimated purpose=proxy copy of each mesh.')
+            action('Generate Selected Element Switch...',self.generate_element,'Only for packs of alternate objects: adds an "element" variant set.')
+            action('Delete Element Switch',self.generate_element_delete,'Undo the element switch (assets without one are skipped).')
         if len(rows)==1:
-            action('Choose Thumbnail...',self.choose_thumbnail)
+            menu.addSeparator()
             action('Publish Static USD...',self.publish_asset)
         return menu
 
@@ -1305,27 +1319,61 @@ class LibraryWidget(QtWidgets.QWidget):
             self.library.add_folder(folder[0],path.relative_to(Path(folder[2])).as_posix())
             self.rebuild_tree(); self.status.setText('Created: '+str(path))
 
-    def root_menu(self):
+    def job_counts(self):
+        """Background work still to do per kind: (label, queued + running, cancel callback)."""
+        def count(queue,job):return len(queue)+(1 if job is not None else 0)
+        return [('Thumbnails',count(self.thumb_queue,self.thumb_job),self.cancel_thumbnails),
+                ('Proxies',count(self.proxy_queue,self.proxy_job),self.cancel_proxies),
+                ('Element switches',count(self.element_queue,self.element_job),self.cancel_elements),
+                ('Element switch removals',count(self.element_delete_queue,self.element_delete_job),self.cancel_element_deletes)]
+
+    def update_jobs_bar(self):
+        parts=[f'{label} {n}' for label,n,_ in self.job_counts() if n]
+        if self.missing_scan is not None:parts.append('checking thumbnails')
+        if self.missing_proxy_scan is not None:parts.append('checking USD for proxies')
+        if parts:self.jobs_label.setText('Background: '+'  ·  '.join(parts)+' remaining')
+        self.jobs_bar.setVisible(bool(parts))
+
+    def cancel_all_jobs(self):
+        for _,n,cancel in self.job_counts():cancel()
+        self.missing_scan=None;self.missing_proxy_scan=None
+        self.update_jobs_bar()
+        self.status.setText('Cancelled every queued background job. Jobs already running finish first.')
+
+    def build_root_menu(self):
         menu=QtWidgets.QMenu(self)
-        menu.addAction('Add Library...',lambda:self.safe(self.add_root))
-        menu.addAction('New Folder...',lambda:self.safe(self.new_folder))
-        menu.addSeparator()
-        menu.addAction('Show in Explorer',lambda:self.safe(self.reveal))
-        menu.addAction('Relink Library...',lambda:self.safe(self.relink))
-        menu.addAction('Use Library for USD / Catalog Output',lambda:self.safe(self.set_publish_root))
-        menu.addAction('Remove Library Registration...',lambda:self.safe(self.remove_root))
-        menu.addAction('Back Up Index',lambda:self.status.setText(str(self.library.backup_index())))
-        menu.addSeparator()
-        menu.addAction('Generate Missing Thumbnails',lambda:self.safe(self.generate_missing_thumbnails))
-        menu.addAction('Cancel Thumbnails',lambda:self.safe(self.cancel_thumbnails))
-        menu.addAction('Generate Missing Proxies...',lambda:self.safe(self.generate_missing_proxies))
-        menu.addAction('Cancel Proxies',lambda:self.safe(self.cancel_proxies))
-        menu.addAction('Cancel Element Switches',lambda:self.safe(self.cancel_elements))
-        menu.addAction('Cancel Element Switch Removals',lambda:self.safe(self.cancel_element_deletes))
-        menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
-        menu.addAction('Select Catalog...',lambda:self.safe(self.select_catalog))
-        menu.addAction('New Catalog...',lambda:self.safe(self.new_catalog))
-        menu.exec(QtGui.QCursor.pos())
+        def action(label,callback,enabled=True,tip=''):
+            item=menu.addAction(label,lambda:self.safe(callback));item.setEnabled(enabled)
+            if tip:item.setToolTip(tip)
+            return item
+        menu.setToolTipsVisible(True)
+        menu.addSection('Library')
+        action('Add Library...',self.add_root)
+        action('New Folder...',self.new_folder)
+        action('Show in Explorer',self.reveal)
+        action('Relink Library...',self.relink,tip='Point the selected library at its new location after moving it on disk.')
+        action('Use Library for USD / Catalog Output',self.set_publish_root)
+        action('Remove Library Registration...',self.remove_root,tip='Unregister only; source files are kept.')
+        action('Back Up Index',lambda:self.status.setText(str(self.library.backup_index())))
+        menu.addSection('Generate (search and folder filters apply)')
+        action('Generate Missing Thumbnails',self.generate_missing_thumbnails,self.missing_scan is None)
+        action('Generate Missing Proxies...',self.generate_missing_proxies,self.missing_proxy_scan is None)
+        menu.addSection('Cancel Background Jobs')
+        counts=self.job_counts()
+        for (label,n,cancel),name in zip(counts,('Cancel Thumbnails','Cancel Proxies','Cancel Element Switches','Cancel Element Switch Removals')):
+            action(name+(f' ({n})' if n else ''),cancel,bool(n) or (name=='Cancel Thumbnails' and self.missing_scan is not None)
+                   or (name=='Cancel Proxies' and self.missing_proxy_scan is not None))
+        action('Cancel All',self.cancel_all_jobs,any(n for _,n,_ in counts) or self.missing_scan is not None or self.missing_proxy_scan is not None)
+        menu.addSection('Catalog')
+        action('Open Catalog',self.open_catalog)
+        action('Select Catalog...',self.select_catalog)
+        action('New Catalog...',self.new_catalog)
+        return menu
+
+    def root_menu(self):
+        menu=self.build_root_menu()
+        try:menu.exec(QtGui.QCursor.pos())
+        finally:menu.deleteLater()
 
     def set_publish_root(self):
         folder=self.current_folder()

@@ -715,6 +715,33 @@ class LibraryUiTests(unittest.TestCase):
         env=ui.plain_python_env('C:/HFS')
         self.assertNotIn('PXR_PLUGINPATH_NAME',env);self.assertTrue(env['PATH'].startswith(str(Path('C:/HFS')/'bin')))
 
+    def test_background_jobs_bar_counts_queues_and_cancel_all_empties_them(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'):
+            base=Path(folder);root=base/'asset';root.mkdir()
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.update_jobs_bar();self.assertTrue(widget.jobs_bar.isHidden())
+            labels=lambda:{a.text():a.isEnabled() for a in widget.build_root_menu().actions() if a.text()}
+            self.assertFalse(labels()['Cancel All']);self.assertFalse(labels()['Cancel Proxies'])
+            widget.thumb_queue.extend([{'id':'a'},{'id':'b'}]);widget.thumb_pending.update({'a','b'})
+            widget.proxy_queue.append(({'id':'c'},300));widget.proxy_pending.add('c')
+            widget.update_jobs_bar()
+            self.assertFalse(widget.jobs_bar.isHidden())
+            self.assertIn('Thumbnails 2',widget.jobs_label.text());self.assertIn('Proxies 1',widget.jobs_label.text())
+            self.assertTrue(labels()['Cancel Thumbnails (2)']);self.assertTrue(labels()['Cancel All'])
+            self.assertFalse(labels()['Cancel Element Switches'])
+            widget.cancel_all_jobs()
+            self.assertFalse(widget.thumb_queue);self.assertFalse(widget.proxy_queue)
+            self.assertFalse(widget.thumb_pending or widget.proxy_pending)   # can be queued again later
+            self.assertTrue(widget.jobs_bar.isHidden())
+            # Ctrl+F (a key press on the panel, not an application-wide shortcut) jumps to the search field.
+            from hutil.PySide import QtGui,QtCore
+            widget.search.setText('rock')
+            with patch.object(widget.search,'setFocus') as focus:
+                widget.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress,QtCore.Qt.Key.Key_F,QtCore.Qt.KeyboardModifier.ControlModifier))
+                focus.assert_called_once()
+            self.assertEqual(widget.search.selectedText(),'rock')
+            widget.close();widget.deleteLater()
+
     def test_icons_are_decoded_off_the_ui_thread_and_cached(self):
         from hutil.PySide import QtGui
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
