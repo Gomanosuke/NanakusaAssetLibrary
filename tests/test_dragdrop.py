@@ -43,6 +43,17 @@ class DropTests(unittest.TestCase):
         self.assertEqual(set(self.lop.children()),before)
         self.assertEqual(self.lop.displayNode(),merge)
 
+    def test_a_variant_tag_asks_for_a_variant_switch_and_its_absence_does_not(self):
+        usd=self.root/'plain.usda';s=Usd.Stage.CreateNew(str(usd));x=UsdGeom.Xform.Define(s,'/x');s.SetDefaultPrim(x.GetPrim());s.GetRootLayer().Save()
+        calls=[];original=dd.ops.import_into_context
+        def spy(*args):calls.append(args);return original(*args)
+        with patch.object(dd.ops,'import_into_context',side_effect=spy):
+            tagged={'kind':'usd','path':str(usd),'label':'a','tags':'foo variant bar'}
+            untagged={'kind':'usd','path':str(usd),'label':'b','tags':'foo bar'}
+            no_tags_key={'kind':'usd','path':str(usd),'label':'c'}   # older payload shape: never crashes
+            dd.import_payloads([tagged,untagged,no_tags_key],self.lop)
+        self.assertEqual([call[4] for call in calls],[True,False,False])
+
     def test_pbr_batch_shared_uv_and_output_preservation(self):
         mat=self.lop.createNode('materiallibrary')
         payloads=[]

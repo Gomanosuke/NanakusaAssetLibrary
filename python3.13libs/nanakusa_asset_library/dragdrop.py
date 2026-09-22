@@ -87,7 +87,7 @@ def import_payloads(payloads, parent, position=None):
             if groups is not None:
                 for i,group in enumerate(groups):nodes.append(ops.texture_material(parent,group['maps'],group['label'],position if i==0 else None))
             else:
-                for p in payloads:nodes.append(ops.import_into_context(p['path'],p['kind'],p['label'],parent))
+                for p in payloads:nodes.append(ops.import_into_context(p['path'],p['kind'],p['label'],parent,'variant' in p.get('tags','').split()))
             origin=position if position is not None else hou.Vector2(0,0)
             for i,node in enumerate(nodes):
                 # A surface inside an existing builder was already laid out with its UV and images.
@@ -239,7 +239,7 @@ class AssetList(QtWidgets.QListWidget):
             rows={}
             for item in items:
                 for row in self.expand(item):rows[row['id']]=row
-            payloads=[{'path':self.library.resolve(row),'kind':row['effective_kind'],'label':row['label']} for row in rows.values()]
+            payloads=[{'path':self.library.resolve(row),'kind':row['effective_kind'],'label':row['label'],'tags':row['tags']} for row in rows.values()]
         except Exception as exc:
             hou.ui.setStatusMessage(str(exc),severity=hou.severityType.Error)
             return

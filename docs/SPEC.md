@@ -191,6 +191,9 @@ TagsはEnterまたは入力欄から離れた時に保存し、Favoriteは切り
 1ファイルだけを受け付けるパラメーターには、1素材ずつドロップしてください。Houdiniのネイティブ入力欄ではその欄の標準D&D規則に従います。
 Import Selectedの複数読み込みも同じ一括処理です。USDはReference、既存LOPへの自動接続とPrim割り当て設定は単体読み込み専用です。
 
+`variant`タグを持つUSD（複数オブジェクト入りパックの切り替え機能を参照）をstage / LOPネットワークへD&D、またはImport Selectedで取り込むと、`houdini_ops._add_variant_switch`がReference/Sublayer LOPの直後に`setvariant`ノードを挿入する。挿入したノードを新しい先頭に（後続の材質割り当て等はこのノードから接続する）。`num_variants=1`、`enable1=True`、`primpattern1`は対象resulting stageを実際にTraverseして見つけた`element` variant setを持つプリムの**合成後のパス**（`/assets/<name>/...`。Reference remapで元ファイル内パスが保存されるかどうかはdefaultPrimと分岐点プリムの関係次第）、`variantset1='element'`、`variantnameuseindex1=True`、`variantnameindex1=0`を設定する。variant setを持たない資産では何もしない（`add_variant_switch`フラグ自体は常に渡されるが、判定はステージを開いてから行う）。
+`dragdrop.py`のペイロード辞書（D&D・Import Selectedの両方）に`'tags': row['tags']`を含め、`import_payloads`が`'variant' in payload.get('tags','').split()`で`add_variant_switch`を決める。`import_into_context`/`import_asset`へその真偽値をそのまま通す。
+
 Scene Viewなど、ドロップ先として想定していない場所へ落としても何も起きません（Houdiniがファイルを開こうとして保存確認が出ることはありません）。
 パラメーターのネイティブ入力欄と文字列入力欄だけは、パスを受け取ります。
 Textureを通常のstageやobjへ落としてもノードは作りません。
@@ -294,7 +297,7 @@ Sketchfab等のパックは、同じ原点付近に複数の独立したトッ�
 `ui.py`の`ElementJob`（`ProxyJob`と`_MeshGenerateJob`を共通基底とする）が`hython element_gen.py <元ファイル> <一時出力> <結果JSON>`を実行し、成功時のみ`data/backups/element/`へバックアップしてから`os.replace`で置き換える。失敗・スキップ時は元ファイルを一切変更しない。
 右クリックの「Generate Selected Element Switch...」は選択したUSD資産に生成する（ダイアログでの値入力は無い）。「Libraries... → Cancel Element Switches」で待機分を解除できる。フォルダー移動・素材移動は、待機中のelement switch生成がある間はできない。
 
-配置後にどのオブジェクトを表示するか切り替えるには、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに分岐点プリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。
+配置後にどのオブジェクトを表示するか切り替えるには、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに分岐点プリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。`variant`タグの付いた資産をD&D/Import Selectedで配置した場合、このノードは`houdini_ops._add_variant_switch`が既に自動で挿入している（[D&D](#dd)を参照）。
 
 ### 削除・自動タグ・サムネイルバッジ
 

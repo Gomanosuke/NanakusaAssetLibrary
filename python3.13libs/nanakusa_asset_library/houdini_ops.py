@@ -131,7 +131,7 @@ def texture_material(parent, maps, label, origin=None):
     _layout_material(builder,[] if builder_parent else existing,None if builder_parent else origin,shader,uv,images,processors,extras,outputs)
     return result
 
-def import_into_context(path, kind, label, parent):
+def import_into_context(path, kind, label, parent, add_variant_switch=False):
     import hou
     if not Path(path).is_file():raise FileNotFoundError(str(path))
     before=set(parent.children())
@@ -140,7 +140,7 @@ def import_into_context(path, kind, label, parent):
             return _texture_material(parent,path,label)
         category=parent.childTypeCategory()
         if category==hou.lopNodeTypeCategory():
-            return import_asset(path,kind,label,parent.path())
+            return import_asset(path,kind,label,parent.path(),add_variant_switch=add_variant_switch)
         if category==hou.objNodeTypeCategory():
             geo=parent.createNode('geo',safe_name(label))
             _read_geometry(geo,path,kind)
@@ -200,7 +200,29 @@ def _source_prim(path):
         return str(roots[0].GetPath())
     raise ValueError('Multiple root prims and no defaultPrim. Use USD Sublayer mode, or author a defaultPrim first.')
 
-def import_asset(path, kind, label, target='/stage', upstream=None, usd_mode='reference', assign_pattern=''):
+def _add_variant_switch(parent, node):
+    """Insert a Set Variant LOP after `node` if its composed stage has an "element" variant set
+    (from element_gen.py), pre-wired to the branch prim so a drag-and-dropped multi-object pack
+    is immediately switchable instead of showing every object at once. A no-op if there is none.
+    """
+    node.cook(force=True)
+    stage = node.stage()
+    target_path = next((str(p.GetPath()) for p in stage.Traverse() if p.GetVariantSets().HasVariantSet('element')), None) if stage else None
+    if target_path is None:
+        return node
+    switch = parent.createNode('setvariant', node.name() + '_variant')
+    switch.setInput(0, node)
+    switch.parm('num_variants').set(1)
+    switch.parm('enable1').set(True)
+    switch.parm('primpattern1').set(target_path)
+    switch.parm('variantset1').set('element')
+    # Requested so the node reads correctly no matter how many elements the pack has, without
+    # needing to know the variant names in advance: index 0 is always Element0, the default shown.
+    switch.parm('variantnameuseindex1').set(True)
+    switch.parm('variantnameindex1').set(0)
+    return switch
+
+def import_asset(path, kind, label, target='/stage', upstream=None, usd_mode='reference', assign_pattern='', add_variant_switch=False):
     import hou
     p = Path(path)
     if not p.is_file():
@@ -231,6 +253,8 @@ def import_asset(path, kind, label, target='/stage', upstream=None, usd_mode='re
                         node.parm('filerefprim1').set('')
                 if upstream:
                     node.setInput(0, upstream)
+                if kind == 'usd' and add_variant_switch:
+                    node = _add_variant_switch(parent, node)
                 if kind == 'material' and assign_pattern:
                     from pxr import UsdShade
                     material_stage = node.stage()

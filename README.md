@@ -130,6 +130,7 @@ asset/
 - Scene Viewなど、ドロップ先として想定していない場所に落としても、何も起きません。
 - テクスチャを通常のstageやobjに落としても、ノードは作りません。材質ネットワークか、入力欄に落としてください。
 - Import Selected（右クリック）でも、同じ取り込みができます。単体のUSDでは、Options で取り込み先・Reference / Sublayer・Prim割り当てを指定できます。
+- **`variant`タグの付いたUSD**（[複数オブジェクト入りUSDの切り替え](#複数オブジェクト入りusdの切り替え)を参照）をstage / LOPネットワークへドロップ、またはImport Selectedで取り込むと、Reference LOPの直後に**Set Variantノードが自動で追加されます**（Variant Set = `element`、Choose Variant Name by Index = ON、Index = 0）。切り替えたい場合は、このノードの Variant Name Index を変えるだけで済みます。
 
 ## PBRテクスチャからマテリアルを作る
 
@@ -198,7 +199,7 @@ proxy（`purpose=proxy`）が無いUSDは、Scene Viewでも重いレンダー�
 ダウンロード元のパック（例: きのこの品種違いを何体もまとめたSketchfabパックなど）は、同じ場所に複数の独立したオブジェクトが重なって入っていることがあります。そのままだと配置時に全部が同時に、重なって表示されてしまいます。
 
 - 対象資産を選び、右クリックの **Generate Selected Element Switch...** で、`element` という名前のvariant setを追加します。バンドルされている各オブジェクトが `Element0`、`Element1`…という名前のバリアントになり、生成直後は `Element0`（最初の1つ）だけが表示され、他は非表示になります。
-- 配置後にどれを表示するか切り替えるには、LOPネットワークに **Set Variant** ノードを追加し、Primitives にこの資産のプリム、Variant Set に `element`、Variant Name に `Element0`〜`ElementN-1` のいずれかを指定します（Scene Graph Tree の Variants タブから直接切り替えることもできます）。
+- `variant`タグの付いた資産をドラッグ&ドロップ、またはImport Selectedで配置すると、切り替え用の **Set Variant** ノードが自動で追加されます（詳細は[ドラッグ&ドロップ](#ドラッグドロップ)）。手動で追加する場合は、LOPネットワークに **Set Variant** ノードを追加し、Primitives にこの資産のプリム、Variant Set に `element`、Variant Name に `Element0`〜`ElementN-1` のいずれかを指定します（Scene Graph Tree の Variants タブから直接切り替えることもできます）。
 - **この機能は、複数の独立したオブジェクトが1つのファイルにまとめられているパックにだけ使ってください。** 手すりのパーツ集合のような、複数のメッシュが全部そろって初めて1つの物になる「モジュール式キット」も、ファイルの形としては同じ（トップレベルに複数のメッシュを持つグループが並ぶ）に見えるため、区別できません。誤って使うとキットの大半が非表示になります。対象を選ぶ前に、その資産が本当に「複数の代替オブジェクトのうちどれか1つを選ぶもの」かどうかを確認してください。
 - そのため、Proxyと違い「Generate Missing...」のような一括生成はありません。選択した資産にだけ生成する操作のみです。
 - 既に `element` variant setを持つ資産、複数オブジェクトのパックとして検出できない資産（対象を2つ以上検出できる分岐点が無い場合）は自動でスキップされます。

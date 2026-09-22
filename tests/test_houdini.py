@@ -81,6 +81,46 @@ class HoudiniTests(unittest.TestCase):
         node=self.load(p,'usd',usd_mode='sublayer')
         self.assertTrue(node.stage().GetPrimAtPath('/a')); self.assertTrue(node.stage().GetPrimAtPath('/b'))
 
+    def _variant_pack(self):
+        # Mirrors real Sketchfab-style packs: the defaultPrim (Top) is a wrapper above the actual
+        # branch point (Top/Root), so the reference remap preserves that sub-path - unlike a fixture
+        # where the branch point IS the defaultPrim, which would remap onto /assets/test_asset with
+        # no extra segment and wouldn't catch a path bug like that.
+        p=self.root/'pack.usda'; stage=Usd.Stage.CreateNew(str(p))
+        top=UsdGeom.Xform.Define(stage,'/Top'); root=UsdGeom.Xform.Define(stage,'/Top/Root')
+        for name in ('a','b','c'):
+            UsdGeom.Mesh.Define(stage,f'/Top/Root/{name}')
+        vset=root.GetPrim().GetVariantSets().AddVariantSet('element')
+        for i,name in enumerate(('a','b','c')):
+            vset.AddVariant(f'Element{i}');vset.SetVariantSelection(f'Element{i}')
+            with vset.GetVariantEditContext():
+                for other in ('a','b','c'):
+                    UsdGeom.Imageable(stage.GetPrimAtPath(f'/Top/Root/{other}')).CreateVisibilityAttr().Set('inherited' if other==name else 'invisible')
+        vset.SetVariantSelection('Element0')
+        stage.SetDefaultPrim(top.GetPrim());stage.GetRootLayer().Save()
+        return p
+
+    def test_variant_switch_node_is_added_when_requested_and_the_asset_has_one(self):
+        node=self.load(self._variant_pack(),'usd',add_variant_switch=True)
+        self.assertEqual(node.type().name(),'setvariant')
+        self.assertEqual(node.inputs()[0].type().name(),'reference::2.0')
+        self.assertTrue(node.parm('enable1').eval())
+        # /Top is the defaultPrim (remapped to /assets/test_asset); /Root is one level deeper.
+        self.assertEqual(node.parm('primpattern1').eval(),'/assets/test_asset/Root')
+        self.assertEqual(node.parm('variantset1').eval(),'element')
+        self.assertTrue(node.parm('variantnameuseindex1').eval())
+        self.assertEqual(node.parm('variantnameindex1').eval(),0)
+        # the switch is the new terminal node: still exactly one mesh visible downstream of it
+        self.assertEqual(UsdGeom.Imageable(node.stage().GetPrimAtPath('/assets/test_asset/Root/a')).ComputeVisibility(),'inherited')
+
+    def test_variant_switch_node_is_not_added_without_a_variant_or_without_the_flag(self):
+        node=self.load(self.obj,'model')   # unrelated kind: never eligible
+        plain=self.root/'plain.usda'; s=Usd.Stage.CreateNew(str(plain)); x=UsdGeom.Xform.Define(s,'/x'); s.SetDefaultPrim(x.GetPrim()); s.GetRootLayer().Save()
+        node=self.load(plain,'usd',add_variant_switch=True)   # asked for, but nothing to switch
+        self.assertEqual(node.type().name(),'reference::2.0')
+        node=self.load(self._variant_pack(),'usd')   # has a variant, but not opted in
+        self.assertEqual(node.type().name(),'reference::2.0')
+
     def test_materialx_document(self):
         import MaterialX as mx
         doc=mx.createDocument()

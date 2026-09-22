@@ -1425,7 +1425,7 @@ class LibraryWidget(QtWidgets.QWidget):
             if parent is None:raise ValueError('Import target does not exist.')
             if all(row['kind']=='texture' for row in rows) and not dragdrop.is_material_context(parent):
                 self.copy_path();return
-            payloads=[{'path':self.library.resolve(row),'kind':row['effective_kind'],'label':row['label']} for row in rows]
+            payloads=[{'path':self.library.resolve(row),'kind':row['effective_kind'],'label':row['label'],'tags':row['tags']} for row in rows]
             nodes=dragdrop.import_payloads(payloads,parent)
             self.status.setText(f'Imported {len(nodes)} assets into {parent.path()}')
             return nodes
@@ -1437,7 +1437,7 @@ class LibraryWidget(QtWidgets.QWidget):
             nodes=[n for n in hou.selectedNodes() if n.parent().path()==self.target.text() and n.type().category()==hou.lopNodeTypeCategory()]
             if len(nodes)>1:raise ValueError('Select only one upstream LOP.')
             if nodes:upstream=nodes[0]
-        node=ops.import_asset(source,row['effective_kind'],row['label'],self.target.text(),upstream,'sublayer' if self.usdmode.currentIndex() else 'reference',self.assign.text())
+        node=ops.import_asset(source,row['effective_kind'],row['label'],self.target.text(),upstream,'sublayer' if self.usdmode.currentIndex() else 'reference',self.assign.text(),add_variant_switch='variant' in row['tags'].split())
         node.setSelected(True,clear_all_selected=True); node.setDisplayFlag(True)
         self.status.setText('Imported: '+node.path()+(' (FBX/glTF source materials are not rebuilt automatically)' if source.suffix.lower() in {'.fbx','.gltf','.glb'} else ''))
         return node
