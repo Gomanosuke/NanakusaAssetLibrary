@@ -7,7 +7,16 @@ generate_usdz there.
 from pathlib import Path
 import sys
 
-from . import proxy_gen
+if __package__ in (None, ''):
+    # Run directly by hython as a worker subprocess (see _MeshGenerateJob in ui.py), this file has
+    # no parent package, so the relative import below would fail with "attempted relative import
+    # with no known parent package". Make python3.13libs importable and import proxy_gen from
+    # there instead; this branch is a no-op when lod_gen is imported normally as part of the
+    # nanakusa_asset_library package (tests, ui.py).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from nanakusa_asset_library import proxy_gen
+else:
+    from . import proxy_gen
 
 DEFAULT_LEVELS = 4
 DEFAULT_REDUCTION = 50.0   # percent of the previous level's triangle count kept at each step
@@ -70,7 +79,6 @@ def generate(source, destination, levels=DEFAULT_LEVELS, reduction=DEFAULT_REDUC
 
 if __name__ == '__main__':
     import json
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     levels = int(sys.argv[4]) if len(sys.argv) > 4 else DEFAULT_LEVELS
     reduction = float(sys.argv[5]) if len(sys.argv) > 5 else DEFAULT_REDUCTION
     result = generate(sys.argv[1], sys.argv[2], levels, reduction)

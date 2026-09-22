@@ -484,6 +484,29 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo')).ComputePurpose(),'render')
             self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo_proxy')).ComputePurpose(),'proxy')
 
+    def test_lod_job_runs_as_a_real_subprocess_without_import_errors(self):
+        # lod_gen.py imported proxy_gen with `from . import proxy_gen`, a relative import that only
+        # works when the module is loaded as part of the nanakusa_asset_library package. hython runs
+        # this file directly as a script (see _MeshGenerateJob.run()), which has no parent package,
+        # so every real LOD job failed immediately with "attempted relative import with no known
+        # parent package" - invisible to tests that only import lod_gen directly or mock LodJob.
+        # Regression: run the actual subprocess, the way the UI does.
+        from pxr import Usd, UsdGeom
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder);source=base/'asset.usda';backups=base/'backups'
+            stage=Usd.Stage.CreateNew(str(source));xform=UsdGeom.Xform.Define(stage,'/Asset')
+            mesh=UsdGeom.Mesh.Define(stage,'/Asset/geo')
+            mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0),(0,1,0)]);mesh.CreateFaceVertexCountsAttr([4]);mesh.CreateFaceVertexIndicesAttr([0,1,2,3])
+            stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
+
+            got=[]
+            job=ui.LodJob('aid',source,backups,ui.lod_gen.DEFAULT_LEVELS,ui.lod_gen.DEFAULT_REDUCTION)
+            job.done.connect(lambda *a:got.append(a))
+            job.run()
+            self.assertEqual(got,[('aid','LODs added (1 mesh(es), 4 levels)','')])
+            stage.Reload()
+            self.assertTrue(stage.GetPrimAtPath('/Asset/geo').GetVariantSets().HasVariantSet('lod'))
+
     def test_folder_items_are_created_only_when_a_folder_is_opened(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
             base=Path(folder);root=base/'asset'
