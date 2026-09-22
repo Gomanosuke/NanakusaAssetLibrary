@@ -292,6 +292,64 @@ class LibraryUiTests(unittest.TestCase):
             widget.element_done('missing-id','','disk full')
             self.assertIn('missing-id',widget.element_failed)
             self.assertIn('Element switch generation failed',widget.status.text())
+
+            select(usda)
+            action_labels=[a.text() for a in widget.build_asset_menu().actions()]
+            self.assertIn('Delete Element Switch',action_labels)
+
+            with patch.object(ui,'ElementDeleteJob') as job_cls:
+                job=job_cls.return_value
+                widget.queue_element_delete(usda)
+                self.assertIn(usda['id'],widget.element_delete_pending)
+                self.app.processEvents()
+                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'element')
+                self.assertIs(widget.element_delete_job,job)
+                job.done.connect.assert_called_once_with(widget.element_delete_done)
+
+            widget.element_delete_done('missing-id','','disk full')
+            self.assertIn('missing-id',widget.element_delete_failed)
+            self.assertIn('Element switch removal failed',widget.status.text())
+            widget.close();widget.deleteLater()
+
+    def test_element_switch_generation_and_removal_drive_the_variant_tag_and_icon_badge(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            (root/'USD'/'pack').mkdir(parents=True);(root/'USD'/'pack'/'pack.usda').write_text('x')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            row=next(r for r in widget.rows if r['label']=='pack')
+            aid=row['id'];index=widget.item_index[aid]
+            widget.icons_loaded.add(index)   # pretend the icon was already painted once, without a badge
+
+            self.assertNotIn('variant',widget.row_index[aid]['tags'].split())
+            widget.element_done(aid,'Element switch added (3 elements)','')
+            self.assertIn('variant',widget.row_index[aid]['tags'].split())
+            self.assertIn('variant',widget.library.assets_by_ids([aid])[0]['tags'].split())   # persisted, not just in memory
+            self.assertNotIn(index,widget.icons_loaded)   # forced to repaint so the badge appears
+            self.assertIn(index,widget.icon_todo)
+
+            widget.icons_loaded.add(index);widget.icon_todo.clear()
+            widget.element_delete_done(aid,'Element switch removed (1 prim(s))','')
+            self.assertNotIn('variant',widget.row_index[aid]['tags'].split())
+            self.assertNotIn('variant',widget.library.assets_by_ids([aid])[0]['tags'].split())
+            self.assertNotIn(index,widget.icons_loaded)
+            self.assertIn(index,widget.icon_todo)
+
+            # a skip (no error, but no "added"/"removed" prefix) must not touch the tag
+            widget.set_variant_tag(aid,True);self.assertIn('variant',widget.row_index[aid]['tags'].split())
+            widget.element_done(aid,'Already has an element switch','')
+            self.assertIn('variant',widget.row_index[aid]['tags'].split())   # unchanged by the skip message
+
+            entry=next(e for e in widget.page_entries if e['rep']['id']==aid)
+            with patch.object(ui.LibraryWidget,'variant_badge',return_value=ui.QtGui.QIcon()) as badge:
+                entry['rep']['tags']=''
+                widget.icons_loaded.discard(index);widget.icon_todo.append(index)
+                widget.load_icons()
+                badge.assert_not_called()
+                entry['rep']['tags']='variant'
+                widget.icons_loaded.discard(index);widget.icon_todo.append(index)
+                widget.load_icons()
+                badge.assert_called_once()
             widget.close();widget.deleteLater()
 
     def test_proxy_dialog_remembers_the_last_value_and_cancel_queues_nothing(self):
@@ -500,6 +558,14 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(got,[('aid','Element switch added (3 elements)','')])
             stage.Reload()
             self.assertEqual(stage.GetPrimAtPath('/Root').GetVariantSet('element').GetVariantSelection(),'Element0')
+
+            got.clear()
+            job=ui.ElementDeleteJob('aid',source,backups)
+            job.done.connect(lambda *a:got.append(a))
+            job.run()
+            self.assertEqual(got,[('aid','Element switch removed (1 prim(s))','')])
+            stage.Reload()
+            self.assertFalse(stage.GetPrimAtPath('/Root').GetVariantSets().HasVariantSet('element'))
 
     def test_folder_items_are_created_only_when_a_folder_is_opened(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):

@@ -5,7 +5,7 @@ import unittest
 import zipfile
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 from pxr import Usd, UsdGeom, UsdUtils
-from nanakusa_asset_library.element_gen import generate
+from nanakusa_asset_library.element_gen import generate, remove
 
 
 def triangle(stage, path):
@@ -85,6 +85,38 @@ class ElementGenTests(unittest.TestCase):
             result=generate(src,Path(folder)/'out.usda')
             self.assertEqual(result['element_switch']['prim'],'/Wrapper/Branch')
 
+    def test_remove_undoes_the_switch_completely_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=Path(folder)/'pack.usda'
+            stage=Usd.Stage.CreateNew(str(src));root=UsdGeom.Xform.Define(stage,'/Root')
+            for name in ('a','b','c'):
+                triangle(stage,f'/Root/{name}')
+            stage.SetDefaultPrim(root.GetPrim());stage.GetRootLayer().Save()
+            switched=Path(folder)/'switched.usda'
+            generate(src,switched)
+
+            unswitched=Path(folder)/'unswitched.usda'
+            result=remove(switched,unswitched)
+            self.assertEqual(result,{'removed_element_switch':['/Root']})
+
+            out=Usd.Stage.Open(str(unswitched))
+            root_out=out.GetPrimAtPath('/Root')
+            self.assertFalse(root_out.GetVariantSets().HasVariantSet('element'))
+            for name in ('a','b','c'):   # no leftover visibility overrides either
+                self.assertFalse(UsdGeom.Imageable(out.GetPrimAtPath(f'/Root/{name}')).GetVisibilityAttr().HasAuthoredValue())
+
+            again=remove(unswitched,Path(folder)/'again.usda')
+            self.assertEqual(again,{'skipped':'no element switch found in this file'})
+
+    def test_remove_on_an_asset_without_a_switch_is_skipped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=Path(folder)/'asset.usda'
+            stage=Usd.Stage.CreateNew(str(src));xform=UsdGeom.Xform.Define(stage,'/Asset')
+            triangle(stage,'/Asset/geo')
+            stage.SetDefaultPrim(xform.GetPrim());stage.GetRootLayer().Save()
+            result=remove(src,Path(folder)/'out.usda')
+            self.assertEqual(result,{'skipped':'no element switch found in this file'})
+
 
 class ElementGenUsdzTests(unittest.TestCase):
     def test_a_usdz_pack_is_switched_and_repackaged(self):
@@ -109,6 +141,12 @@ class ElementGenUsdzTests(unittest.TestCase):
             self.assertEqual(vs.GetVariantSelection(),'Element0')
             with zipfile.ZipFile(dest) as z:
                 self.assertEqual(z.namelist(),['pack.usda'])
+
+            unswitched=Path(folder)/'unswitched.usdz'
+            result=remove(dest,unswitched)
+            self.assertEqual(result,{'removed_element_switch':['/Root']})
+            check2=Usd.Stage.Open(str(unswitched))
+            self.assertFalse(check2.GetPrimAtPath('/Root').GetVariantSets().HasVariantSet('element'))
 
 
 if __name__=='__main__':unittest.main()

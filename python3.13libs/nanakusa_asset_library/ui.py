@@ -319,6 +319,15 @@ class ElementJob(_MeshGenerateJob):
         return f"Element switch added ({len(result['element_switch']['variants'])} elements)"
 
 
+class ElementDeleteJob(_MeshGenerateJob):
+    """Undo ElementJob: remove a previously-added "element" variant set (element_gen.py remove mode)."""
+    script, label = 'element_gen.py', 'Element switch removal'
+    def __init__(self, asset_id, source, backup_dir):
+        super().__init__(asset_id, source, backup_dir, ('remove',))
+    def summary(self, result):
+        return f"Element switch removed ({len(result['removed_element_switch'])} prim(s))"
+
+
 class FolderMigrationJob(QtCore.QThread):
     """One-time folder listing for an index made before folders were recorded by the scan.
 
@@ -410,6 +419,10 @@ class LibraryWidget(QtWidgets.QWidget):
         self.element_pending = set()
         self.element_failed = set()
         self.element_job = None
+        self.element_delete_queue = deque()
+        self.element_delete_pending = set()
+        self.element_delete_failed = set()
+        self.element_delete_job = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
         self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
@@ -657,6 +670,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.thumb_pending:raise ValueError('Wait for thumbnail generation to finish (or use Libraries... > Cancel Thumbnails) before moving assets.')
         if self.proxy_pending:raise ValueError('Wait for proxy generation to finish (or use Libraries... > Cancel Proxies) before moving assets.')
         if self.element_pending:raise ValueError('Wait for element switch generation to finish (or use Libraries... > Cancel Element Switches) before moving assets.')
+        if self.element_delete_pending:raise ValueError('Wait for element switch removal to finish before moving assets.')
         self.save_metadata()
         root_id,dest_rel,_=target;select=None
         if 'assets' in payload:
@@ -801,6 +815,7 @@ class LibraryWidget(QtWidgets.QWidget):
             entry=self.page_entries[index]
             icon=self.icon_for(entry['rep'])
             if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
+            elif 'variant' in entry['rep']['tags'].split():icon=self.variant_badge(icon)
             self.items.item(index).setIcon(icon);self.icons_loaded.add(index)
         if self.icon_todo:self.icon_timer.start(0)
 
@@ -828,6 +843,17 @@ class LibraryWidget(QtWidgets.QWidget):
         painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(30,120,90));painter.drawEllipse(166,198,50,50)
         font=painter.font();font.setBold(True);font.setPixelSize(24);painter.setFont(font)
         painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(166,198,50,50),QtCore.Qt.AlignmentFlag.AlignCenter,str(count));painter.end()
+        return QtGui.QIcon(out)
+
+    def variant_badge(self,icon):
+        """Small corner marker for a USD carrying the "variant" tag (an element switch, or
+        anything else tagged that way), so it is recognisable without opening its info panel."""
+        edge=self.icon_edge();out=QtGui.QPixmap(edge,edge);out.fill(QtCore.Qt.GlobalColor.transparent)
+        painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.scale(edge/256,edge/256)
+        painter.drawPixmap(QtCore.QRect(0,0,256,256),icon.pixmap(edge,edge))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(45,95,180));painter.drawRoundedRect(6,6,96,28,6,6)
+        font=painter.font();font.setBold(True);font.setPixelSize(14);painter.setFont(font)
+        painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(6,6,96,28),QtCore.Qt.AlignmentFlag.AlignCenter,'VARIANT');painter.end()
         return QtGui.QIcon(out)
 
     def icon_edge(self):
@@ -928,7 +954,54 @@ class LibraryWidget(QtWidgets.QWidget):
         if error:
             self.element_failed.add(aid);self.status.setText('Element switch generation failed: '+error)
         else:
+            if message and message.startswith('Element switch added'):self.set_variant_tag(aid,True)
             self.status.setText((message or 'Already has an element switch')+f' ({len(self.element_queue)} remaining)')
+
+    def queue_element_delete(self,row):
+        aid=row['id']
+        if row['kind']!='usd' or aid in self.element_delete_pending or aid in self.element_delete_failed:return
+        self.element_delete_pending.add(aid);self.element_delete_queue.append(row)
+        QtCore.QTimer.singleShot(0,self.next_element_delete)
+
+    def next_element_delete(self):
+        if self.element_delete_job is not None or not self.element_delete_queue:return
+        row=self.element_delete_queue.popleft()
+        source=Path(row['root_path'])/row['relpath']
+        self.element_delete_job=ElementDeleteJob(row['id'],source,self.data_dir/'backups'/'element')
+        self.element_delete_job.done.connect(self.element_delete_done)
+        self.element_delete_job.finished.connect(self.element_delete_finished)
+        _keep_job(self.element_delete_job)
+
+    def element_delete_finished(self):
+        self.element_delete_job=None;self.next_element_delete()
+
+    def element_delete_done(self,aid,message,error):
+        self.element_delete_pending.discard(aid)
+        if error:
+            self.element_delete_failed.add(aid);self.status.setText('Element switch removal failed: '+error)
+        else:
+            if message and message.startswith('Element switch removed'):self.set_variant_tag(aid,False)
+            self.status.setText((message or 'No element switch to remove')+f' ({len(self.element_delete_queue)} remaining)')
+
+    def set_variant_tag(self,aid,present):
+        """Keep the auto "variant" tag (and the thumbnail badge it drives) in sync with whether
+        this asset currently has an element switch, without opening the file again - the caller
+        already knows, since it just added or removed one."""
+        row=self.row_index.get(aid)
+        if row is None:return
+        words=row['tags'].split()
+        if present:
+            if 'variant' in words:return
+            words.append('variant')
+        else:
+            if 'variant' not in words:return
+            words=[w for w in words if w!='variant']
+        tags=' '.join(words)
+        self.library.update(aid,tags=tags);self.update_metadata_rows(aid,tags=tags)
+        index=self.item_index.get(aid)
+        if index is not None:self.icons_loaded.discard(index);self.icon_todo.appendleft(index);self.icon_timer.start(0)
+        current=self.items.currentItem()
+        if current is not None and current.data(ROLE)==aid:self.selection_changed()
 
     def icon_for(self,row):
         path=self.thumbnail_path(row)
@@ -1084,6 +1157,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if all(row['kind']=='usd' for row in rows):
             action('Generate Selected Proxies...',self.generate_proxy)
             action('Generate Selected Element Switch...',self.generate_element)
+            action('Delete Element Switch',self.generate_element_delete)
         if len(rows)==1:
             action('Choose Thumbnail...',self.choose_thumbnail)
             action('Publish Static USD...',self.publish_asset)
@@ -1155,6 +1229,7 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addAction('Generate Missing Proxies...',lambda:self.safe(self.generate_missing_proxies))
         menu.addAction('Cancel Proxies',lambda:self.safe(self.cancel_proxies))
         menu.addAction('Cancel Element Switches',lambda:self.safe(self.cancel_elements))
+        menu.addAction('Cancel Element Switch Removals',lambda:self.safe(self.cancel_element_deletes))
         menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
         menu.addAction('Select Catalog...',lambda:self.safe(self.select_catalog))
         menu.addAction('New Catalog...',lambda:self.safe(self.new_catalog))
@@ -1277,6 +1352,21 @@ class LibraryWidget(QtWidgets.QWidget):
         self.element_queue.clear()
         if self.element_job:self.element_job.requestInterruption()
         self.status.setText('Cancelled. An active element switch generation will finish first.')
+
+    def generate_element_delete(self):
+        rows=[r for r in self.selected_rows() if r['kind']=='usd']
+        if not rows:raise ValueError('Select one or more USD assets.')
+        for row in rows:
+            self.library.resolve(row)
+            self.element_delete_failed.discard(row['id'])
+            self.queue_element_delete(row)
+        self.status.setText(f'Queued {len(rows)} element switch removal job(s). Assets without one are skipped untouched. Each USD file is overwritten in place (a backup is kept in data/backups/element).')
+
+    def cancel_element_deletes(self):
+        for row in self.element_delete_queue:self.element_delete_pending.discard(row['id'])
+        self.element_delete_queue.clear()
+        if self.element_delete_job:self.element_delete_job.requestInterruption()
+        self.status.setText('Cancelled. An active element switch removal will finish first.')
 
     def generate_missing_thumbnails(self):
         if self.missing_scan is not None:return

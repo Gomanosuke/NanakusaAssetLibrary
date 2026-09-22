@@ -90,13 +90,47 @@ def _add_element_switch(stage):
     return {'element_switch': {'prim': str(root.GetPath()), 'variants': names}}
 
 
+def _remove_element_switch(stage):
+    """Undo _add_element_switch: drop the variant set, its selection and its variants entirely,
+    leaving the prim exactly as if it had never been added (UsdVariantSets has no RemoveVariantSet
+    in this USD version, so this edits the Sdf spec directly).
+    """
+    layer = stage.GetRootLayer()
+    removed = []
+    for prim in stage.Traverse():
+        if not prim.GetVariantSets().HasVariantSet(VARIANT_SET):
+            continue
+        path = prim.GetPath()
+        spec = layer.GetPrimAtPath(path)
+        if spec is None or VARIANT_SET not in spec.variantSets:
+            continue   # authored on a referenced/payloaded layer, not this file's own root - nothing to remove here
+        del spec.variantSets[VARIANT_SET]
+        if VARIANT_SET in spec.variantSelections:
+            del spec.variantSelections[VARIANT_SET]
+        if VARIANT_SET in spec.variantSetNameList.prependedItems:
+            spec.variantSetNameList.prependedItems.remove(VARIANT_SET)
+        if VARIANT_SET in spec.variantSetNameList.explicitItems:
+            spec.variantSetNameList.explicitItems.remove(VARIANT_SET)
+        removed.append(str(path))
+    if not removed:
+        return {'skipped': 'no element switch found in this file'}
+    return {'removed_element_switch': removed}
+
+
 def generate(source, destination):
     if Path(source).suffix.lower() == '.usdz':
         return proxy_gen.generate_usdz(source, destination, _add_element_switch)
     return proxy_gen.generate_plain(source, destination, _add_element_switch)
 
 
+def remove(source, destination):
+    if Path(source).suffix.lower() == '.usdz':
+        return proxy_gen.generate_usdz(source, destination, _remove_element_switch)
+    return proxy_gen.generate_plain(source, destination, _remove_element_switch)
+
+
 if __name__ == '__main__':
     import json
-    result = generate(sys.argv[1], sys.argv[2])
+    mode = sys.argv[4] if len(sys.argv) > 4 else 'add'
+    result = remove(sys.argv[1], sys.argv[2]) if mode == 'remove' else generate(sys.argv[1], sys.argv[2])
     Path(sys.argv[3]).write_text(json.dumps(result), encoding='utf-8')

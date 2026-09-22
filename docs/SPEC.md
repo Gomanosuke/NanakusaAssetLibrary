@@ -296,6 +296,14 @@ Sketchfab等のパックは、同じ原点付近に複数の独立したトッ�
 
 配置後にどのオブジェクトを表示するか切り替えるには、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに分岐点プリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。
 
+### 削除・自動タグ・サムネイルバッジ
+
+- `element_gen.py`の`_remove_element_switch`（`remove()`関数、`element_gen.py <元> <一時出力> <結果JSON> remove`で呼ばれる）は`_add_element_switch`を完全に取り消す。`UsdVariantSets`にはこのUSDバージョンで`RemoveVariantSet`が無いため、`Sdf.PrimSpec`を直接編集する: `spec.variantSets`から該当キーを`del`、`spec.variantSelections`から`del`、`spec.variantSetNameList.prependedItems`/`explicitItems`から該当名を`remove`。バリアント内に書いた可視性の上書きも、variant自体のspecごと消えるため個別に消す必要はない。見つからなければ`{'skipped': 'no element switch found in this file'}`。
+- `ui.py`の`ElementDeleteJob`（`_MeshGenerateJob`を継承、`extra_args=('remove',)`でelement_gen.pyへ渡す）が右クリックの「Delete Element Switch」から呼ばれる。`data/backups/element/`へバックアップしてから置き換える点はElementJobと同じ。「Libraries... → Cancel Element Switch Removals」で待機分を解除できる。
+- **`variant`タグの自動付与・削除**: `ElementJob`が成功しresultメッセージが`'Element switch added'`で始まる時、`LibraryWidget.set_variant_tag(aid, True)`が対象資産の`tags`（スペース区切り文字列）へ`variant`を追加し、`library.update`でDBへ保存する。`ElementDeleteJob`が成功し`'Element switch removed'`で始まる時は同じ仕組みで`variant`を取り除く（`set_variant_tag(aid, False)`）。スキップ（既にある/対象なし）の時は触らない。ジェネレーター側は一切タグを知らず、ui.py側の完了ハンドラーだけがタグを管理する。
+- **サムネイルバッジ**: `load_icons()`が、PBRスタックでない各アイテムについて`entry['rep']['tags']`に`variant`が含まれるかを見て、含まれていれば`variant_badge()`（`stacked_icon`と同じ256論理座標のcompositing手法で、左上に「VARIANT」の角丸ラベルを重ねる）でアイコンを差し替える。ファイルを開いて`HasVariantSet`を確認する必要はなく、DBの`tags`列を見るだけなので、一覧に並ぶ全アイテムに対して安価に行える。
+- `set_variant_tag`はタグ変更後、`item_index`から対象アイテムのインデックスを引き、`icons_loaded`から外して`icon_todo`の先頭へ積み直す（`thumbnail_done`と同じ手法）ことで、次の`load_icons`スライスで確実にバッジ付きへ再描画させる。選択中の資産であれば`selection_changed()`も呼び、右側のTagsフィールドにも反映する。
+
 ## USD / Asset Catalog
 
 左下の「Libraries...」ボタンの下にある「Catalog」選択欄でUSDの登録先を選びます。素材ルートの`Catalog`内のDBを自動検出します。
