@@ -21,11 +21,20 @@ KINDS = {'': 'All Types', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'
 _windows = []
 
 
+# CREATE_NO_WINDOW's own priority flags (e.g. BELOW_NORMAL_PRIORITY_CLASS) only lower CPU
+# scheduling; Windows' background process mode lowers CPU, disk I/O and memory priority together,
+# so a long queue of proxy/LOD jobs or a scan does not make the panel's own reads compete for the
+# disk (observed live: the panel froze for several seconds selecting an asset while a hundreds-
+# strong proxy queue was running). Undocumented-but-tested: combining it with an explicit
+# priority class did not error, but only PROCESS_MODE_BACKGROUND_BEGIN is Microsoft-documented
+# as safe on its own, so that is all this passes.
+PROCESS_MODE_BACKGROUND_BEGIN = 0x00100000
+
 def background():
-    """Popen / run keywords for helper processes: hidden, and below normal priority so a scan or a
-    render of thumbnails never slows the panel or Houdini itself."""
+    """Popen / run keywords for helper processes: hidden, and at Windows' background priority so a
+    scan, a thumbnail render, or a proxy/LOD queue never competes with the panel's own reads."""
     if os.name == 'nt':
-        return {'creationflags': subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS}
+        return {'creationflags': subprocess.CREATE_NO_WINDOW | PROCESS_MODE_BACKGROUND_BEGIN}
     return {'preexec_fn': lambda: os.nice(10)}
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
 

@@ -519,7 +519,11 @@ class LibraryUiTests(unittest.TestCase):
     def test_helper_processes_run_at_low_priority(self):
         import os,subprocess
         options=ui.background()
-        if os.name=='nt':self.assertTrue(options['creationflags']&subprocess.BELOW_NORMAL_PRIORITY_CLASS and options['creationflags']&subprocess.CREATE_NO_WINDOW)
+        if os.name=='nt':
+            # Windows' background process mode, not just a below-normal CPU class: it also lowers
+            # disk I/O priority, which CPU class alone does not (a long proxy/LOD queue was
+            # observed competing with the panel's own reads and freezing it for several seconds).
+            self.assertTrue(options['creationflags']&ui.PROCESS_MODE_BACKGROUND_BEGIN and options['creationflags']&subprocess.CREATE_NO_WINDOW)
         else:self.assertIn('preexec_fn',options)
 
     def test_catalog_creation_selection_and_registration_target(self):
