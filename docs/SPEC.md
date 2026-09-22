@@ -157,7 +157,7 @@ Textureの一覧では、同じ素材の画像（albedo・roughness・normalな�
 ## GUIと複数選択
 
 GUIは英語です。右側には大きな正方形プレビューと素材情報を常時表示します。
-素材情報（`asset_info.py`、選択が落ち着いてから別プロセスのhythonで取得しキャッシュする）は、種類ごとに項目が異なる。
+素材情報（`asset_info.py`、選択が落ち着いてから別プロセスで取得しキャッシュする。テクスチャとUSDはHoudini同梱のPythonで約0.2秒、Houdini独自形式の参照などで読めなければhythonで再取得。3DModelはhython）は、種類ごとに項目が異なる。
 テクスチャはResolution・Channels・Pixel type。3DModel・USDはPolygons・Points・Meshes（Volumeがあれば数も）。
 USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。

@@ -422,12 +422,12 @@ class LibraryUiTests(unittest.TestCase):
                 self.assertEqual(widget.items.count(),91)   # fewer than one chunk: all at once
                 self.assertTrue(widget.icon_todo)
                 start=time.monotonic()
-                while (widget.icon_todo or widget.icon_timer.isActive()) and time.monotonic()-start<20:self.app.processEvents()
+                while widget.icons_pending() and time.monotonic()-start<20:self.app.processEvents()
                 self.assertFalse(widget.icon_todo)
                 usd=next(i for i in range(widget.items.count()) if widget.item_row(widget.items.item(i))['kind']=='usd')
                 widget.items.scrollToItem(widget.items.item(usd),QtWidgets.QAbstractItemView.ScrollHint.PositionAtTop)
                 start=time.monotonic()
-                while not(widget.items.verticalScrollBar().value()>0 and not widget.icon_todo and not widget.icon_timer.isActive() and not widget.scroll_timer.isActive()) and time.monotonic()-start<20:self.app.processEvents()
+                while not(widget.items.verticalScrollBar().value()>0 and not widget.icons_pending() and not widget.scroll_timer.isActive()) and time.monotonic()-start<20:self.app.processEvents()
                 self.assertNotEqual(widget.items.item(usd).icon().cacheKey(),widget.placeholder('usd').cacheKey())   # real thumbnail loaded
                 # A 3 MB original image is never decoded on the UI thread.
                 texture=next(r for r in widget.rows if r['kind']=='texture')
@@ -489,7 +489,7 @@ class LibraryUiTests(unittest.TestCase):
             widget.library.scan(widget.library.roots()[0]['id']);widget.rebuild_tree();widget.reset_page()
             def settle():
                 start=time.monotonic()
-                while (widget.icon_todo or widget.icon_timer.isActive() or widget.scroll_timer.isActive()) and time.monotonic()-start<20:self.app.processEvents()
+                while (widget.icons_pending() or widget.scroll_timer.isActive()) and time.monotonic()-start<20:self.app.processEvents()
             settle()
             self.assertEqual(widget.items.count(),100);self.assertIn('450 assets',widget.page_label.text());self.assertIn('scroll for more',widget.page_label.text())
             bar=widget.items.verticalScrollBar();self.assertGreater(bar.maximum(),0)
@@ -692,6 +692,47 @@ class LibraryUiTests(unittest.TestCase):
             message=fake_ui.displayMessage.call_args.args[0]
             self.assertIn(str(widget.catalog_path()),message)
             self.assertIn('Asset Catalog',message)
+            widget.close();widget.deleteLater()
+
+    def test_asset_info_tries_plain_python_first_and_falls_back_to_hython(self):
+        # usd/texture: plain Python first (~0.2 s instead of hython's ~1.7 s start); a 'retry'
+        # answer (composition errors without Houdini's plugins, a failed import) goes to hython.
+        def run(kind,answers):
+            job=ui.AssetInfoJob('k','C:/x.usdz',kind);job.python=None if kind=='model' else Path('python.exe')
+            got=[];job.done.connect(lambda k,r:got.append(r))
+            with patch.object(job,'call',side_effect=answers) as call:job.run()
+            return got[0],[c.args[0] for c in call.call_args_list]
+        result,commands=run('usd',[{'info':{'Meshes':1}}])
+        self.assertEqual(result,{'info':{'Meshes':1}});self.assertEqual(len(commands),1);self.assertEqual(commands[0][-1],'plain')
+        result,commands=run('usd',[{'retry':'composition errors'},{'info':{'Meshes':2}}])
+        self.assertEqual(result,{'info':{'Meshes':2}});self.assertEqual(len(commands),2);self.assertIn('hython',Path(commands[1][0]).name)
+        result,commands=run('texture',[RuntimeError('DLL load failed'),{'info':{'Channels':3}}])
+        self.assertEqual(result,{'info':{'Channels':3}});self.assertEqual(len(commands),2)
+        result,commands=run('model',[{'info':{'Meshes':3}}])   # 3DModel imports need hou: hython only
+        self.assertEqual(len(commands),1);self.assertNotEqual(commands[0][-1],'plain')
+        from nanakusa_asset_library import asset_info
+        with self.assertRaises(asset_info.NeedsHython):asset_info.inspect('x.obj','model',plain=True)
+        env=ui.plain_python_env('C:/HFS')
+        self.assertNotIn('PXR_PLUGINPATH_NAME',env);self.assertTrue(env['PATH'].startswith(str(Path('C:/HFS')/'bin')))
+
+    def test_icons_are_decoded_off_the_ui_thread_and_cached(self):
+        from hutil.PySide import QtGui
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for i in range(6):
+                d=root/'USD'/f'p{i}';d.mkdir(parents=True);(d/f'p{i}.usd').write_text('x')
+                image=QtGui.QImage(40,20,QtGui.QImage.Format.Format_RGB32);image.fill(0x336699);image.save(str(d/'thumbnail.png'))
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.resize(900,600);widget.show();self.app.processEvents()
+            widget.library.scan(widget.library.roots()[0]['id']);widget.rebuild_tree()
+            with patch.object(ui,'square_preview',side_effect=AssertionError('decoded on the UI thread')):
+                widget.reset_page()
+                start=time.monotonic()
+                while widget.icons_pending() and time.monotonic()-start<20:self.app.processEvents()
+            self.assertFalse(widget.icons_pending())
+            for i in range(widget.items.count()):
+                self.assertNotEqual(widget.items.item(i).icon().cacheKey(),widget.placeholder('usd').cacheKey())
+            self.assertEqual(len(widget.icon_cache),6)
             widget.close();widget.deleteLater()
 
 if __name__=='__main__':unittest.main()

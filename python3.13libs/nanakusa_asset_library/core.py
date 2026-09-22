@@ -503,24 +503,36 @@ class EntryStream:
         row['effective_kind'] = row['kind']
         return row
 
-    def _batch(self):
+    def _batch(self, db):
         where, args = self.where, list(self.args)
         if self.after is not None:
             where += (" AND " if where else " WHERE ") + "(a.label COLLATE NOCASE, a.relpath, a.root_id) > (?, ?, ?)"
             args += list(self.after)
-        with self.library.connect() as db:
-            return db.execute("SELECT a.* FROM assets a" + where + self.ORDER + " LIMIT %d" % self.BATCH, args).fetchall()
+        return db.execute("SELECT a.* FROM assets a" + where + self.ORDER + " LIMIT %d" % self.BATCH, args).fetchall()
 
-    def _members(self, gkey):
-        where = (self.where + " AND " if self.where else " WHERE ") + "a.gkey=?"
-        with self.library.connect() as db:
-            return [self._row(r) for r in db.execute("SELECT a.* FROM assets a" + where + self.ORDER, self.args + [gkey])]
+    def _members(self, db, gkeys):
+        """Members of every stack in `gkeys` (same filters), in one query for the whole batch.
+
+        A query (and connection) per stack used to be most of the cost of a stacked refresh."""
+        grouped = {key: [] for key in gkeys}
+        if not gkeys:
+            return grouped
+        where = (self.where + " AND " if self.where else " WHERE ") + "a.gkey IN (%s)" % ','.join('?' * len(gkeys))
+        for r in db.execute("SELECT a.* FROM assets a" + where + self.ORDER, self.args + list(gkeys)):
+            grouped[r['gkey']].append(self._row(r))
+        return grouped
 
     def next(self, count):
         """Exactly `count` more entries (a stack counts as one), fewer at the end of the result."""
         entries, self.pending = self.pending[:count], self.pending[count:]
+        if len(entries) < count and not self.done:
+            with self.library.connect() as db:   # one short-lived connection per read
+                self._fill(db, entries, count)
+        return entries
+
+    def _fill(self, db, entries, count):
         while len(entries) < count and not self.done:
-            raw = self._batch()
+            raw = self._batch(db)
             if not raw:
                 self.done = True
                 break
@@ -528,12 +540,14 @@ class EntryStream:
             if len(raw) < self.BATCH:
                 self.done = True
             found = []
+            members_of = self._members(db, list(dict.fromkeys(
+                r['gkey'] for r in raw if self.stacked and r['gkey'] and r['id'] not in self.taken)))
             for record in raw:
                 if record['id'] in self.taken:
                     continue
                 row = self._row(record)
                 if self.stacked and row['gkey']:
-                    members = self._members(row['gkey'])
+                    members = members_of[row['gkey']]
                     self.taken.update(m['id'] for m in members)
                     found.extend(pbr.group_entries(members))
                 else:
@@ -541,7 +555,6 @@ class EntryStream:
             room = count - len(entries)
             entries.extend(found[:room])
             self.pending.extend(found[room:])
-        return entries
 
     @property
     def finished(self):

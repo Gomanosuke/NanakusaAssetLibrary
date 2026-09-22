@@ -73,7 +73,9 @@
 - フォルダーツリーは開いた階層だけアイテムを作る（populate / ensure_item。閉じたフォルダーはplaceholderの子を持つ）。
 - スキャンは別プロセス（scan_worker.py、Houdini同梱のPython）。QThreadの中ではhouを呼ばない（ジョブのコンストラクターで必要な値を取っておく）。補助プロセスはui.background()で低優先度にする。素材情報はinfoテーブルにも保存し、同じ素材ではhythonを再起動しない。
 - ui.background()（Windows）はPROCESS_MODE_BACKGROUND_BEGINを使う。BELOW_NORMAL_PRIORITY_CLASSだけではCPU優先度しか下がらずディスクI/O優先度は下がらないため、proxyの大量生成のように補助プロセスが長時間ディスクを使い続けると、パネル自身のファイル読み込み（素材選択時のプレビュー・info取得など）が競合して固まって見える（実際に発生・調査済み）。PROCESS_MODE_BACKGROUND_BEGINは明示的な優先度クラスと同時指定しない（単独で使う）。
-- 一覧の画像はload_iconsで12msずつ読み込む。refresh内で画像を読まない。ディスクを触る処理（サムネイルの存在確認など）は同様にスライスする。
+- 一覧の画像はIconDecode（QThreadPool、ICON_THREADS本）でデコードし、UIスレッドはQImage→QPixmap変換とsetIconだけ行う。load_iconsは12msずつ、同時デコード数を2*ICON_THREADSまでに抑えて近い順に渡す（先に大量投入すると、スクロール後も遠い画像のデコードが残る）。結果は(index, id)で照合し、捨てた・refreshで入れ替わった項目には貼らない。テストやベンチの待機はicons_pending()で行う。refresh内で画像を読まない。ディスクを触る処理（サムネイルの存在確認など）は同様にスライスする。
+- EntryStreamはnext()ごとに接続を1本だけ開き、PBRスタックのメンバーはバッチ内のgkeyをまとめて1クエリで読む（スタックごとに接続を開くと、スタック表示の再読み込みが約10倍遅い）。
+- 素材情報（asset_info.py）とUSDサムネイルの構図作成（thumbnail_scene.py）は、まずHoudini同梱のPython（'plain'モード、ui.plain_python_env: PATHに$HFS/bin、PXR_PLUGINPATH_NAMEは外す）で行い、失敗・合成エラー（GetCompositionErrors。.bgeo参照などHoudiniのUSDプラグインが必要な場合）ならhythonでやり直す。hython起動は約1.7秒、plainは約0.2秒。3DModelは常にhython。PXR_PLUGINPATH_NAMEにHoudiniのプラグインを足すとHoudiniエンジンごと起動して速くならない（検証済み）。
 - 判定の重い純Python処理（pbr._find / stack_info）はキャッシュする。正規表現の前に部分文字列で絞る。
 - スキャンはos.walkの文字列パスとlstatで行う（Pathオブジェクトを大量に作らない）。SQLiteはWAL（読み手はスキャン中も止まらない。ローカルディスク前提）。
 - hythonを起動する処理は選択が落ち着いてから始める（250ms）。

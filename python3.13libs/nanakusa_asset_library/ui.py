@@ -18,6 +18,7 @@ ROLE = QtCore.Qt.ItemDataRole.UserRole
 STACK_ROLE = dragdrop.STACK_ROLE   # ids of the assets a list item stands for
 LAZY_ROLE = QtCore.Qt.ItemDataRole.UserRole + 2   # folder item whose children are not created yet
 KINDS = {'': 'All Types', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'}
+KIND_COLORS = {'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}
 _windows = []
 
 
@@ -38,32 +39,50 @@ def background():
     return {'preexec_fn': lambda: os.nice(10)}
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
 
+def plain_python_env(hfs):
+    """Environment for Houdini's plain Python (asset_info.py / thumbnail_scene.py 'plain' mode): its
+    DLLs on PATH, and none of Houdini's own USD plugin paths (loading those starts the whole Houdini
+    engine, which is what makes hython take seconds to start)."""
+    env=dict(os.environ);env['HFS']=hfs
+    env['PATH']=str(Path(hfs)/'bin')+os.pathsep+env.get('PATH','')
+    env.pop('PXR_PLUGINPATH_NAME',None)
+    return env
+
 class AssetInfoJob(QtCore.QThread):
     done=QtCore.Signal(object,object)
 
     def __init__(self,key,path,kind):
         super().__init__();self.key,self.path,self.kind=key,path,kind
         self.hfs=hou.getenv('HFS')   # hou is only used on the main thread
+        self.python=ScanJob.find_python(self.hfs) if kind in ('usd','texture') else None
+
+    def call(self,command,env=None):
+        process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,**background())
+        started=time.monotonic()
+        try:
+            while True:
+                if self.isInterruptionRequested():return None
+                if time.monotonic()-started>60:raise RuntimeError('Information read timed out')
+                try:
+                    out,err=process.communicate(timeout=.05);break
+                except subprocess.TimeoutExpired:pass
+            lines=[line[9:] for line in out.decode('utf-8',errors='replace').splitlines() if line.startswith('NAL_INFO:')]
+            if not lines:raise RuntimeError(err.decode(errors='replace')[-500:] or 'Could not read asset information')
+            return json.loads(lines[-1])
+        finally:
+            if process.poll() is None:process.kill();process.communicate()
 
     def run(self):
-        result={}
+        script=str(Path(__file__).with_name('asset_info.py'))
         try:
-            executable=Path(self.hfs)/'bin'/('hython.exe' if os.name=='nt' else 'hython')
-            process=subprocess.Popen([str(executable),str(Path(__file__).with_name('asset_info.py')),str(self.path),self.kind],
-                stdout=subprocess.PIPE,stderr=subprocess.PIPE,**background())
-            started=time.monotonic()
-            try:
-                while True:
-                    if self.isInterruptionRequested():return
-                    if time.monotonic()-started>60:raise RuntimeError('Information read timed out')
-                    try:
-                        out,err=process.communicate(timeout=.1);break
-                    except subprocess.TimeoutExpired:pass
-                lines=[line[9:] for line in out.decode('utf-8',errors='replace').splitlines() if line.startswith('NAL_INFO:')]
-                if not lines:raise RuntimeError(err.decode(errors='replace')[-500:] or 'Could not read asset information')
-                result=json.loads(lines[-1])
-            finally:
-                if process.poll() is None:process.kill();process.communicate()
+            result={'retry':''}
+            if self.python is not None:   # fast path (see asset_info.py); falls through to hython on 'retry'
+                try:result=self.call([str(self.python),script,str(self.path),self.kind,'plain'],plain_python_env(self.hfs))
+                except Exception as exc:result={'retry':str(exc)}
+            if result is not None and 'retry' in result:
+                executable=Path(self.hfs)/'bin'/('hython.exe' if os.name=='nt' else 'hython')
+                result=self.call([str(executable),script,str(self.path),self.kind])
+            if result is None:return   # interrupted
         except Exception as exc:result={'error':str(exc)}
         self.done.emit(self.key,result)
 
@@ -89,8 +108,9 @@ class LargePreview(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
         painter.drawPixmap(target,self.pixmap)
 
-def square_preview(path, edge):
-    """Fit without stretching, cropping or baking black bars into the image."""
+def fitted_image(path, edge):
+    """Fit without stretching, cropping or baking black bars into the image. Safe off the UI
+    thread (QImage only), so list icons are decoded in IconDecode workers."""
     reader=QtGui.QImageReader(str(path))
     size=reader.size()
     if size.isValid():
@@ -98,10 +118,28 @@ def square_preview(path, edge):
     image=reader.read()
     if image.isNull():return None
     image=image.scaled(edge,edge,QtCore.Qt.AspectRatioMode.KeepAspectRatio,QtCore.Qt.TransformationMode.SmoothTransformation)
-    pix=QtGui.QPixmap(edge,edge);pix.fill(QtCore.Qt.GlobalColor.transparent)
-    painter=QtGui.QPainter(pix)
+    out=QtGui.QImage(edge,edge,QtGui.QImage.Format.Format_ARGB32_Premultiplied);out.fill(QtCore.Qt.GlobalColor.transparent)
+    painter=QtGui.QPainter(out)
     painter.drawImage((edge-image.width())//2,(edge-image.height())//2,image);painter.end()
-    return pix
+    return out
+
+def square_preview(path, edge):
+    image=fitted_image(path,edge)
+    return None if image is None else QtGui.QPixmap.fromImage(image)
+
+class IconSink(QtCore.QObject):
+    """Lives on the UI thread; IconDecode workers report through it (queued across threads)."""
+    decoded=QtCore.Signal(object,object)
+
+class IconDecode(QtCore.QRunnable):
+    def __init__(self,path,edge,key,sink):
+        super().__init__()
+        self.path,self.edge,self.key,self.sink=path,edge,key,sink   # holds the sink alive while running
+    def run(self):
+        try:image=fitted_image(self.path,self.edge)
+        except Exception:image=None
+        try:self.sink.decoded.emit(self.key,image)
+        except RuntimeError:pass   # the panel was closed meanwhile
 
 class ScanJob(QtCore.QThread):
     done = QtCore.Signal(object)
@@ -188,11 +226,12 @@ class GeometryThumbnailJob(QtCore.QThread):
     def __init__(self, asset_id, source, kind, dest):
         super().__init__()
         self.asset_id, self.source, self.kind, self.dest = asset_id, str(source), kind, Path(dest)
-        self.bin = Path(hou.getenv('HFS'))/'bin'
+        self.hfs = hou.getenv('HFS'); self.bin = Path(self.hfs)/'bin'
+        self.python = ScanJob.find_python(self.hfs) if kind == 'usd' else None
 
-    def execute(self, args, log):
+    def execute(self, args, log, env=None):
         with log.open('wb') as stream:
-            process = subprocess.Popen(args, stdout=stream, stderr=stream, **background())
+            process = subprocess.Popen(args, stdout=stream, stderr=stream, env=env, **background())
             started = time.monotonic()
             try:
                 while process.poll() is None:
@@ -214,8 +253,15 @@ class GeometryThumbnailJob(QtCore.QThread):
             with tempfile.TemporaryDirectory(prefix='nanakusa_preview_') as folder:
                 base = Path(folder)
                 suffix = '.exe' if os.name == 'nt' else ''
-                self.execute([str(self.bin/('hython'+suffix)), str(Path(__file__).with_name('thumbnail_scene.py')),
-                    self.source, self.kind, str(base/'scene.usda'), str(base/'camera.json')], base/'prepare.log')
+                prepare = [str(Path(__file__).with_name('thumbnail_scene.py')), self.source, self.kind, str(base/'scene.usda'), str(base/'camera.json')]
+                try:
+                    if self.python is None: raise RuntimeError('no plain Python')
+                    # USD is framed by plain Python first (seconds faster); hython if that cannot compose it.
+                    self.execute([str(self.python)] + prepare + ['plain'], base/'prepare.log', plain_python_env(self.hfs))
+                except RuntimeError:
+                    if self.isInterruptionRequested(): raise
+                    (base/'scene.usda').unlink(missing_ok=True)
+                    self.execute([str(self.bin/('hython'+suffix))] + prepare, base/'prepare.log')
                 info = json.loads((base/'camera.json').read_text(encoding='utf-8'))
                 self.execute([str(self.bin/('husk'+suffix)), '--renderer', 'BRAY_HdKarma', '--engine', 'cpu',
                     '--threads', '4', '--pixel-samples', '16', '--res', '512', '512',
@@ -394,6 +440,7 @@ class ManifestDialog(QtWidgets.QDialog):
 
 class LibraryWidget(QtWidgets.QWidget):
     CHUNK = 200   # items added each time the list is scrolled near its end
+    ICON_THREADS = max(2, min(4, QtCore.QThread.idealThreadCount() - 1))
     def __init__(self, parent=None, data_dir=None, initial_root=None):
         super().__init__(parent)
         self.setObjectName('NanakusaAssetLibrary')
@@ -426,6 +473,9 @@ class LibraryWidget(QtWidgets.QWidget):
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
         self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
+        # Pictures are decoded on a few worker threads; icon_waiting maps a decode in flight to the items waiting for it.
+        self.icon_pool=QtCore.QThreadPool(self);self.icon_pool.setMaxThreadCount(self.ICON_THREADS)
+        self.icon_sink=IconSink();self.icon_sink.decoded.connect(self.icon_decoded);self.icon_waiting={}
         self.info_wanted=None;self.info_timer=QtCore.QTimer(self);self.info_timer.setSingleShot(True);self.info_timer.setInterval(250);self.info_timer.timeout.connect(self.start_info)
         self.missing_scan=None
         dragdrop.install()
@@ -442,6 +492,7 @@ class LibraryWidget(QtWidgets.QWidget):
     def closeEvent(self,event):
         for timer in (self.scroll_timer,self.icon_timer,self.info_timer,self.folder_timer,self.search_timer):timer.stop()
         self.missing_scan=None;self.close_stream()
+        self.icon_todo.clear();self.icon_pool.clear();self.icon_pool.waitForDone(2000)
         # A folder migration only reads/writes the index; stop it and wait briefly so it never
         # outlives a data directory that is about to be moved or removed (as in tests' temp dirs).
         for job in list(self.folder_migration_jobs.values()):job.requestInterruption();job.wait(2000)
@@ -802,22 +853,50 @@ class LibraryWidget(QtWidgets.QWidget):
     def placeholder(self,kind):
         icon=self.placeholders.get(kind)
         if icon is None:
-            pix=QtGui.QPixmap(144,144);pix.fill(QtGui.QColor({'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}.get(kind,'#555555')))
+            pix=QtGui.QPixmap(144,144);pix.fill(QtGui.QColor(KIND_COLORS.get(kind,'#555555')))
             icon=self.placeholders[kind]=QtGui.QIcon(pix)
         return icon
 
     def load_icons(self):
-        """Read pictures in small slices (about 12 ms each) between events."""
+        """Hand the queued items' pictures to the decode workers, a few at a time and nearest first
+        (schedule_icons keeps icon_todo ordered by distance to the view), so the UI thread only
+        looks files up and sets icons. Cached and missing pictures are shown at once."""
         deadline=time.monotonic()+0.012
-        while self.icon_todo and time.monotonic()<deadline:
+        while self.icon_todo and len(self.icon_waiting)<2*self.ICON_THREADS and time.monotonic()<deadline:
             index=self.icon_todo.popleft()
             if index in self.icons_loaded or index>=self.items.count() or index>=len(self.page_entries):continue
-            entry=self.page_entries[index]
-            icon=self.icon_for(entry['rep'])
-            if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
-            elif 'variant' in entry['rep']['tags'].split():icon=self.variant_badge(icon)
-            self.items.item(index).setIcon(icon);self.icons_loaded.add(index)
+            row=self.page_entries[index]['rep']
+            path,key=self.icon_source(row)
+            if key is None or key in self.icon_cache:
+                self.show_icon(index,self.missing_icon(row) if key is None else self.icon_cache[key]);continue
+            waiting=self.icon_waiting.setdefault(key,[])
+            if not waiting:self.icon_pool.start(IconDecode(path,key[2],key,self.icon_sink))
+            waiting.append((index,row['id']));self.icons_loaded.add(index)
+        if self.icon_todo and len(self.icon_waiting)<2*self.ICON_THREADS:self.icon_timer.start(0)
+
+    def icon_decoded(self,key,image):
+        waiting=self.icon_waiting.pop(key,[])
+        icon=None
+        if image is not None and not image.isNull():
+            icon=QtGui.QIcon(QtGui.QPixmap.fromImage(image))
+            if len(self.icon_cache)>=300*256*256//(key[2]*key[2]):self.icon_cache.pop(next(iter(self.icon_cache)))
+            self.icon_cache[key]=icon
+        for index,aid in waiting:
+            # Skip items scrolled far away (their icon was dropped) or replaced by a refresh meanwhile.
+            if index not in self.icons_loaded or index>=len(self.page_entries) or self.page_entries[index]['rep']['id']!=aid:continue
+            row=self.page_entries[index]['rep']
+            self.show_icon(index,icon if icon is not None else self.missing_icon(row))
         if self.icon_todo:self.icon_timer.start(0)
+
+    def icons_pending(self):
+        """True while pictures are still queued or being decoded (tests and benchmarks wait on it)."""
+        return bool(self.icon_todo or self.icon_waiting or self.icon_timer.isActive())
+
+    def show_icon(self,index,icon):
+        entry=self.page_entries[index]
+        if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
+        elif 'variant' in entry['rep']['tags'].split():icon=self.variant_badge(icon)
+        self.items.item(index).setIcon(icon);self.icons_loaded.add(index)
 
     def item_text(self,members,rep,label=None):
         favorite=any(m['favorite'] for m in members)
@@ -864,7 +943,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.settings['icon_size']=size;self.safe(self.save_settings)
         edge=self.icon_edge()
         if edge!=getattr(self,'icons_built_at',256):self.icon_cache.clear();self.refresh()
-        self.status.setText(f'Icon size: {size}px (Ctrl + middle-drag to change)')
+        self.status.setText(f'Icon size: {size}px (Ctrl + mouse wheel or Ctrl + middle-drag to change)')
 
     def stack_toggled(self,checked):
         self.settings['stack_pbr']=bool(checked)
@@ -1003,24 +1082,37 @@ class LibraryWidget(QtWidgets.QWidget):
         current=self.items.currentItem()
         if current is not None and current.data(ROLE)==aid:self.selection_changed()
 
-    def icon_for(self,row):
+    def icon_source(self,row):
+        """(picture path, cache key) of a row's list icon; key is None when there is no picture."""
         path=self.thumbnail_path(row)
         if path:
-            edge=self.icon_edge()
-            try:key=(str(path),path.stat().st_mtime_ns,edge)
-            except OSError:key=None
-            if key in self.icon_cache:return self.icon_cache[key]
-            pix=square_preview(path,edge)
+            try:return path,(str(path),path.stat().st_mtime_ns,self.icon_edge())
+            except OSError:pass
+        return path,None
+
+    def icon_for(self,row):
+        """The row's icon, decoded on the calling thread (load_icons uses the workers instead)."""
+        path,key=self.icon_source(row)
+        if key in self.icon_cache:return self.icon_cache[key]
+        if path:
+            pix=square_preview(path,self.icon_edge())
             if pix is not None:
                 icon=QtGui.QIcon(pix)
                 if key is not None:
-                    if len(self.icon_cache)>=300*256*256//(edge*edge):self.icon_cache.pop(next(iter(self.icon_cache)))
+                    if len(self.icon_cache)>=300*256*256//(key[2]*key[2]):self.icon_cache.pop(next(iter(self.icon_cache)))
                     self.icon_cache[key]=icon
                 return icon
+        return self.missing_icon(row)
+
+    def missing_icon(self,row):
+        """Kind-coloured card while a thumbnail does not exist yet (and ask for one)."""
         self.queue_thumbnail(row)
-        pix=QtGui.QPixmap(144,144); pix.fill(QtGui.QColor({'usd':'#3b6677','model':'#466c58','hdri':'#796a39','material':'#665488','pbr':'#665488','decal':'#805457','texture':'#496878'}[row['effective_kind']]))
-        painter=QtGui.QPainter(pix); painter.setPen(QtGui.QColor('#eeeeee')); painter.drawText(pix.rect(),QtCore.Qt.AlignmentFlag.AlignCenter,row['effective_kind'].upper()); painter.end()
-        return QtGui.QIcon(pix)
+        kind=row['effective_kind'];icon=self.placeholders.get(('labelled',kind))
+        if icon is None:
+            pix=QtGui.QPixmap(144,144);pix.fill(QtGui.QColor(KIND_COLORS.get(kind,'#555555')))
+            painter=QtGui.QPainter(pix);painter.setPen(QtGui.QColor('#eeeeee'));painter.drawText(pix.rect(),QtCore.Qt.AlignmentFlag.AlignCenter,kind.upper());painter.end()
+            icon=self.placeholders[('labelled',kind)]=QtGui.QIcon(pix)
+        return icon
 
     def preview_pixmap(self,path):
         try:key=(str(path),Path(path).stat().st_mtime_ns)

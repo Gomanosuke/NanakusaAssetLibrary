@@ -11,19 +11,25 @@ DOME_ROTATION = -30      # degrees around the up axis
 KEY_EXPOSURE = 1
 
 
-def prepare(source, kind, destination):
-    import hou
+def prepare(source, kind, destination, plain=False):
+    """`plain`: running in Houdini's plain Python (see asset_info.py), which can frame USD only
+    while it composes without Houdini's plugins; otherwise fail so the panel retries in hython."""
     from pxr import Usd, UsdGeom, UsdLux, Gf, Sdf
-    from nanakusa_asset_library import houdini_ops
 
     destination = Path(destination)
+    if plain and kind != 'usd':
+        raise RuntimeError('3DModel files need hython')
     if kind == 'usd':
         stage = Usd.Stage.CreateNew(str(destination))
         stage.GetRootLayer().subLayerPaths = [Path(source).resolve().as_posix()]
+        if plain and stage.GetCompositionErrors():
+            raise RuntimeError('composition errors without Houdini plugins')
         # Sublayer metadata is not composed: carry the asset's up axis over so framing and
         # lighting follow it (a Z-up asset would otherwise lie on its side).
         UsdGeom.SetStageUpAxis(stage, UsdGeom.GetStageUpAxis(Usd.Stage.Open(str(source), Usd.Stage.LoadNone)))
     else:
+        import hou
+        from nanakusa_asset_library import houdini_ops
         network = hou.node('/obj').createNode('lopnet', 'thumbnail')
         node = houdini_ops.import_asset(source, 'model', 'asset', network.path())
         node.cook(force=True)
@@ -80,5 +86,9 @@ def prepare(source, kind, destination):
 if __name__ == '__main__':
     import json
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    result = prepare(sys.argv[1], sys.argv[2], sys.argv[3])
+    plain = sys.argv[5:6] == ['plain']
+    if plain:
+        from nanakusa_asset_library.asset_info import plain_setup
+        plain_setup()
+    result = prepare(sys.argv[1], sys.argv[2], sys.argv[3], plain)
     Path(sys.argv[4]).write_text(json.dumps(result), encoding='utf-8')

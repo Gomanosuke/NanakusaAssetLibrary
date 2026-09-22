@@ -1,10 +1,29 @@
-"""Read asset statistics in a separate hython process, never in the live HIP."""
+"""Read asset statistics in a separate process, never in the live HIP.
+
+Textures and USD are read first by Houdini's plain Python ("plain" mode, about 0.2 s instead of
+hython's 1.7 s start). That interpreter lacks Houdini's USD plugins, so a stage that references
+Houdini formats (.bgeo, ...) reports composition errors there; the panel then asks hython.
+3DModel files always need hython (they are imported through a LOP network).
+"""
 from pathlib import Path
 import json
+import os
 import sys
 
 
-def inspect(source, kind):
+class NeedsHython(Exception):
+    """Plain Python cannot read this asset faithfully; retry in hython."""
+
+
+def plain_setup():
+    """Make pxr / OpenImageIO importable from Houdini's plain Python (HFS and PATH come from the panel)."""
+    home = Path(os.environ['HFS'])
+    sys.path.insert(0, str(home / 'houdini' / ('python%d.%dlibs' % sys.version_info[:2])))
+    if hasattr(os, 'add_dll_directory'):
+        os.add_dll_directory(str(home / 'bin'))
+
+
+def inspect(source, kind, plain=False):
     if kind == 'texture':
         import OpenImageIO as oiio
         image = oiio.ImageInput.open(str(source))
@@ -16,13 +35,17 @@ def inspect(source, kind):
                     'Channels': spec.nchannels, 'Pixel type': str(spec.format)}
         finally:
             image.close()
-    import hou
+    if plain and kind != 'usd':
+        raise NeedsHython(kind)
     from pxr import Usd, UsdGeom, UsdShade
     network = None
     try:
         if kind == 'usd':
             stage = Usd.Stage.Open(str(source))
+            if plain and (stage is None or stage.GetCompositionErrors()):
+                raise NeedsHython('composition errors without Houdini plugins')
         else:
+            import hou
             from nanakusa_asset_library import houdini_ops
             network = hou.node('/obj').createNode('lopnet', 'asset_info')
             node = houdini_ops.import_asset(source, 'model', 'asset', network.path())
@@ -72,8 +95,12 @@ def inspect(source, kind):
 
 if __name__ == '__main__':
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    plain = sys.argv[3:4] == ['plain']
     try:
-        result = {'info': inspect(sys.argv[1], sys.argv[2])}
+        if plain:
+            plain_setup()
+        result = {'info': inspect(sys.argv[1], sys.argv[2], plain)}
     except Exception as exc:
-        result = {'error': str(exc)}
+        # In plain mode any failure (a missing plugin, a DLL that did not load) is retried in hython.
+        result = {'retry': str(exc)} if plain else {'error': str(exc)}
     print('NAL_INFO:' + json.dumps(result))
