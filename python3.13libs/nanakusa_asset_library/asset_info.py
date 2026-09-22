@@ -36,6 +36,7 @@ def inspect(source, kind):
         time = Usd.TimeCode(frame)
         meshes = faces = points = volumes = prims = materials = 0
         has_proxy = False
+        lod_levels = None
         for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
             prims += 1
             if prim.IsA(UsdGeom.Mesh):
@@ -45,6 +46,8 @@ def inspect(source, kind):
                 points += len(mesh.GetPointsAttr().Get(time) or [])
                 if UsdGeom.Imageable(prim).ComputePurpose() == UsdGeom.Tokens.proxy:
                     has_proxy = True
+                if lod_levels is None and prim.GetVariantSets().HasVariantSet('lod'):
+                    lod_levels = len(prim.GetVariantSets().GetVariantSet('lod').GetVariantNames())
             elif prim.GetTypeName() == 'Volume':
                 volumes += 1
             elif prim.IsA(UsdShade.Material):
@@ -55,6 +58,7 @@ def inspect(source, kind):
         if kind == 'usd':
             result['USD prims'] = prims
             result['Proxy'] = 'Yes' if has_proxy else 'No'
+            result['LOD'] = f'Yes ({lod_levels} levels)' if lod_levels else 'No'
             result['Up axis'] = UsdGeom.GetStageUpAxis(stage)
             if materials:
                 result['Materials'] = materials

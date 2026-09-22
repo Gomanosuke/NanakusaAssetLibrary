@@ -159,7 +159,7 @@ Textureの一覧では、同じ素材の画像（albedo・roughness・normalな�
 GUIは英語です。右側には大きな正方形プレビューと素材情報を常時表示します。
 素材情報（`asset_info.py`、選択が落ち着いてから別プロセスのhythonで取得しキャッシュする）は、種類ごとに項目が異なる。
 テクスチャはResolution・Channels・Pixel type。3DModel・USDはPolygons・Points・Meshes（Volumeがあれば数も）。
-USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
+USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・**LOD（Yes (N levels)/No、`lod` variant setの有無と段階数。最初に見つかったメッシュの段階数を代表値とする）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
 Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで読み込み済みの素材を全選択できます（一覧はページ分けせず、スクロールで続きを読み込む）。
@@ -337,7 +337,7 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定、フォルダーツリー |
 | `pbr.py` | ファイル名によるPBR用途・セットの判定、スタック表示用のグループ化 |
 | `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
-| `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・上方向軸・マテリアル数・サイズも） |
+| `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・LOD有無/段階数・上方向軸・マテリアル数・サイズも） |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
 | `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ（lod_gen.pyと共有） |
 | `lod_gen.py` | 別プロセスでのLOD（`lod` variant set）生成。proxy_gen.pyのデシメート・ファイル入出力を再利用 |
