@@ -12,7 +12,7 @@ import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen
+from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen, element_gen
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STACK_ROLE = dragdrop.STACK_ROLE   # ids of the assets a list item stands for
@@ -233,26 +233,27 @@ class GeometryThumbnailJob(QtCore.QThread):
         except Exception as exc:
             self.done.emit(self.asset_id, '', str(exc))
 
-class ProxyJob(QtCore.QThread):
-    """Add a decimated purpose=proxy sibling to each render mesh of a USD file (proxy_gen.py).
+class _MeshGenerateJob(QtCore.QThread):
+    """Shared plumbing for ProxyJob and ElementJob.
 
-    Generation runs in a separate hython process and only ever writes to a temporary file next to
-    the source; the source asset is backed up and swapped in here only after that succeeds, so a
-    crash or a locked file never leaves the asset half-written. The swap uses os.replace, which
-    Windows refuses across drives, so the temp file lives beside the source rather than in the
-    system TEMP directory.
+    Generation runs in a separate hython process (a worker script named by the `script` class
+    attribute) and only ever writes to a temporary file next to the source; the source asset is
+    backed up and swapped in here only after that succeeds, so a crash or a locked file never
+    leaves the asset half-written. The swap uses os.replace, which Windows refuses across drives,
+    so the temp file lives beside the source rather than in the system TEMP directory.
     """
     done = QtCore.Signal(str, str, str)   # asset_id, message (skip reason or summary), error
-    script, label = 'proxy_gen.py', 'Proxy generation'
+    script = ''         # set by the subclass: worker script filename, next to this file
+    label = 'Generation'   # set by the subclass: used in cancelled/timeout/no-output messages
 
-    def __init__(self, asset_id, source, backup_dir, target_triangles):
+    def __init__(self, asset_id, source, backup_dir, extra_args=()):
         super().__init__()
         self.asset_id, self.source, self.backup_dir = asset_id, str(source), Path(backup_dir)
-        self.extra_args = [str(target_triangles)]
+        self.extra_args = [str(a) for a in extra_args]
         self.bin = Path(hou.getenv('HFS'))/'bin'
 
     def summary(self, result):
-        return f"Proxy added ({len(result['proxied'])} mesh(es))"
+        raise NotImplementedError
 
     def run(self):
         source = Path(self.source)
@@ -298,6 +299,24 @@ class ProxyJob(QtCore.QThread):
             if temp_usd.is_file():
                 try: temp_usd.unlink()
                 except OSError: pass
+
+
+class ProxyJob(_MeshGenerateJob):
+    """Add a decimated purpose=proxy sibling to each render mesh of a USD file (proxy_gen.py)."""
+    script, label = 'proxy_gen.py', 'Proxy generation'
+    def __init__(self, asset_id, source, backup_dir, target_triangles):
+        super().__init__(asset_id, source, backup_dir, (target_triangles,))
+    def summary(self, result):
+        return f"Proxy added ({len(result['proxied'])} mesh(es))"
+
+
+class ElementJob(_MeshGenerateJob):
+    """Add an "element" variant set to a multi-object USD pack so only one shows (element_gen.py)."""
+    script, label = 'element_gen.py', 'Element switch generation'
+    def __init__(self, asset_id, source, backup_dir):
+        super().__init__(asset_id, source, backup_dir)
+    def summary(self, result):
+        return f"Element switch added ({len(result['element_switch']['variants'])} elements)"
 
 
 class FolderMigrationJob(QtCore.QThread):
@@ -387,6 +406,10 @@ class LibraryWidget(QtWidgets.QWidget):
         self.proxy_failed = set()
         self.proxy_job = None
         self.missing_proxy_scan = None
+        self.element_queue = deque()
+        self.element_pending = set()
+        self.element_failed = set()
+        self.element_job = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
         self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
@@ -633,6 +656,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.job and self.job.isRunning():raise ValueError('Wait for the scan to finish before moving assets.')
         if self.thumb_pending:raise ValueError('Wait for thumbnail generation to finish (or use Libraries... > Cancel Thumbnails) before moving assets.')
         if self.proxy_pending:raise ValueError('Wait for proxy generation to finish (or use Libraries... > Cancel Proxies) before moving assets.')
+        if self.element_pending:raise ValueError('Wait for element switch generation to finish (or use Libraries... > Cancel Element Switches) before moving assets.')
         self.save_metadata()
         root_id,dest_rel,_=target;select=None
         if 'assets' in payload:
@@ -881,6 +905,31 @@ class LibraryWidget(QtWidgets.QWidget):
         else:
             self.status.setText((message or 'Already has a proxy')+f' ({len(self.proxy_queue)} remaining)')
 
+    def queue_element(self,row):
+        aid=row['id']
+        if row['kind']!='usd' or aid in self.element_pending or aid in self.element_failed:return
+        self.element_pending.add(aid);self.element_queue.append(row)
+        QtCore.QTimer.singleShot(0,self.next_element)
+
+    def next_element(self):
+        if self.element_job is not None or not self.element_queue:return
+        row=self.element_queue.popleft()
+        source=Path(row['root_path'])/row['relpath']
+        self.element_job=ElementJob(row['id'],source,self.data_dir/'backups'/'element')
+        self.element_job.done.connect(self.element_done)
+        self.element_job.finished.connect(self.element_finished)
+        _keep_job(self.element_job)
+
+    def element_finished(self):
+        self.element_job=None;self.next_element()
+
+    def element_done(self,aid,message,error):
+        self.element_pending.discard(aid)
+        if error:
+            self.element_failed.add(aid);self.status.setText('Element switch generation failed: '+error)
+        else:
+            self.status.setText((message or 'Already has an element switch')+f' ({len(self.element_queue)} remaining)')
+
     def icon_for(self,row):
         path=self.thumbnail_path(row)
         if path:
@@ -1034,6 +1083,7 @@ class LibraryWidget(QtWidgets.QWidget):
         action('Generate Selected Thumbnails',self.generate_thumbnail)
         if all(row['kind']=='usd' for row in rows):
             action('Generate Selected Proxies...',self.generate_proxy)
+            action('Generate Selected Element Switch...',self.generate_element)
         if len(rows)==1:
             action('Choose Thumbnail...',self.choose_thumbnail)
             action('Publish Static USD...',self.publish_asset)
@@ -1104,6 +1154,7 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addAction('Cancel Thumbnails',lambda:self.safe(self.cancel_thumbnails))
         menu.addAction('Generate Missing Proxies...',lambda:self.safe(self.generate_missing_proxies))
         menu.addAction('Cancel Proxies',lambda:self.safe(self.cancel_proxies))
+        menu.addAction('Cancel Element Switches',lambda:self.safe(self.cancel_elements))
         menu.addAction('Open Catalog',lambda:self.safe(self.open_catalog))
         menu.addAction('Select Catalog...',lambda:self.safe(self.select_catalog))
         menu.addAction('New Catalog...',lambda:self.safe(self.new_catalog))
@@ -1208,6 +1259,24 @@ class LibraryWidget(QtWidgets.QWidget):
         self.proxy_queue.clear()
         if self.proxy_job:self.proxy_job.requestInterruption()
         self.status.setText('Cancelled. An active proxy generation will finish first.')
+
+    def generate_element(self):
+        rows=[r for r in self.selected_rows() if r['kind']=='usd']
+        if not rows:raise ValueError('Select one or more USD assets.')
+        for row in rows:
+            self.library.resolve(row)
+            self.element_failed.discard(row['id'])
+            self.queue_element(row)
+        # Only for a pack of alternate top-level objects (all shown at once today, only one wanted).
+        # A modular kit whose pieces are meant to all stay visible looks the same on disk and would
+        # be broken the same way, so this is deliberately per-asset - check each one visually.
+        self.status.setText(f'Queued {len(rows)} element switch job(s). Only use this on assets that bundle several alternate objects (only the first will show after generation) - a modular kit meant to display all its pieces together would be broken by it. Each USD file is overwritten in place (a backup is kept in data/backups/element).')
+
+    def cancel_elements(self):
+        for row in self.element_queue:self.element_pending.discard(row['id'])
+        self.element_queue.clear()
+        if self.element_job:self.element_job.requestInterruption()
+        self.status.setText('Cancelled. An active element switch generation will finish first.')
 
     def generate_missing_thumbnails(self):
         if self.missing_scan is not None:return

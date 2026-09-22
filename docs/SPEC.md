@@ -280,6 +280,22 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
 「Libraries... → Generate Missing Proxies...」は、現在の検索・フォルダー・種類の条件に一致するUSD資産を全てキューへ入れる（既に`purpose=proxy`があるかどうかはファイルを開かないと分からないため、UIスレッドでは判定せず、各ジョブが自分のファイルを見て判断する）。「Cancel Proxies」で待機分を解除できる。
 フォルダー移動・素材移動は、待機中のproxy生成がある間はできない（該当のCancelで解除するか完了を待つ）。
 
+## 複数オブジェクトパックの切り替え
+
+Sketchfab等のパックは、同じ原点付近に複数の独立したトップレベルオブジェクト（例: きのこの品種違い数体）を1ファイルへまとめていることがある。そのまま配置すると全オブジェクトが重なって表示される。`element_gen.py`が別プロセスで`element`という名前のvariant setを1つ追加し、常にちょうど1つだけを表示できるようにする。
+
+- 対象の検出（`_find_pack_root`）: ステージのpseudo-rootから幅優先探索し、**子を2つ以上持ち、かつそのうち2つ以上の子孫にメッシュを含む、最も浅いプリム**を「パックの分岐点」とする。見つからなければ`{'skipped': 'no multi-object pack found (need 2+ sibling objects with geometry)'}`。
+  - `purpose=proxy`を持つメッシュ自身は候補から除外する（`_is_proxy_mesh`）。除外しないと、proxy生成済みの単一オブジェクト資産（レンダーメッシュとその`_proxy`兄弟）が「2要素のパック」に誤検出され、どちらか一方しか表示されなくなる回帰があった。
+  - **この検出はヒューリスティックであり、「複数の独立した代替オブジェクトを束ねたパック」と「複数パーツが揃って初めて1つの物になるモジュール式キット」を区別できない**（両者ともファイルの形は同じ：トップレベルに複数のメッシュ持ちグループが並ぶ）。誤ってキットに使うと大半のパーツが非表示になる。そのためLibraries...の一括生成（Generate Missing...相当）は用意せず、ui.pyの「Generate Selected Element Switch...」による資産ごとの手動生成のみとする。
+- 既に`element` variant setを持つ資産は`{'skipped': 'already has an element switch'}`。
+- 分岐点プリムに`element` variant setを作り、検出した各子に`Element0`, `Element1`, ... という名前のバリアントを割り当てる。各バリアントの中で、選ばれた子には`visibility=inherited`、それ以外の子には`visibility=invisible`を明示的に設定する（ジオメトリ自体は変更しない。分岐点プリムに元々ローカルなvisibility値は無いため、LODのようなClear()は不要）。選択は`Element0`に設定して終える（何もしなければ全オブジェクトが重なって見える現状を、生成直後から解消するため）。
+- proxy_gen.pyと同じファイル入出力（`generate_plain`/`generate_usdz`）を再利用する。`.usdz`は展開・編集・再パッケージ、プレーンUSDは`Export()`のみ。
+
+`ui.py`の`ElementJob`（`ProxyJob`と`_MeshGenerateJob`を共通基底とする）が`hython element_gen.py <元ファイル> <一時出力> <結果JSON>`を実行し、成功時のみ`data/backups/element/`へバックアップしてから`os.replace`で置き換える。失敗・スキップ時は元ファイルを一切変更しない。
+右クリックの「Generate Selected Element Switch...」は選択したUSD資産に生成する（ダイアログでの値入力は無い）。「Libraries... → Cancel Element Switches」で待機分を解除できる。フォルダー移動・素材移動は、待機中のelement switch生成がある間はできない。
+
+配置後にどのオブジェクトを表示するか切り替えるには、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに分岐点プリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。
+
 ## USD / Asset Catalog
 
 左下の「Libraries...」ボタンの下にある「Catalog」選択欄でUSDの登録先を選びます。素材ルートの`Catalog`内のDBを自動検出します。
@@ -339,5 +355,6 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・上方向軸・マテリアル数・サイズも） |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
 | `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ |
+| `element_gen.py` | 別プロセスでの複数オブジェクトパックの切り替え（`element` variant set）。proxy_gen.pyのファイル入出力を再利用 |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。

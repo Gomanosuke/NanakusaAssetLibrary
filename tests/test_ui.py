@@ -250,13 +250,14 @@ class LibraryUiTests(unittest.TestCase):
 
             select(usda)
             labels=[a.text() for a in widget.build_asset_menu().actions()]
-            self.assertIn('Generate Selected Proxies...',labels)
+            self.assertIn('Generate Selected Proxies...',labels);self.assertIn('Generate Selected Element Switch...',labels)
             select(usdz)
             self.assertIn('Generate Selected Proxies...',[a.text() for a in widget.build_asset_menu().actions()])   # .usdz is repackaged with its proxy inside
             select(obj)
             self.assertNotIn('Generate Selected Proxies...',[a.text() for a in widget.build_asset_menu().actions()])   # not a USD kind
 
             widget.queue_proxy(obj,300);self.assertNotIn(obj['id'],widget.proxy_pending)   # not a USD kind: never queued
+            widget.queue_element(obj);self.assertNotIn(obj['id'],widget.element_pending)
 
             with patch.object(ui,'ProxyJob') as job_cls:
                 job=job_cls.return_value
@@ -274,6 +275,23 @@ class LibraryUiTests(unittest.TestCase):
             widget.proxy_done('missing-id','','disk full')
             self.assertIn('missing-id',widget.proxy_failed)
             self.assertIn('Proxy generation failed',widget.status.text())
+
+            with patch.object(ui,'ElementJob') as job_cls:
+                job=job_cls.return_value
+                widget.queue_element(usda)
+                self.assertIn(usda['id'],widget.element_pending)
+                self.app.processEvents()
+                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'element')
+                self.assertIs(widget.element_job,job)
+                job.done.connect.assert_called_once_with(widget.element_done)
+
+            widget.element_done(usda['id'],'Element switch added (3 elements)','')
+            self.assertNotIn(usda['id'],widget.element_pending)
+            self.assertIn('Element switch added',widget.status.text())
+
+            widget.element_done('missing-id','','disk full')
+            self.assertIn('missing-id',widget.element_failed)
+            self.assertIn('Element switch generation failed',widget.status.text())
             widget.close();widget.deleteLater()
 
     def test_proxy_dialog_remembers_the_last_value_and_cancel_queues_nothing(self):
@@ -460,6 +478,28 @@ class LibraryUiTests(unittest.TestCase):
             stage.Reload()   # the file changed on disk in a separate hython process; this process's cached layer has not
             self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo')).ComputePurpose(),'render')
             self.assertEqual(UsdGeom.Imageable(stage.GetPrimAtPath('/Asset/geo_proxy')).ComputePurpose(),'proxy')
+
+    def test_element_job_runs_as_a_real_subprocess_without_import_errors(self):
+        # element_gen.py is invoked by hython as a script (see _MeshGenerateJob.run()), not
+        # imported as part of the package; a `from . import proxy_gen` there would fail the same
+        # way lod_gen.py's did (see the 0.12.3 regression test above). Run the real subprocess.
+        from pxr import Usd, UsdGeom
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder);source=base/'pack.usda';backups=base/'backups'
+            stage=Usd.Stage.CreateNew(str(source));root=UsdGeom.Xform.Define(stage,'/Root')
+            for name in ('a','b','c'):
+                group=UsdGeom.Xform.Define(stage,f'/Root/{name}')
+                mesh=UsdGeom.Mesh.Define(stage,f'/Root/{name}/geo')
+                mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0)]);mesh.CreateFaceVertexCountsAttr([3]);mesh.CreateFaceVertexIndicesAttr([0,1,2])
+            stage.SetDefaultPrim(root.GetPrim());stage.GetRootLayer().Save()
+
+            got=[]
+            job=ui.ElementJob('aid',source,backups)
+            job.done.connect(lambda *a:got.append(a))
+            job.run()
+            self.assertEqual(got,[('aid','Element switch added (3 elements)','')])
+            stage.Reload()
+            self.assertEqual(stage.GetPrimAtPath('/Root').GetVariantSet('element').GetVariantSelection(),'Element0')
 
     def test_folder_items_are_created_only_when_a_folder_is_opened(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):

@@ -97,6 +97,16 @@
 - **一時出力ファイルは元ファイルと同じフォルダーに書く**（tempfile.TemporaryDirectory()配下ではない）。os.replaceはWindowsで別ドライブ間の置き換えができない（WinError 17）。素材ライブラリーとシステムTEMPが別ドライブの構成で実際に踏んだ既知の不具合（バックアップだけ作られ元ファイルは変更されないまま失敗する）。
 - 実行時にダイアログでtarget trianglesを聞く。値はsettings.jsonに保存し次回の初期値にする。ダイアログをテストする時はQtWidgets.QInputDialog.getIntをpatchする。
 - LOD（複数段階の詳細度、USDのvariant set）は一度実装したが、2026-09-22にユーザーの指示で機能ごと削除した（UI・lod_gen.py・関連テスト・ドキュメントを撤去）。再実装する場合は過去のgitコミット（"Add LOD generation..." 以降、"lodの仕組みは削除します"より前）を参照する。
+- ui.pyの`_MeshGenerateJob`（`ProxyJob`/`ElementJob`の共通基底、旧`LodJob`と同じ形）が共有の subprocess/backup/os.replace ロジックを持つ。サブクラスが1つだけの時期があり（LOD削除直後）、その時は一旦`ProxyJob`へ展開していたが、element switch追加で再び共通基底に戻した。3つ目のジェネレーターを追加する時もこのクラスを再利用する。
+
+## 複数オブジェクトパックの切り替え
+
+- element_gen.pyが別プロセス（hython）で`element` variant setを追加する。対象資産自身の入口ファイルだけを編集する。
+- 分岐点の検出（`_find_pack_root`）はステージのpseudo-rootからの**幅優先探索**で、子を2つ以上（`purpose=proxy`のメッシュ自身を除く）持つ最も浅いプリムを返す。`Usd.PrimRange`で深さ優先に全プリムを見るのではなく、必ずBFSで「最初に見つかった浅い分岐点」を使うこと（深い場所にある偶然の分岐、例えばマテリアル分割で複数メッシュに割れた1つのオブジェクトを誤検出しないため）。
+- **既知の限界（意図的に対処しない）**: モジュール式キット（例: 手すりの部品集合）と複数の代替オブジェクトのパック（例: きのこの品種違い数体）はファイルの形が同じで区別できない。そのためLibraries...への一括生成は追加しない。ui.pyの「Generate Selected Element Switch...」による資産ごとの手動生成のみ。ユーザーがその資産を実際に見て判断する前提。
+- 各バリアントでは、選ばれた子だけ`visibility=inherited`、他は`visibility=invisible`を明示的に設定する。ジオメトリ自体（points等）は一切変更しないので、LODの時のような「先にローカル値をClear()する」必要は無い（分岐点プリム自体にvisibilityのローカル値は元々存在しない）。
+- 選択は`Element0`に設定して書き出す。何も選択しないと全オブジェクトが重なって見える既存の問題を、生成直後から解消するため。
+- ui.pyの`ElementJob`が結果を検証してから、data/backups/element/へ元ファイルをバックアップし、os.replaceで置き換える。ダイアログでの値入力は無い（設定不要な機能）。
 
 ## 一覧のアイコンサイズ
 
