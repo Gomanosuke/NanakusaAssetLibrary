@@ -20,20 +20,16 @@ def rows(*relpaths,kind='texture'):
     return [dict(id=str(i),root_id='r',kind=kind,label=Path(p).stem,relpath=p) for i,p in enumerate(relpaths)]
 
 class StackTests(unittest.TestCase):
-    def test_images_of_one_set_stack_and_others_stay_single(self):
+    def test_images_of_one_set_form_a_stack_led_by_the_base_color(self):
         base='Texture/PBR/Misc/Brick_Wall_1K/Brick_Wall_1K_'
-        data=rows(*(base+c+'.tif' for c in ('albedo','ao','normal','roughness')),'Texture/HDR/sky.hdr','Texture/PBR/Misc/lone_albedo.tif')
-        entries=pbr.stack_entries(data)
-        self.assertEqual([len(e['rows']) for e in entries],[4,1,1])
-        stack=entries[0];self.assertEqual(stack['label'],'Brick_Wall_1K');self.assertEqual(stack['rep']['label'],'Brick_Wall_1K_albedo')
-        self.assertEqual(stack['channels'],['base_color','roughness','normal','ao'])
-        self.assertEqual([len(e['rows']) for e in pbr.stack_entries(data,enabled=False)],[1]*6)
+        [stack]=pbr.group_entries(rows(*(base+c+'.tif' for c in ('ao','normal','roughness','albedo'))))
+        self.assertEqual(stack['label'],'Brick_Wall_1K');self.assertEqual(stack['rep']['label'],'Brick_Wall_1K_albedo')
+        self.assertEqual(stack['channels'],['base_color','roughness','normal','ao']);self.assertEqual(len(stack['rows']),4)
 
-    def test_resolutions_folders_and_ambiguous_channels_do_not_merge(self):
-        data=rows('Texture/a/stone_1K_albedo.tif','Texture/a/stone_1K_normal.tif','Texture/a/stone_2K_albedo.tif','Texture/a/stone_2K_normal.tif',
-                  'Texture/b/stone_1K_albedo.tif','Texture/b/stone_1K_albedo.png','Texture/b/stone_1K_roughness.tif')
-        self.assertEqual([len(e['rows']) for e in pbr.stack_entries(data)],[2,2,1,1,1])   # the folder with two albedo images is left alone
-        self.assertEqual(len(pbr.stack_entries(rows('Texture/a/x_albedo.usd',kind='usd'))),1)
+    def test_a_single_image_an_ambiguous_set_or_an_unrecognised_name_stays_single(self):
+        self.assertEqual([len(e['rows']) for e in pbr.group_entries(rows('Texture/a/lone_albedo.tif'))],[1])
+        self.assertEqual([len(e['rows']) for e in pbr.group_entries(rows('Texture/b/stone_1K_albedo.tif','Texture/b/stone_1K_albedo.png','Texture/b/stone_1K_roughness.tif'))],[1,1,1])
+        self.assertEqual([len(e['rows']) for e in pbr.group_entries(rows('Texture/b/sky.hdr','Texture/b/reference.png'))],[1,1])
 
 class ChannelTokenTests(unittest.TestCase):
     def test_last_token_is_the_channel(self):

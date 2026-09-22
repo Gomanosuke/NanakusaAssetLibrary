@@ -115,4 +115,60 @@ class IndexScaleTests(unittest.TestCase):
         self.assertEqual(rows['Texture/a.b.tif']['label'],'a.b');self.assertEqual(rows['USD/One.USDZ']['label'],'One');self.assertEqual(rows['USD/pack/pack.usda']['label'],'pack')
         self.assertEqual(rows['Texture/a.b.tif']['size'],1)
 
+    def test_stacks_are_decided_at_scan_time_per_folder_and_resolution(self):
+        for rel in ('a/stone_1K_albedo.tif','a/stone_1K_normal.tif','a/stone_2K_albedo.tif','a/stone_2K_normal.tif','b/stone_1K_albedo.tif','b/stone_1K_albedo.png','b/stone_1K_roughness.tif','b/lone_albedo.tif','b/sky.hdr'):
+            self.write('Texture/'+rel)
+        self.lib.scan(self.rid)
+        with self.lib.connect() as db:
+            got={r['relpath'].split('/',1)[1]:(r['gkey'] or '').split('|',1)[-1] for r in db.execute('SELECT relpath,gkey FROM assets')}
+        self.assertEqual(got['a/stone_1K_albedo.tif'],got['a/stone_1K_normal.tif']);self.assertNotEqual(got['a/stone_1K_albedo.tif'],got['a/stone_2K_albedo.tif'])
+        self.assertEqual(got['a/stone_2K_albedo.tif'],got['a/stone_2K_normal.tif']);self.assertTrue(got['a/stone_1K_albedo.tif'])
+        for single in ('b/stone_1K_albedo.tif','b/stone_1K_albedo.png','b/stone_1K_roughness.tif','b/lone_albedo.tif','b/sky.hdr'):self.assertEqual(got[single],'')   # ambiguous or alone
+
+    def test_stream_orders_stacks_and_pages_exactly(self):
+        for c in ('albedo','ao','normal'):self.write(f'Texture/PBR/Brick_1K_{c}.tif')
+        for name in ('a_first','z_last'):self.write(f'3DModel/{name}.obj')
+        self.write('Texture/PBR/sky.hdr')
+        self.lib.scan(self.rid)
+        every=self.lib.stream(stacked=False);self.assertEqual([e['label'] for e in every.next(50)],['a_first','Brick_1K_albedo','Brick_1K_ao','Brick_1K_normal','sky','z_last'])
+        stream=self.lib.stream(stacked=True)
+        first=stream.next(2);self.assertEqual([e['label'] for e in first],['a_first','Brick_1K'])
+        self.assertEqual(len(first[1]['rows']),3);self.assertEqual(first[1]['rep']['label'],'Brick_1K_albedo')
+        self.assertFalse(stream.finished);self.assertEqual([e['label'] for e in stream.next(10)],['sky','z_last']);self.assertTrue(stream.finished)
+        self.assertEqual(stream.next(5),[])
+        self.assertEqual(self.lib.count(),6);self.assertEqual(self.lib.count(kind='model'),2)
+        # A search keeps only the matching images: two left still stack, one left is single.
+        two=self.lib.stream(stacked=True,search='brick_1k_a').next(10);self.assertEqual([len(e['rows']) for e in two],[2])
+        one=self.lib.stream(stacked=True,search='normal').next(10);self.assertEqual([(len(e['rows']),e['label']) for e in one],[(1,'Brick_1K_normal')])
+        every.close();stream.close()
+
+    def test_stream_follows_folders_favorites_and_moves(self):
+        self.write('3DModel/A/one.obj');self.write('3DModel/A/Sub/two.obj');self.write('USD/pack/pack.usd');self.write('3DModel/B/three.obj')
+        self.lib.scan(self.rid);rid=self.rid
+        labels=lambda **f:[e['label'] for e in self.lib.stream(**f).next(50)]
+        self.assertEqual(labels(root_id=rid,folder='3DModel/A'),['one','two']);self.assertEqual(labels(root_id=rid,folder='3DModel/A',recursive=False),['one'])
+        self.assertEqual(labels(folder='USD',recursive=False),['pack']);self.assertEqual(labels(folder='USD/pack',recursive=False),['pack'])   # a package lists itself
+        row=next(r for r in self.lib.assets() if r['label']=='three');self.lib.update(row['id'],favorite=1)
+        self.assertEqual(labels(favorite=True),['three'])
+        self.lib.relocate(rid,[dict(id=row['id'],relpath='3DModel/A/Sub/three.obj',thumbnail='')])
+        self.assertEqual(labels(folder='3DModel/A/Sub',recursive=False),['three','two'])
+
+    def test_older_index_is_upgraded_once(self):
+        import sqlite3
+        self.write('3DModel/a.obj');self.write('Texture/x_albedo.tif');self.write('Texture/x_normal.tif');self.lib.scan(self.rid)
+        with self.lib.connect() as db:
+            db.execute('UPDATE assets SET folder=NULL,pkg=NULL,stack=NULL,channel=NULL,gkey=NULL');db.execute('PRAGMA user_version=0')
+        again=Library(self.base/'index')
+        self.assertEqual([len(e['rows']) for e in again.stream(stacked=True).next(10)],[1,2])
+        with again.connect() as db:self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],Library.VERSION)
+
+    def test_asset_statistics_are_remembered_until_the_file_changes(self):
+        self.write('3DModel/a.obj');self.lib.scan(self.rid);row=self.lib.assets()[0]
+        self.assertIsNone(self.lib.info(row['id'],'1:1'))
+        self.lib.save_info(row['id'],'1:1',{'info':{'Polygons':'3'}})
+        self.assertEqual(self.lib.info(row['id'],'1:1'),{'info':{'Polygons':'3'}});self.assertIsNone(self.lib.info(row['id'],'2:1'))
+        self.lib.save_info(row['id'],'2:1',{'info':{'Polygons':'4'}});self.assertIsNone(self.lib.info(row['id'],'1:1'))
+        self.lib.remove_root(self.rid)
+        with self.lib.connect() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM info').fetchone()[0],0)
+
 if __name__=='__main__':unittest.main()

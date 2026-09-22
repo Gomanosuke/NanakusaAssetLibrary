@@ -13,6 +13,8 @@ from stat import S_ISLNK
 import sqlite3
 import uuid
 
+from . import pbr
+
 KINDS = ("usd", "model", "material", "pbr", "texture", "hdri", "decal")
 IMAGES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr", ".hdr", ".rat", ".pic", ".tx", ".bmp", ".tga"}
 MODELS = {".obj", ".bgeo", ".geo", ".abc", ".fbx", ".glb", ".stl", ".ply", ".vdb"}
@@ -98,14 +100,63 @@ class Library:
                 thumbnail TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
                 UNIQUE(root_id, relpath));
               CREATE INDEX IF NOT EXISTS asset_root ON assets(root_id);
+              CREATE TABLE IF NOT EXISTS info (
+                id TEXT PRIMARY KEY, stamp TEXT NOT NULL, data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS folders (
                 root_id TEXT NOT NULL, relpath TEXT NOT NULL, PRIMARY KEY(root_id, relpath));
             ''')
+            self._migrate(db)
             try:
                 # Readers (the panel) keep working while a scan writes; safe on a local disk.
                 db.execute('PRAGMA journal_mode=WAL')
             except sqlite3.DatabaseError:
                 pass
+
+    # Columns derived from the path, so the panel can list, page and stack with plain SQL:
+    # folder = the folder that lists the asset (a USD package is listed by its parent folder),
+    # pkg = the package folder of a USD package, stack / channel = PBR set key and channel of an
+    # image that has partners in its folder, gkey = one stack's identity (root, folder, key).
+    VERSION = 4
+
+    def _migrate(self, db):
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        if version >= self.VERSION:
+            return
+        if version < 3:
+            have = {r[1] for r in db.execute('PRAGMA table_info(assets)')}
+            for name in ('folder', 'pkg', 'stack', 'channel', 'gkey'):
+                if name not in have:
+                    db.execute('ALTER TABLE assets ADD COLUMN %s TEXT' % name)
+            db.execute('CREATE INDEX IF NOT EXISTS asset_gkey ON assets(gkey)')
+            rows = db.execute('SELECT id, root_id, relpath, kind FROM assets').fetchall()
+            derived = self.derive([(r['root_id'], r['relpath'], r['kind']) for r in rows])
+            db.executemany('UPDATE assets SET folder=?, pkg=?, stack=?, channel=?, gkey=? WHERE id=?',
+                           [d + (r['id'],) for d, r in zip(derived, rows)])
+        # The list order, as one index the panel can page through with a key (see EntryStream).
+        db.execute('DROP INDEX IF EXISTS asset_order')
+        db.execute('CREATE INDEX asset_order ON assets(label COLLATE NOCASE, relpath, root_id)')
+        db.execute('PRAGMA user_version=%d' % self.VERSION)
+
+    @staticmethod
+    def derive(items):
+        """[(folder, pkg, stack, channel, gkey)] for [(root_id, relpath, kind)].
+
+        Images of one PBR set stack only when there are two or more and no channel repeats.
+        """
+        result, groups = [], {}
+        for index, (root_id, relpath, kind) in enumerate(items):
+            parent = relpath.rpartition('/')[0]
+            pkg = parent if is_usd_package({'relpath': relpath, 'kind': kind}) else ''
+            result.append([parent.rpartition('/')[0] if pkg else parent, pkg, None, None, None])
+            info = pbr.stack_info(relpath) if kind == 'texture' else None
+            if info:
+                groups.setdefault((root_id, info[0], info[1]), []).append((index, info[3]))
+        for (root_id, folder, key), members in groups.items():
+            channels = [c for _, c in members]
+            if len(members) >= 2 and len(set(channels)) == len(channels):
+                for index, channel in members:
+                    result[index][2:] = [key, channel, root_id + '|' + folder + '|' + key]
+        return [tuple(r) for r in result]
 
     @contextmanager
     def connect(self):
@@ -145,6 +196,7 @@ class Library:
         with self.connect() as db:
             db.execute("DELETE FROM assets WHERE root_id=?", (rid,))
             db.execute("DELETE FROM folders WHERE root_id=?", (rid,))
+            db.execute("DELETE FROM info WHERE id NOT IN (SELECT id FROM assets)")
             db.execute("DELETE FROM roots WHERE id=?", (rid,))
 
     def relink_root(self, rid, path):
@@ -227,10 +279,23 @@ class Library:
                 db.execute("UPDATE assets SET present=0 WHERE root_id=?", (rid,))
                 db.execute("DELETE FROM folders WHERE root_id=?", (rid,))
                 db.executemany("INSERT OR IGNORE INTO folders VALUES (?,?)", [(rid, f) for f in folders])
-            db.executemany('''INSERT INTO assets (id,root_id,relpath,label,kind,size,mtime)
-                VALUES (?,?,?,?,?,?,?) ON CONFLICT(root_id,relpath) DO UPDATE SET
-                kind=excluded.kind,override_kind=NULL,size=excluded.size,mtime=excluded.mtime,present=1''', rows)
+            derived = self.derive([(r[1], r[2], r[4]) for r in rows])
+            db.executemany('''INSERT INTO assets (id,root_id,relpath,label,kind,size,mtime,folder,pkg,stack,channel,gkey)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(root_id,relpath) DO UPDATE SET
+                kind=excluded.kind,override_kind=NULL,size=excluded.size,mtime=excluded.mtime,present=1,
+                folder=excluded.folder,pkg=excluded.pkg,stack=excluded.stack,channel=excluded.channel,gkey=excluded.gkey''',
+                [r + d for r, d in zip(rows, derived)])
         return {"cancelled": False, "count": len(rows), "errors": errors}
+
+    def info(self, aid, stamp):
+        """Statistics read earlier for this asset (resolution, polygons...), if the file is unchanged."""
+        with self.connect() as db:
+            row = db.execute("SELECT data FROM info WHERE id=? AND stamp=?", (aid, stamp)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_info(self, aid, stamp, data):
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO info VALUES (?,?,?)", (aid, stamp, json.dumps(data)))
 
     def folders(self, rid):
         """Folder paths of a root as seen by the last scan (USD packages are leaves), sorted.
@@ -267,35 +332,69 @@ class Library:
                            (root_id, change['relpath'], change['id']))
                 db.execute("UPDATE assets SET relpath=?, thumbnail=? WHERE id=? AND root_id=?",
                            (change['relpath'], change['thumbnail'], change['id'], root_id))
+                row = db.execute("SELECT kind, stack FROM assets WHERE id=?", (change['id'],)).fetchone()
+                if row:
+                    folder, pkg = self.derive([(root_id, change['relpath'], row['kind'])])[0][:2]
+                    gkey = root_id + '|' + folder.lower() + '|' + row['stack'] if row['stack'] else None
+                    db.execute("UPDATE assets SET folder=?, pkg=?, gkey=? WHERE id=?", (folder, pkg, gkey, change['id']))
             for old, new in folder_moves:
                 db.execute("UPDATE OR REPLACE folders SET relpath=? || substr(relpath, ?) WHERE root_id=? AND (relpath=? OR substr(relpath, 1, ?)=?)",
                            (new, len(old) + 1, root_id, old, len(old) + 1, old + '/'))
 
-    def assets(self, search="", root_id=None, kind=None, favorite=False, missing=False, folder=None):
+    def _where(self, search="", root_id=None, kind=None, favorite=False, missing=False, folder=None,
+               recursive=True, listed_only=False):
         clauses, args = [], []
         if folder:
-            # Everything below a folder, as an index range on (root_id, relpath): '/' + 1 is '0'.
-            clauses.append("a.relpath >= ? AND a.relpath < ?"); args.extend([folder.rstrip('/') + '/', folder.rstrip('/') + '0'])
+            if recursive:
+                # Everything below a folder, as an index range on (root_id, relpath): '/' + 1 is '0'.
+                clauses.append("a.relpath >= ? AND a.relpath < ?"); args.extend([folder.rstrip('/') + '/', folder.rstrip('/') + '0'])
+            else:
+                clauses.append("(a.folder=? OR a.pkg=?)"); args.extend([folder.rstrip('/')] * 2)
         if not missing:
             clauses.append("a.present=1")
         if root_id:
             clauses.append("a.root_id=?"); args.append(root_id)
         if kind:
             clauses.append("a.kind=?"); args.append(kind)
+        elif listed_only:
+            clauses.append("a.kind IN ('usd','model','texture')")   # older indexes may hold retired kinds
         if favorite:
             clauses.append("a.favorite=1")
         for word in search.split():
             clauses.append("(a.label LIKE ? ESCAPE '\\' OR a.relpath LIKE ? ESCAPE '\\' OR a.tags LIKE ? ESCAPE '\\')")
             word = word.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             args.extend(['%' + word + '%'] * 3)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", args
+
+    def assets(self, search="", root_id=None, kind=None, favorite=False, missing=False, folder=None):
+        where, args = self._where(search, root_id, kind, favorite, missing, folder)
         sql = '''SELECT a.*, r.path AS root_path, r.label AS root_label,
                  a.kind AS effective_kind
-                 FROM assets a JOIN roots r ON r.id=a.root_id'''
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY a.label COLLATE NOCASE, a.relpath"
+                 FROM assets a JOIN roots r ON r.id=a.root_id''' + where + " ORDER BY a.label COLLATE NOCASE, a.relpath"
         with self.connect() as db:
             return [dict(r) for r in db.execute(sql, args)]
+
+    def count(self, **filters):
+        """Number of assets the panel lists for these filters (same keywords as stream)."""
+        where, args = self._where(listed_only=True, **filters)
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM assets a" + where, args).fetchone()[0]
+
+    def stream(self, stacked=True, **filters):
+        """Lazy, ordered list entries for the panel; see EntryStream."""
+        return EntryStream(self, stacked, filters)
+
+    def iter_rows(self, batch=500, **filters):
+        """Every listed asset for the filters, in slices, on its own connection (no stacking)."""
+        stream = EntryStream(self, False, filters)
+        try:
+            while True:
+                entries = stream.next(batch)
+                if not entries:
+                    return
+                yield [e['rep'] for e in entries]
+        finally:
+            stream.close()
 
     def assets_by_ids(self, ids):
         rows = []
@@ -368,3 +467,84 @@ def read_manifest(path):
             raise FileNotFoundError(str(source))
         maps[key] = source.resolve().as_posix()
     return data, maps
+
+
+class EntryStream:
+    """Ordered list entries read on demand, so a huge result costs only what is shown.
+
+    Entries follow the label index. Each read asks for the next batch after the last key
+    (label, relpath, root) on a short-lived connection, so nothing stays open between reads: the
+    panel always sees current data, scans and moves are never blocked, and the database file is
+    never held. The first member of a PBR stack pulls in the rest of that stack (with the same
+    filters); the stream skips them later.
+    """
+    BATCH = 128
+    ORDER = " ORDER BY a.label COLLATE NOCASE, a.relpath, a.root_id"
+
+    def __init__(self, library, stacked, filters):
+        self.library = library
+        self.stacked = stacked
+        self.roots = {r['id']: r for r in library.roots()}
+        filters = dict(filters)
+        if len(self.roots) < 2:
+            filters['root_id'] = None   # one library: no filter, so the label index can stream the order
+        self.where, self.args = library._where(listed_only=True, **filters)
+        self.after = None
+        self.taken = set()
+        self.pending = []
+        self.done = False
+
+    def _row(self, raw):
+        row = dict(raw)
+        root = self.roots.get(row['root_id'])
+        row['root_path'], row['root_label'] = (root['path'], root['label']) if root else ('', '')
+        row['effective_kind'] = row['kind']
+        return row
+
+    def _batch(self):
+        where, args = self.where, list(self.args)
+        if self.after is not None:
+            where += (" AND " if where else " WHERE ") + "(a.label COLLATE NOCASE, a.relpath, a.root_id) > (?, ?, ?)"
+            args += list(self.after)
+        with self.library.connect() as db:
+            return db.execute("SELECT a.* FROM assets a" + where + self.ORDER + " LIMIT %d" % self.BATCH, args).fetchall()
+
+    def _members(self, gkey):
+        where = (self.where + " AND " if self.where else " WHERE ") + "a.gkey=?"
+        with self.library.connect() as db:
+            return [self._row(r) for r in db.execute("SELECT a.* FROM assets a" + where + self.ORDER, self.args + [gkey])]
+
+    def next(self, count):
+        """Exactly `count` more entries (a stack counts as one), fewer at the end of the result."""
+        entries, self.pending = self.pending[:count], self.pending[count:]
+        while len(entries) < count and not self.done:
+            raw = self._batch()
+            if not raw:
+                self.done = True
+                break
+            self.after = (raw[-1]['label'], raw[-1]['relpath'], raw[-1]['root_id'])
+            if len(raw) < self.BATCH:
+                self.done = True
+            found = []
+            for record in raw:
+                if record['id'] in self.taken:
+                    continue
+                row = self._row(record)
+                if self.stacked and row['gkey']:
+                    members = self._members(row['gkey'])
+                    self.taken.update(m['id'] for m in members)
+                    found.extend(pbr.group_entries(members))
+                else:
+                    found.append({'rows': [row], 'rep': row, 'label': row['label'], 'channels': []})
+            room = count - len(entries)
+            entries.extend(found[:room])
+            self.pending.extend(found[room:])
+        return entries
+
+    @property
+    def finished(self):
+        return self.done and not self.pending
+
+    def close(self):
+        self.done = True
+        self.pending = []

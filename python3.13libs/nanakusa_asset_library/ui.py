@@ -13,8 +13,17 @@ from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedd
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STACK_ROLE = dragdrop.STACK_ROLE   # ids of the assets a list item stands for
+LAZY_ROLE = QtCore.Qt.ItemDataRole.UserRole + 2   # folder item whose children are not created yet
 KINDS = {'': 'All Types', 'usd': 'USD', 'model': '3DModel', 'texture': 'Texture'}
 _windows = []
+
+
+def background():
+    """Popen / run keywords for helper processes: hidden, and below normal priority so a scan or a
+    render of thumbnails never slows the panel or Houdini itself."""
+    if os.name == 'nt':
+        return {'creationflags': subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS}
+    return {'preexec_fn': lambda: os.nice(10)}
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
 
 class AssetInfoJob(QtCore.QThread):
@@ -22,13 +31,14 @@ class AssetInfoJob(QtCore.QThread):
 
     def __init__(self,key,path,kind):
         super().__init__();self.key,self.path,self.kind=key,path,kind
+        self.hfs=hou.getenv('HFS')   # hou is only used on the main thread
 
     def run(self):
         result={}
         try:
-            executable=Path(hou.getenv('HFS'))/'bin'/('hython.exe' if os.name=='nt' else 'hython')
+            executable=Path(self.hfs)/'bin'/('hython.exe' if os.name=='nt' else 'hython')
             process=subprocess.Popen([str(executable),str(Path(__file__).with_name('asset_info.py')),str(self.path),self.kind],
-                stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,**background())
             started=time.monotonic()
             try:
                 while True:
@@ -86,6 +96,39 @@ class ScanJob(QtCore.QThread):
     def __init__(self, library, roots):
         super().__init__()
         self.library, self.roots = library, roots
+        self.python = self.find_python(hou.getenv('HFS'))   # looked up here: hou is only used on the main thread
+
+    @staticmethod
+    def find_python(home):
+        """The Python that ships with Houdini, for work that should not share the panel's interpreter."""
+        home = home or ''
+        for candidate in (Path(home)/'python313'/'python.exe', Path(home)/'python'/'bin'/'python3.13', Path(home)/'python'/'bin'/'python3'):
+            if home and candidate.is_file():
+                return candidate
+        return None
+
+    def scan_root(self, root):
+        python = self.python
+        if python is None:   # no separate interpreter available: scan in this thread
+            return self.library.scan(root['id'], self.isInterruptionRequested)
+        process = subprocess.Popen([str(python), str(Path(__file__).with_name('scan_worker.py')), str(self.library.data_dir), root['id']],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, **background())
+        try:
+            while True:
+                if self.isInterruptionRequested():
+                    return {'cancelled': True, 'count': 0, 'errors': []}
+                try:
+                    out, err = process.communicate(timeout=.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            if process.poll() is None:
+                process.kill(); process.communicate()
+        lines = [line[9:] for line in out.decode('utf-8', errors='replace').splitlines() if line.startswith('NAL_SCAN:')]
+        if not lines:
+            raise RuntimeError(err.decode(errors='replace')[-500:] or 'The scan process failed')
+        return json.loads(lines[-1])
 
     def run(self):
         results = []
@@ -93,7 +136,7 @@ class ScanJob(QtCore.QThread):
             if self.isInterruptionRequested():
                 break
             try:
-                result = self.library.scan(root['id'], self.isInterruptionRequested)
+                result = self.scan_root(root)
                 results.append((root['label'], result))
             except Exception as exc:
                 results.append((root['label'], {'count': 0, 'errors': [str(exc)]}))
@@ -117,7 +160,7 @@ class ThumbnailJob(QtCore.QThread):
             Path(self.dest).parent.mkdir(parents=True, exist_ok=True)
             args += ['-d','uint8','-o',temporary]
             result = subprocess.run(args,
-                capture_output=True, timeout=120, creationflags=(subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0))
+                capture_output=True, timeout=120, **background())
             if result.returncode:
                 raise RuntimeError(result.stderr.decode(errors='replace')[-1500:])
             image = QtGui.QImage(temporary)
@@ -136,9 +179,8 @@ class GeometryThumbnailJob(QtCore.QThread):
         self.bin = Path(hou.getenv('HFS'))/'bin'
 
     def execute(self, args, log):
-        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         with log.open('wb') as stream:
-            process = subprocess.Popen(args, stdout=stream, stderr=stream, creationflags=flags)
+            process = subprocess.Popen(args, stdout=stream, stderr=stream, **background())
             started = time.monotonic()
             try:
                 while process.poll() is None:
@@ -220,7 +262,7 @@ class ManifestDialog(QtWidgets.QDialog):
             field.setText(path)
 
 class LibraryWidget(QtWidgets.QWidget):
-    PAGE_SIZE = 200
+    CHUNK = 200   # items added each time the list is scrolled near its end
     def __init__(self, parent=None, data_dir=None, initial_root=None):
         super().__init__(parent)
         self.setObjectName('NanakusaAssetLibrary')
@@ -232,15 +274,14 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.default_root and not self.library.roots() and Path(self.default_root).is_dir():
             self.library.add_root(self.default_root)
         self.job = None
-        self.page = 0
         self.rows = []
         self.thumb_queue = deque()
         self.thumb_pending = set()
         self.thumb_failed = set()
         self.thumb_job = None
-        self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={}
-        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.row_index={};self.entries=[];self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
-        self.icon_todo=deque();self.page_entries=[];self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
+        self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
+        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
+        self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
         self.info_wanted=None;self.info_timer=QtCore.QTimer(self);self.info_timer.setSingleShot(True);self.info_timer.setInterval(250);self.info_timer.timeout.connect(self.start_info)
         self.missing_scan=None
         dragdrop.install()
@@ -253,6 +294,10 @@ class LibraryWidget(QtWidgets.QWidget):
         button.clicked.connect(lambda checked=False: self.safe(callback))
         layout.addWidget(button)
         return button
+
+    def closeEvent(self,event):
+        for timer in (self.scroll_timer,self.icon_timer,self.info_timer,self.folder_timer,self.search_timer):timer.stop()
+        self.missing_scan=None;self.close_stream();super().closeEvent(event)
 
     def event(self,event):
         # Houdini's Python Panel can retain keyboard focus on the root widget.
@@ -304,6 +349,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.tree = dragdrop.FolderTree(self.can_drop); self.tree.setHeaderLabel('Libraries / Folders')
         self.tree.setToolTip('Drop assets or folders here to move them. Ctrl / Shift-click selects several folders; drag them onto another folder to nest them.')
         self.tree.dropped.connect(self.tree_dropped)
+        self.tree.itemExpanded.connect(self.populate)
         # Listing a folder can take a while; doing it inside the mouse press would freeze a drag
         # that starts on the same folder. Wait briefly, and never while a drag is running.
         self.folder_timer=QtCore.QTimer(self); self.folder_timer.setSingleShot(True); self.folder_timer.setInterval(120)
@@ -336,9 +382,10 @@ class LibraryWidget(QtWidgets.QWidget):
         self.items.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.items.customContextMenuRequested.connect(self.asset_menu)
         centerbox.addWidget(self.items,1)
-        nav=QtWidgets.QHBoxLayout(); self._button('Previous',lambda:self.turn_page(-1),nav)
-        self.page_label=QtWidgets.QLabel(); nav.addWidget(self.page_label,1)
-        self._button('Next',lambda:self.turn_page(1),nav); centerbox.addLayout(nav)
+        # More items are added as the list is scrolled; there are no pages.
+        self.page_label=QtWidgets.QLabel(); centerbox.addWidget(self.page_label)
+        self.items.verticalScrollBar().valueChanged.connect(lambda *a:self.scroll_timer.start())
+        self.items.resized.connect(lambda:self.scroll_timer.start())
         split.addWidget(center)
         details=QtWidgets.QWidget(); details.setMinimumWidth(250)
         db=QtWidgets.QVBoxLayout(details)
@@ -371,6 +418,8 @@ class LibraryWidget(QtWidgets.QWidget):
         return item.data(0,ROLE) if item else None
 
     def rebuild_tree(self):
+        """Folder tree. Only the levels that are open exist as items; a closed folder holds a
+        placeholder and gets its children when it is opened, so tens of thousands of folders cost nothing."""
         self.refresh_catalogs()
         selected=self.current_folder()
         it=QtWidgets.QTreeWidgetItemIterator(self.tree); expanded=set()
@@ -378,20 +427,46 @@ class LibraryWidget(QtWidgets.QWidget):
             if it.value().isExpanded() and it.value().data(0,ROLE):expanded.add(it.value().data(0,ROLE))
             it+=1
         self.tree.blockSignals(True); self.tree.clear()
+        self.folder_items={};self.folder_kids={};self.folder_roots={}
         allitem=QtWidgets.QTreeWidgetItem(['All Libraries']); self.tree.addTopLevelItem(allitem)
-        chosen=allitem
         for root in self.library.roots():
-            top=QtWidgets.QTreeWidgetItem([root['label']]); data=(root['id'],'',root['path']); top.setData(0,ROLE,data); top.setToolTip(0,root['path']); self.tree.addTopLevelItem(top)
-            folders={'' :top}; rels=self.folder_paths(root)
-            for rel in sorted(rels, key=lambda x:(x.count('/'),x.lower())):
-                parent,_,name=rel.rpartition('/')
-                item=QtWidgets.QTreeWidgetItem([name]); value=(root['id'],rel,root['path']); item.setData(0,ROLE,value)
-                folders.get(parent,top).addChild(item); folders[rel]=item
-                item.setExpanded(value in expanded)
-                if value==selected:chosen=item
-            if data==selected:chosen=top
-            top.setExpanded(True)
+            kids={}
+            for rel in sorted(self.folder_paths(root),key=str.lower):
+                kids.setdefault(rel.rpartition('/')[0],[]).append(rel)
+            self.folder_kids[root['id']]=kids;self.folder_roots[root['id']]=root['path']
+            top=QtWidgets.QTreeWidgetItem([root['label']]); top.setData(0,ROLE,(root['id'],'',root['path'])); top.setToolTip(0,root['path'])
+            self.folder_items[(root['id'],'')]=top; self.tree.addTopLevelItem(top)
+            self.add_placeholder(top);self.populate(top);top.setExpanded(True)
+        for value in sorted(expanded,key=lambda v:v[1].count('/')+(1 if v[1] else 0)):
+            item=self.folder_items.get((value[0],value[1]))
+            if item is not None:self.populate(item);item.setExpanded(True)
+        chosen=allitem
+        if selected:chosen=self.ensure_item(selected[0],selected[1]) or allitem
         self.tree.setCurrentItem(chosen); self.tree.blockSignals(False)
+
+    def add_placeholder(self,item):
+        item.addChild(QtWidgets.QTreeWidgetItem(['...']));item.setData(0,LAZY_ROLE,True)
+
+    def populate(self,item):
+        """Create the children of a folder the first time it is needed."""
+        if not item.data(0,LAZY_ROLE):return
+        item.setData(0,LAZY_ROLE,False);item.takeChildren()
+        root_id,rel,_=item.data(0,ROLE)
+        for child in self.folder_kids.get(root_id,{}).get(rel,[]):
+            node=QtWidgets.QTreeWidgetItem([child.rpartition('/')[2]]);node.setData(0,ROLE,(root_id,child,self.folder_roots[root_id]))
+            self.folder_items[(root_id,child)]=node;item.addChild(node)
+            if self.folder_kids[root_id].get(child):self.add_placeholder(node)
+
+    def ensure_item(self,root_id,rel):
+        """The tree item of a folder, creating the levels above it if they are still closed."""
+        item=self.folder_items.get((root_id,''))
+        path=''
+        for part in [p for p in rel.split('/') if p]:
+            if item is None:return None
+            self.populate(item)
+            path=path+'/'+part if path else part
+            item=self.folder_items.get((root_id,path))
+        return item
 
     def folder_paths(self,root):
         """Folders of a library from the index; walk the disk only once for an index made by an older version."""
@@ -401,17 +476,14 @@ class LibraryWidget(QtWidgets.QWidget):
         return rels|set(core.GENRES)
 
     def select_folder(self,value):
-        it=QtWidgets.QTreeWidgetItemIterator(self.tree)
-        while it.value():
-            if it.value().data(0,ROLE)==value:
-                parent=it.value().parent()
-                while parent is not None:parent.setExpanded(True);parent=parent.parent()
-                self.tree.setCurrentItem(it.value());self.tree.scrollToItem(it.value());return
-            it+=1
+        item=self.ensure_item(value[0],value[1])
+        if item is None:return
+        parent=item.parent()
+        while parent is not None:parent.setExpanded(True);parent=parent.parent()
+        self.tree.setCurrentItem(item);self.tree.scrollToItem(item)
 
     def dragged_rows(self,ids):
-        by_id={r['id']:r for r in self.rows}
-        return [by_id[i] for i in ids if i in by_id]
+        return [self.row_index[i] for i in ids if i in self.row_index]
 
     def can_drop(self,payload,target):
         try:
@@ -454,36 +526,109 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.folder_dirty:self.folder_dirty=False;self.folder_timer.start(0)
 
     def reset_page(self,*args):
-        self.page=0; self.refresh()
+        self.refresh(reset=True)
 
-    def refresh(self):
-        self.icons_built_at=self.icon_edge()
+    def filters(self):
         folder=self.current_folder()
-        rows=self.library.assets(self.search.text(),folder[0] if folder else None,self.kind.currentData() or None,self.favorite.isChecked(),folder=folder[1] if folder and folder[1] else None)
-        # Older indexes may still contain retired kinds until the next scan.
-        rows=[r for r in rows if r['effective_kind'] in KINDS]
-        if folder:
-            rel=folder[1]
-            if self.recursive.isChecked(): rows=[r for r in rows if not rel or r['relpath'].startswith(rel+'/')]
-            else:
-                rows=[r for r in rows if (Path(r['relpath']).parent.parent.as_posix() if core.is_usd_package(r) else Path(r['relpath']).parent.as_posix())==rel or (core.is_usd_package(r) and Path(r['relpath']).parent.as_posix()==rel)]
-        self.rows=rows;self.row_index={r['id']:r for r in rows}
-        self.entries=pbr.stack_entries(rows,self.stack.isChecked())
-        pages=max(1,(len(self.entries)+self.PAGE_SIZE-1)//self.PAGE_SIZE); self.page=min(self.page,pages-1)
-        self.items.clear();self.icon_todo.clear();self.icon_timer.stop()
-        self.page_entries=self.entries[self.page*self.PAGE_SIZE:(self.page+1)*self.PAGE_SIZE]
-        for index,entry in enumerate(self.page_entries):
+        return dict(search=self.search.text(),root_id=folder[0] if folder else None,kind=self.kind.currentData() or None,
+                    favorite=self.favorite.isChecked(),folder=folder[1] if folder and folder[1] else None,recursive=self.recursive.isChecked())
+
+    def close_stream(self):
+        if self.stream is not None:self.stream.close();self.stream=None
+
+    def refresh(self,reset=False):
+        """Start the list again. Entries are read from the index on demand (see Library.stream), so a
+        result of any size opens instantly and only what has been scrolled to is ever loaded."""
+        self.icons_built_at=self.icon_edge()
+        bar=self.items.verticalScrollBar();position=bar.value();keep=0 if reset else len(self.page_entries)
+        self.close_stream()
+        filters=self.filters()
+        self.stream=self.library.stream(stacked=self.stack.isChecked(),**filters)
+        self.total=self.library.count(**{k:v for k,v in filters.items()})
+        self.items.clear();self.icon_todo.clear();self.icons_loaded=set();self.icon_timer.stop()
+        self.rows=[];self.row_index={};self.page_entries=[];self.entry_of={};self.item_index={};self.member_index={}
+        if reset:bar.setValue(0)
+        self.append_items(max(self.CHUNK,keep))
+        if position and not reset:QtCore.QTimer.singleShot(0,lambda:bar.setValue(position))   # refreshing keeps the scroll position
+
+    def append_items(self,count):
+        """Add the next items of the current result to the list."""
+        chunk=self.stream.next(count) if self.stream is not None else []
+        if not chunk:
+            self.update_count_label();return
+        # Items appear at once with a flat placeholder; pictures are read a few at a time near the
+        # visible area (schedule_icons), so a huge result never freezes the panel.
+        for entry in chunk:
             row=entry['rep'];members=entry['rows']
-            # Items appear at once with a flat placeholder; pictures are read a few at a time so a big
-            # folder never freezes the panel.
             item=QtWidgets.QListWidgetItem(self.placeholder(row['effective_kind']),self.item_text(members,row,entry['label']))
-            self.icon_todo.append(index)
-            item.setData(ROLE,row);item.setData(STACK_ROLE,[m['id'] for m in members])
+            # Items hold only ids (a whole library can be scrolled through); rows live in row_index.
+            item.setData(ROLE,row['id'])
+            if len(members)>1:item.setData(STACK_ROLE,[m['id'] for m in members])
             item.setToolTip(row['relpath'] if len(members)==1 else f"{entry['label']}: {', '.join(entry['channels'])}")
-            self.items.addItem(item)
-        self.icon_timer.start(0)
-        stacked=len(self.entries)!=len(rows)
-        self.page_label.setText((f'{len(self.entries)} items ({len(rows)} assets)' if stacked else f'{len(rows)} assets')+f'  ·  {self.page+1} / {pages}')
+            index=len(self.page_entries)
+            self.items.addItem(item);self.page_entries.append(entry);self.entry_of[row['id']]=entry;self.item_index[row['id']]=index
+            self.member_index.update({m['id']:index for m in members})
+            self.rows.extend(members);self.row_index.update({m['id']:m for m in members})
+        self.update_count_label();self.schedule_icons()
+
+    def update_count_label(self):
+        more=self.stream is not None and not self.stream.finished
+        self.page_label.setText(f'{self.total} assets'+(f'  ·  showing {len(self.page_entries)} items, scroll for more' if more else ''))
+
+    def capacity(self):
+        """How many items fit in the visible area."""
+        grid=self.items.gridSize();viewport=self.items.viewport()
+        return max(1,viewport.height()//max(1,grid.height()))*max(1,viewport.width()//max(1,grid.width()))
+
+    def maybe_load_more(self):
+        if self.stream is None or self.stream.finished:return
+        bar=self.items.verticalScrollBar()
+        near_end=bar.maximum()>0 and bar.value()>=bar.maximum()-self.items.gridSize().height()*3
+        if near_end or len(self.page_entries)<2*self.capacity():
+            self.append_items(self.CHUNK)
+            self.scroll_timer.start()   # the new items may still not fill the view
+
+    def scrolled(self):
+        self.maybe_load_more();self.schedule_icons()
+
+    def visible_range(self):
+        """(first, last) item index currently on screen, from hit tests on the first column."""
+        count=self.items.count()
+        if not count:return None
+        viewport=self.items.viewport();grid=self.items.gridSize();x=self.items.spacing()+grid.width()//2
+        per_row=1
+        if count>1:
+            a,b=self.items.visualItemRect(self.items.item(0)),self.items.visualItemRect(self.items.item(1))
+            if a.top()==b.top() and b.left()!=a.left():per_row=max(1,viewport.width()//abs(b.left()-a.left()))
+        def probe(top_down):
+            for step in range(0,grid.height()+2*self.items.spacing()+12,6):
+                y=step if top_down else viewport.height()-1-step
+                index=self.items.indexAt(QtCore.QPoint(x,y))
+                if index.isValid():return index.row()
+            return None
+        first,last=probe(True),probe(False)
+        if first is None:first=0
+        first-=first%per_row
+        last=first+self.capacity()-1 if last is None else last-last%per_row+per_row-1
+        return first,max(first,min(last,count-1))
+
+    def schedule_icons(self):
+        """Queue pictures for the visible items and one screen around them; drop the ones far away.
+
+        Only a few screens of pictures are ever held, so scrolling through tens of thousands of assets
+        keeps memory flat.
+        """
+        found=self.visible_range()
+        if found is None:return
+        first,last=found;span=max(self.capacity(),last-first+1);count=self.items.count()
+        near=(max(0,first-span),min(count-1,last+span));far=(first-3*span,last+3*span)
+        for index in [i for i in self.icons_loaded if i<far[0] or i>far[1]]:
+            self.icons_loaded.discard(index)
+            if index<len(self.page_entries):self.items.item(index).setIcon(self.placeholder(self.page_entries[index]['rep']['effective_kind']))
+        wanted=[i for i in range(near[0],near[1]+1) if i not in self.icons_loaded]
+        wanted.sort(key=lambda i:0 if first<=i<=last else min(abs(i-first),abs(i-last)))
+        self.icon_todo=deque(wanted)
+        if wanted:self.icon_timer.start(0)
 
     def placeholder(self,kind):
         icon=self.placeholders.get(kind)
@@ -493,15 +638,15 @@ class LibraryWidget(QtWidgets.QWidget):
         return icon
 
     def load_icons(self):
-        """Read the pictures of the visible page in small slices (about 12 ms each) between events."""
+        """Read pictures in small slices (about 12 ms each) between events."""
         deadline=time.monotonic()+0.012
         while self.icon_todo and time.monotonic()<deadline:
             index=self.icon_todo.popleft()
-            if index>=self.items.count() or index>=len(self.page_entries):continue
+            if index in self.icons_loaded or index>=self.items.count() or index>=len(self.page_entries):continue
             entry=self.page_entries[index]
             icon=self.icon_for(entry['rep'])
             if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
-            self.items.item(index).setIcon(icon)
+            self.items.item(index).setIcon(icon);self.icons_loaded.add(index)
         if self.icon_todo:self.icon_timer.start(0)
 
     def item_text(self,members,rep,label=None):
@@ -511,8 +656,11 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def item_rows(self,item):
         """The assets a list item stands for: one row, or every image of a stack."""
-        rows=[self.row_index[i] for i in (item.data(STACK_ROLE) or []) if i in self.row_index]
-        return rows or [item.data(ROLE)]
+        rows=[self.row_index[i] for i in (item.data(STACK_ROLE) or [item.data(ROLE)]) if i in self.row_index]
+        return rows
+
+    def item_row(self,item):
+        return self.row_index.get(item.data(ROLE))
 
     def stacked_icon(self,icon,count):
         """Card pile with a count badge, so a stack is recognisable at a glance."""
@@ -540,9 +688,6 @@ class LibraryWidget(QtWidgets.QWidget):
     def stack_toggled(self,checked):
         self.settings['stack_pbr']=bool(checked)
         self.safe(self.save_settings);self.reset_page()
-
-    def turn_page(self,delta):
-        self.page=max(0,self.page+delta); self.refresh()
 
     def thumbnail_path(self,row):
         source=Path(row['root_path'])/row['relpath']
@@ -613,7 +758,7 @@ class LibraryWidget(QtWidgets.QWidget):
     def selected(self):
         item=self.items.currentItem()
         if not item:raise ValueError('Select an asset.')
-        return item.data(ROLE)
+        return self.item_row(item)
 
     def selected_rows(self):
         rows={}
@@ -636,7 +781,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.preview.setPixmap(pix if pix is not None else self.icon_for(row).pixmap(512,512))
         display_path=Path(row['relpath']).parent.as_posix() if core.is_usd_package(row) else row['relpath']
         if len(members)>1:
-            entry=next((e for e in self.entries if e['rep']['id']==row['id']),None)
+            entry=self.entry_of.get(row['id'])
             label=entry['label'] if entry else row['label'];channels=', '.join(entry['channels']) if entry else ''
             self.info.setText(f"{label}\nPBR set: {len(members)} images | {sum(m['size'] for m in members)/1048576:.2f} MB\n{channels}")
             self.info.setToolTip(f"{row['root_label']} / {Path(row['relpath']).parent.as_posix()}")
@@ -668,14 +813,11 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def update_metadata_rows(self,aid,**changes):
         if aid in self.row_index:self.row_index[aid].update(changes)
-        for i in range(self.items.count()):
-            item=self.items.item(i);ids=item.data(STACK_ROLE) or []
-            if aid in ids:
-                rep=item.data(ROLE)
-                if rep['id']==aid:rep.update(changes);item.setData(ROLE,rep)
-                members=self.item_rows(item)
-                entry=next((e for e in self.entries if e['rep']['id']==rep['id']),None)
-                item.setText(self.item_text(members,rep,entry['label'] if entry else None))
+        index=self.member_index.get(aid)
+        if index is not None and index<self.items.count():
+            item=self.items.item(index);rep=self.item_row(item)   # row_index already holds the new values
+            entry=self.entry_of.get(rep['id'])
+            item.setText(self.item_text(self.item_rows(item),rep,entry['label'] if entry else None))
 
     def request_info(self,row):
         path=Path(row['root_path'])/row['relpath']
@@ -687,6 +829,10 @@ class LibraryWidget(QtWidgets.QWidget):
         self.info_key=key
         self.info_pending=None;self.info_wanted=None
         if self.info_job:self.info_job.requestInterruption()
+        stamp=f'{key[1]}:{key[2]}';self.info_ids[key]=(row['id'],stamp)
+        if key not in self.info_cache:
+            stored=self.library.info(row['id'],stamp)   # read in an earlier session: no hython needed
+            if stored:self.info_cache[key]=stored
         if key in self.info_cache:
             self.show_info(self.info_cache[key]);return
         self.stats.setText('Reading asset information...')
@@ -707,6 +853,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def info_done(self,key,result):
         self.info_cache[key]=result
+        if 'info' in result and key in self.info_ids:self.library.save_info(*self.info_ids[key],result)   # errors are not kept
         if key==self.info_key:self.show_info(result)
 
     def show_info(self,result):
@@ -851,24 +998,29 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def generate_missing_thumbnails(self):
         if self.missing_scan is not None:return
-        # Checking every asset touches the disk; do it in slices so the panel stays responsive.
-        self.missing_scan={'rows':list(self.rows),'index':0,'count':0}
+        # Checking every asset touches the disk; read the index and check the files in slices so the
+        # panel stays responsive however many assets match.
+        self.missing_scan={'batches':self.library.iter_rows(**self.filters()),'batch':[],'index':0,'count':0,'seen':0}
         QtCore.QTimer.singleShot(0,self.missing_step)
 
     def missing_step(self):
         scan=self.missing_scan
         if scan is None:return
-        rows=scan['rows'];deadline=time.monotonic()+0.015
-        while scan['index']<len(rows) and time.monotonic()<deadline:
-            row=rows[scan['index']];scan['index']+=1
+        deadline=time.monotonic()+0.015
+        while time.monotonic()<deadline:
+            if scan['index']>=len(scan['batch']):
+                scan['batch']=next(scan['batches'],None)
+                if scan['batch'] is None:
+                    self.missing_scan=None
+                    self.status.setText(f"Queued {scan['count']} missing thumbnails. Everything matching the search and folder filters is included.")
+                    return
+                scan['index']=0
+            row=scan['batch'][scan['index']];scan['index']+=1;scan['seen']+=1
             if row['id'] not in self.thumb_pending and not self.thumbnail_path(row):
                 self.thumb_failed.discard(row['id'])
                 self.queue_thumbnail(row,geometry=True);scan['count']+=1
-        if scan['index']<len(rows):
-            self.status.setText(f"Checking thumbnails... {scan['index']} / {len(rows)}")
-            QtCore.QTimer.singleShot(0,self.missing_step);return
-        self.missing_scan=None
-        self.status.setText(f"Queued {scan['count']} missing thumbnails. All pages matching the search and folder filters are included.")
+        self.status.setText(f"Checking thumbnails... {scan['seen']} / {self.total}")
+        QtCore.QTimer.singleShot(0,self.missing_step)
 
     def cancel_thumbnails(self):
         self.missing_scan=None
@@ -882,10 +1034,11 @@ class LibraryWidget(QtWidgets.QWidget):
         if error:
             self.thumb_failed.add(aid);self.status.setText('Thumbnail failed: '+error)
         else:
-            for i in range(self.items.count()):
-                item=self.items.item(i);row=item.data(ROLE)
-                if row['id']==aid:item.setIcon(self.icon_for(row))
-            self.selection_changed()
+            index=self.item_index.get(aid)
+            if index is not None:   # reload the picture through the normal (sliced) path
+                self.icons_loaded.discard(index);self.icon_todo.appendleft(index);self.icon_timer.start(0)
+            current=self.items.currentItem()
+            if current is not None and current.data(ROLE)==aid:self.selection_changed()
             self.status.setText(f'Thumbnail complete ({len(self.thumb_queue)} remaining)')
 
     def copy_path(self):

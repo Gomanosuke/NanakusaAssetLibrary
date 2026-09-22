@@ -30,7 +30,7 @@
 - 画像を引き延ばさず、黒帯を画素へ焼き込まない。OIIOのdata windowとdisplay windowの違いに注意する。
 - 形状生成は別プロセスのhython / Karma CPUを使用し、ユーザーの作業HIPにレンダー用ノードを残さない。
 - 再生成に失敗しても既存サムネイルを失わないよう、一時ファイルの成功確認後に置換する。
-- 不足分の一括生成は検索条件に一致する全ページが対象。既存画像をスキップし、中止操作を維持する。
+- 不足分の一括生成は検索条件に一致する全素材が対象（Library.iter_rowsで索引をスライス読み）。既存画像をスキップし、中止操作を維持する。
 
 ## D&DとUI
 
@@ -66,7 +66,11 @@
 
 - UIスレッドで、素材数に比例する処理・ディスクの走査・画像の一括デコードをしない。目安: 2.8万ファイルの合成ライブラリー（tests外のベンチ）でfolder切替が20ms台、初期表示が0.5秒以内。
 - フォルダー一覧は索引のfoldersテーブルから読む（Library.folders）。スキャンが更新し、パネルでの作成・移動はadd_folder / relocate(folder_moves)で反映する。旧版の索引でテーブルが空の時だけ、一度ディスクをたどって保存する。
-- 一覧はfolder指定のSQL範囲検索（relpathの前方一致、'/'の次の'0'が上限）で絞る。全件を読んでPythonで絞らない。移動処理も対象フォルダー分だけを索引から読む（assets_by_ids、assets(folder=)）。
+- 一覧はLibrary.stream（EntryStream）で、ラベル順の索引（asset_order）から必要な件数だけ読む。直前のキー（label, relpath, root_id）より後ろを短い接続で読むため、DB接続や読み取りトランザクションを開いたままにしない（開いたままだとWALが縮まず、閉じる時にUIが数秒止まる。Windowsではファイルも掴む）。ページ分けはせず、スクロールでappend_itemsが続きを足す（CHUNK件ずつ）。全件を読んでPythonで絞らない・数えない（総数はLibrary.count）。フォルダー指定はrelpathの前方一致（'/'の次の'0'が上限）か、非再帰はfolder/pkg列。移動処理も対象フォルダー分だけを索引から読む（assets_by_ids、assets(folder=)）。
+- 列・索引の追加はLibrary._migrate（PRAGMA user_version）で行い、旧索引を一度だけ変換する。
+- 画像は表示位置の前後1画面分だけ持ち（schedule_icons）、3画面より遠いものは捨てる。アイテムにはrowを持たせずid（ROLE）だけにする。
+- フォルダーツリーは開いた階層だけアイテムを作る（populate / ensure_item。閉じたフォルダーはplaceholderの子を持つ）。
+- スキャンは別プロセス（scan_worker.py、Houdini同梱のPython）。QThreadの中ではhouを呼ばない（ジョブのコンストラクターで必要な値を取っておく）。補助プロセスはui.background()で低優先度にする。素材情報はinfoテーブルにも保存し、同じ素材ではhythonを再起動しない。
 - 一覧の画像はload_iconsで12msずつ読み込む。refresh内で画像を読まない。ディスクを触る処理（サムネイルの存在確認など）は同様にスライスする。
 - 判定の重い純Python処理（pbr._find / stack_info）はキャッシュする。正規表現の前に部分文字列で絞る。
 - スキャンはos.walkの文字列パスとlstatで行う（Pathオブジェクトを大量に作らない）。SQLiteはWAL（読み手はスキャン中も止まらない。ローカルディスク前提）。
@@ -88,7 +92,7 @@
 
 ## PBRスタックとマテリアル配置
 
-- スタックの判定はpbr.stack_entriesに集約する。一覧の項目はSTACK_ROLEに所属する素材IDを持ち、選択・D&D・メタデータ保存は必ず全画像へ展開する。self.rowsは全画像のまま保ち、ページ分割だけをスタック単位で行う。
+- スタックはスキャン時にassetsのstack/channel/gkey列へ決める（Library.derive。同じフォルダー・同じキー（解像度込み）で2枚以上かつチャンネルが重複しない場合のみ）。一覧はEntryStreamがgkeyでメンバーを引いてpbr.group_entriesでエントリーにする。一覧の項目はROLEに代表のid、スタックのみSTACK_ROLEに全idを持つ。選択・D&D・メタデータ保存は必ず全画像へ展開する（item_rows）。self.rows / row_indexは読み込み済みの分だけ。
 - チャンネルはファイル名の最後のトークンで決める。identify（材質作成）とstack_info（表示）で同じ判定を使う。
 - マテリアルのノード配置はhoudini_ops._layout_materialに集約する。Imageノードは同一x・等間隔、変換ノードは元のImageと同じ高さ。既存ノードは動かさない。
 

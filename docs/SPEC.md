@@ -3,7 +3,7 @@
 開発者・エージェント向けの現行仕様です。利用者向けの説明は [README.md](../README.md)、作業ルールは [AGENTS.md](../AGENTS.md) を参照してください。
 仕様を変更したら、このファイルと README.md（利用者向けの表現）の両方を実装と揃えます。
 
-現在のバージョンは **0.9.1** です。
+現在のバージョンは **0.10.0** です。
 
 ## コードとデータの分離
 
@@ -159,7 +159,7 @@ Textureの一覧では、同じ素材の画像（albedo・roughness・normalな�
 GUIは英語です。右側には大きな正方形プレビューと素材情報を常時表示します。
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
-Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで表示ページ内を全選択できます。
+Ctrlで追加選択、Shiftで範囲選択、Ctrl+Aで読み込み済みの素材を全選択できます（一覧はページ分けせず、スクロールで続きを読み込む）。
 素材一覧でCtrl+マウス中ボタンをドラッグすると、アイコンサイズを変更できます（右・上へ動かすと大きく、左・下へ動かすと小さくなります。64〜512px）。
 サイズは`settings.json`に保存し、次回も引き継ぎます。256pxを超える場合は、鮮明に表示するため一覧を作り直します。
 D&D・Copy Paths・Generate Selected Thumbnailsは選択した全素材が対象です。
@@ -239,7 +239,7 @@ USD仕様全体で必須のファイル名という意味ではありません�
 素材の隣へ書き込める権限が必要です。生成失敗時は既存サムネイルを保持します。
 
 USD・3DModelは右クリックの「Generate Selected Thumbnails」で作成できます。
-「Libraries... → Generate Missing Thumbnails」は、現在の検索・フォルダー・種類の条件に一致する全ページの不足分を順番に処理します。
+「Libraries... → Generate Missing Thumbnails」は、現在の検索・フォルダー・種類の条件に一致する全素材の不足分を順番に処理します。
 既存サムネイルがある素材は一括生成でスキップします。「Libraries... → Cancel Thumbnails」で待機分を解除できます。
 
 形状のサムネイルは別プロセスのhythonとKarma CPUで512×512にレンダリングします。
@@ -290,7 +290,8 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.9.1ではHoudini 22.0.447 / Windowsで86件のテストが通過しました。
+0.10.0ではHoudini 22.0.447 / Windowsで96件のテストが通過しました。
+約11万ファイルの合成ライブラリーでの測定値: パネルを開く0.14秒、フォルダー切替・全体表示0.03秒、スクロールで200件追加が約3ミリ秒（DB）、スキャン約7秒（別プロセス。その間、UIのイベントループは最大でも0.1秒未満）。
 移動（`organize.py`）は標準Pythonでも検証できます。
 Scene Viewへのドロップ抑止は、実機のマウス操作では未検証です（イベントフィルターの判定のみテスト済み）。
 保存先・サムネイルの回帰に加え、複数MIME、Merge表示、失敗時の復旧、PBR共有UVと既存出力・配置の保持を検証しています。
@@ -305,6 +306,7 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `core.py` | 固定分類の走査、SQLite、メタデータ |
 | `organize.py` | 素材・フォルダーの移動（サムネイル同梱、失敗時の巻き戻し） |
 | `storage.py` | dataの決定、サムネイルの保存先・検出（USDZ内プレビューのキャッシュ先を含む） |
+| `scan_worker.py` | 別プロセス（Houdini同梱のPython）で1つのライブラリーをスキャン |
 | `embedded.py` | `.usdz`内のプレビュー画像の検出と取り出し（標準はUsdMediaAssetPreviewsAPI、慣用名は`thumbnail`/`preview`/`Thumbnails`/`.thumbs`） |
 | `ui.py` | パネル、正方形プレビュー、生成キュー |
 | `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定、フォルダーツリー |

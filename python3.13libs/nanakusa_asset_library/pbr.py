@@ -78,26 +78,17 @@ def stack_info(relpath):
     label=clean(stem[:match[1]]+'_'+stem[match[2]:]) or Path(relpath).parent.name
     return Path(relpath).parent.as_posix().lower(),label.lower(),label,channel
 
-def stack_entries(rows,enabled=True):
-    """Group texture rows that are channels of one PBR set into stacks.
+def group_entries(members):
+    """List entries for the rows of one candidate stack (already in list order).
 
-    Returns entries in list order: {'rows': [...], 'rep': row, 'label': str, 'channels': [...]}.
-    A stack needs two or more images with distinct channels; anything else stays single.
+    Two or more images with distinct, recognised channels become a stack whose representative is the
+    base color image; anything else stays single. Returns {'rows','rep','label','channels'} entries.
     """
-    groups={};order=[]
-    for row in rows:
-        info=stack_info(row['relpath']) if enabled and row['kind']=='texture' else None
-        key=(row['root_id'],)+info[:2] if info else ('single',row['id'])
-        if key not in groups:groups[key]=[];order.append(key)
-        groups[key].append((row,info))
-    entries=[]
-    for key in order:
-        members=groups[key]
-        channels=[info[3] for row,info in members if info]
-        if key[0]!='single' and len(members)>=2 and len(set(channels))==len(channels):
-            rep=next((row for row,info in members if info[3]=='base_color'),members[0][0])
-            ordered=sorted(members,key=lambda m:list(ALIASES).index(m[1][3]))
-            entries.append({'rows':[row for row,info in ordered],'rep':rep,'label':members[0][1][2],'channels':[info[3] for row,info in ordered]})
-        else:
-            entries.extend({'rows':[row],'rep':row,'label':row['label'],'channels':[]} for row,info in members)
-    return entries
+    infos=[stack_info(m['relpath']) for m in members]
+    channels=[i[3] for i in infos if i]
+    if len(members)>=2 and all(infos) and len(set(channels))==len(channels):
+        order=list(ALIASES)
+        paired=sorted(zip(members,infos),key=lambda p:order.index(p[1][3]))
+        rep=next((m for m,i in paired if i[3]=='base_color'),paired[0][0])
+        return [{'rows':[m for m,i in paired],'rep':rep,'label':infos[0][2],'channels':[i[3] for m,i in paired]}]
+    return [{'rows':[m],'rep':m,'label':m['label'],'channels':[]} for m in members]

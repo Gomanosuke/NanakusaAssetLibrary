@@ -186,6 +186,7 @@ def install():
 class AssetList(QtWidgets.QListWidget):
     MIN_ICON, MAX_ICON = 64, 512
     iconSizeFinished = QtCore.Signal(int)
+    resized = QtCore.Signal()
 
     def __init__(self, library, parent=None):
         super().__init__(parent)
@@ -194,6 +195,10 @@ class AssetList(QtWidgets.QListWidget):
         self.setDragEnabled(True)
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragOnly)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
 
     def apply_icon_size(self, size):
         size=max(self.MIN_ICON,min(self.MAX_ICON,int(size)))
@@ -225,7 +230,7 @@ class AssetList(QtWidgets.QListWidget):
 
     def expand(self, item):
         """Rows an item stands for; the library widget expands a PBR stack into its images."""
-        return [item.data(QtCore.Qt.ItemDataRole.UserRole)]
+        return []   # the library widget supplies the rows (it knows the ids)
 
     def startDrag(self, actions):
         items=self.selectedItems()
