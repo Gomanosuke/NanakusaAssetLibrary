@@ -1,5 +1,5 @@
 from pathlib import Path
-import json,sys,tempfile,unittest
+import json,sys,tempfile,time,unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 from hutil.PySide import QtWidgets
@@ -33,6 +33,29 @@ class LibraryUiTests(unittest.TestCase):
             self.assertTrue(widget.library.backup_index().parent.samefile(base/'data'/'backups'))
             widget.close();widget.deleteLater()
 
+    def test_folder_tree_migrates_older_indexes_in_the_background(self):
+        # An index made before the scan recorded folders has none yet; rebuild_tree must not walk
+        # the disk itself (that froze the panel on a real library) - a background job fills it in.
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            p=root/'3DModel'/'Sub'/'table.obj';p.parent.mkdir(parents=True,exist_ok=True);p.write_text('placeholder')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            rid=widget.library.roots()[0]['id'];widget.library.scan(rid)
+            widget.library.set_folders(rid,[])   # simulate an older index: scanned, but no folders recorded
+            started=time.monotonic();widget.rebuild_tree();elapsed=time.monotonic()-started
+            self.assertLess(elapsed,0.5,'rebuild_tree walked the disk inline instead of backgrounding it')
+            self.assertIn(rid,widget.folder_migrations)
+            job=next(j for j in ui._jobs if isinstance(j,ui.FolderMigrationJob) and j.root['id']==rid)
+            self.assertTrue(job.wait(5000),'background folder migration did not finish')
+            for _ in range(20):
+                self.app.processEvents()
+                if rid not in widget.folder_migrations:break
+                time.sleep(0.05)
+            self.assertNotIn(rid,widget.folder_migrations)
+            self.assertIn('3DModel/Sub',widget.library.folders(rid))
+            self.assertIn('3DModel/Sub',widget.folder_kids[rid].get('3DModel',[]))
+            widget.close();widget.deleteLater()
+
     def test_tree_drops_move_assets_and_folders_keeping_metadata(self):
         from hutil.PySide import QtCore,QtGui
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
@@ -42,6 +65,7 @@ class LibraryUiTests(unittest.TestCase):
             (root/'3DModel'/'Props').mkdir()
             widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
             rid=widget.library.roots()[0]['id'];widget.library.scan(rid);widget.refresh()
+            widget.rebuild_tree()   # scan() already recorded the folders; no need to wait for the background walk
             chair=next(r for r in widget.rows if r['label']=='chair');widget.library.update(chair['id'],tags='oak',favorite=1);widget.refresh()
             def target(rel):
                 item=widget.ensure_item(rid,rel);parent=item.parent()
@@ -256,9 +280,15 @@ class LibraryUiTests(unittest.TestCase):
                 widget.library.add_folder(widget.library.roots()[0]['id'],'3DModel/Fresh');widget.rebuild_tree()
             rid=widget.library.roots()[0]['id']
             self.assertIsNotNone(widget.ensure_item(rid,'3DModel/Fresh'));self.assertIsNotNone(widget.ensure_item(rid,'3DModel/g3'));self.assertIsNone(widget.ensure_item(rid,'3DModel/nope'))
-            # An index made by an older version has no folder list: walk once and remember it.
+            # An index made by an older version has no folder list: a background walk fills it in once,
+            # without blocking rebuild_tree itself (see FolderMigrationJob).
             widget.library.set_folders(rid,[])
-            widget.rebuild_tree();self.assertIn('3DModel/g0',widget.library.folders(rid))
+            widget.rebuild_tree()
+            job=next(j for j in ui._jobs if isinstance(j,ui.FolderMigrationJob) and j.root['id']==rid)
+            self.assertTrue(job.wait(5000))
+            steps=0
+            while rid in widget.folder_migrations and steps<200:self.app.processEvents();steps+=1
+            self.assertIn('3DModel/g0',widget.library.folders(rid))
             widget.refresh();widget.generate_missing_thumbnails()
             self.assertIsNotNone(widget.missing_scan)
             steps=0

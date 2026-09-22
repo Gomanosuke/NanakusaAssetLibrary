@@ -34,7 +34,7 @@ def is_usd_package(row):
     return row['kind']=='usd' and not (path.suffix.lower()=='.usdz' and
         (len(path.parts)==2 or path.stem.lower()!=path.parent.name.lower()))
 
-def visible_folders(base):
+def visible_folders(base, cancel=lambda: False):
     """Only the three genres; USD package contents are opaque."""
     base = Path(base)
     result = []
@@ -44,6 +44,8 @@ def visible_folders(base):
         if not start.is_dir():
             continue
         for folder, dirs, _ in os.walk(start, followlinks=False):
+            if cancel():
+                return result
             dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not (Path(folder)/d).is_symlink())
             if Path(folder) != start:
                 result.append(Path(folder).relative_to(base).as_posix())

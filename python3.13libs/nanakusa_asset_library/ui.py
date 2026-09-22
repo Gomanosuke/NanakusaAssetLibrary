@@ -3,6 +3,7 @@ from collections import OrderedDict, deque
 from pathlib import Path
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -221,6 +222,30 @@ class GeometryThumbnailJob(QtCore.QThread):
         except Exception as exc:
             self.done.emit(self.asset_id, '', str(exc))
 
+class FolderMigrationJob(QtCore.QThread):
+    """One-time folder listing for an index made before folders were recorded by the scan.
+
+    Walking a large asset tree can take a while; doing it here keeps that walk off the UI thread
+    (see LibraryWidget.folder_paths, which used to do this walk inline and could freeze the panel).
+    """
+    done = QtCore.Signal(str)
+    def __init__(self, library, root):
+        super().__init__()
+        self.library, self.root = library, root
+
+    def run(self):
+        # Always emit done, even on failure or cancellation, so the widget's bookkeeping
+        # (folder_migrations) never gets stuck thinking a migration is still in flight.
+        try:
+            rels = core.visible_folders(self.root['path'], cancel=self.isInterruptionRequested)
+            if not self.isInterruptionRequested():
+                self.library.set_folders(self.root['id'], rels)
+        except (OSError, sqlite3.Error):
+            pass
+        finally:
+            self.done.emit(self.root['id'])
+
+
 def _keep_job(job):
     _jobs.add(job)
     job.finished.connect(lambda: _jobs.discard(job))
@@ -280,7 +305,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.thumb_failed = set()
         self.thumb_job = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
-        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
+        self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
         self.info_wanted=None;self.info_timer=QtCore.QTimer(self);self.info_timer.setSingleShot(True);self.info_timer.setInterval(250);self.info_timer.timeout.connect(self.start_info)
         self.missing_scan=None
@@ -297,7 +322,11 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def closeEvent(self,event):
         for timer in (self.scroll_timer,self.icon_timer,self.info_timer,self.folder_timer,self.search_timer):timer.stop()
-        self.missing_scan=None;self.close_stream();super().closeEvent(event)
+        self.missing_scan=None;self.close_stream()
+        # A folder migration only reads/writes the index; stop it and wait briefly so it never
+        # outlives a data directory that is about to be moved or removed (as in tests' temp dirs).
+        for job in list(self.folder_migration_jobs.values()):job.requestInterruption();job.wait(2000)
+        super().closeEvent(event)
 
     def event(self,event):
         # Houdini's Python Panel can retain keyboard focus on the root widget.
@@ -469,11 +498,29 @@ class LibraryWidget(QtWidgets.QWidget):
         return item
 
     def folder_paths(self,root):
-        """Folders of a library from the index; walk the disk only once for an index made by an older version."""
+        """Folders of a library from the index; an index made by an older version has none yet.
+
+        That first listing is filled in by a background walk (see start_folder_migration) instead
+        of walking the disk here, so opening the tree never blocks on how large the library is.
+        """
         rels=set(self.library.folders(root['id']))
         if not rels and Path(root['path']).is_dir():
-            rels=set(core.visible_folders(root['path']));self.library.set_folders(root['id'],rels)
+            self.start_folder_migration(root)
         return rels|set(core.GENRES)
+
+    def start_folder_migration(self,root):
+        rid=root['id']
+        if rid in self.folder_migrations:return
+        self.folder_migrations.add(rid)
+        job=FolderMigrationJob(self.library,root)
+        job.done.connect(self.folder_migration_done)
+        self.folder_migration_jobs[rid]=job
+        _keep_job(job);job.start()
+
+    def folder_migration_done(self,rid):
+        self.folder_migrations.discard(rid)
+        self.folder_migration_jobs.pop(rid,None)
+        self.safe(self.rebuild_tree)
 
     def select_folder(self,value):
         item=self.ensure_item(value[0],value[1])
