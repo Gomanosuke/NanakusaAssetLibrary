@@ -638,16 +638,18 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(restored.catalogs.currentText(),'Props.db')
             restored.close();restored.deleteLater()
 
-    def test_open_catalog_uses_the_asset_gallery_data_source_not_the_layout_one(self):
-        # hou.ui has two similarly named setters. setSharedLayoutDataSource feeds the Labs Layout
-        # tool's own gallery, not the 'asset_gallery' Python Panel interface open_catalog() shows;
-        # calling it left that interface without a data source (it fell back to a blank
-        # placeholder) and froze every native Houdini menu/popup in the session - confirmed live
-        # in a disposable Houdini instance, and fixed by calling setSharedAssetGalleryDataSource
-        # instead. hou.ui does not exist in batch hython, so it is mocked here (create=True) to
-        # check open_catalog() calls the right one without needing a live UI session.
-        # ignore_cleanup_errors: hou.AssetGalleryDataSource (used indirectly by catalog_path's
-        # .db file) keeps the file open past this test, same as elsewhere in this suite.
+    def test_open_catalog_shows_manual_instructions_instead_of_the_call_that_freezes_houdini(self):
+        # hou.ui.setSharedLayoutDataSource(hou.AssetGalleryDataSource(...)) is the call SideFX's
+        # own Asset Gallery menu uses (AssetGallerySourceMenu.xml) - it is the *correct* API,
+        # unlike setSharedAssetGalleryDataSource (a different, unrelated call this method used to
+        # make by mistake, which just raised a TypeError). But live-testing in a disposable
+        # Houdini 22.0.447 instance showed setSharedLayoutDataSource itself, called alone with no
+        # pane ever created, reliably freezes every native Houdini menu/popup in the session
+        # (confirmed repeatedly; this panel's own Qt menus were unaffected). Creating the
+        # 'asset_gallery' Python Panel interface's pane, floating or docked, does not avoid it
+        # either. This is a Houdini engine bug, not fixable here, so open_catalog() no longer
+        # calls any of it - only checks this. hou.ui does not exist in batch hython, so it is
+        # mocked (create=True) to prove open_catalog() never touches it.
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             base=Path(folder);root=base/'asset';root.mkdir()
             widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
@@ -656,9 +658,13 @@ class LibraryUiTests(unittest.TestCase):
             fake_ui=MagicMock()
             with patch.object(ui.hou,'ui',fake_ui,create=True):
                 widget.open_catalog()
-            fake_ui.setSharedAssetGalleryDataSource.assert_called_once()
             fake_ui.setSharedLayoutDataSource.assert_not_called()
-            fake_ui.curDesktop.return_value.createFloatingPaneTab.assert_called_once_with(ui.hou.paneTabType.PythonPanel)
+            fake_ui.setSharedAssetGalleryDataSource.assert_not_called()
+            fake_ui.curDesktop.assert_not_called()
+            fake_ui.displayMessage.assert_called_once()
+            message=fake_ui.displayMessage.call_args.args[0]
+            self.assertIn(str(widget.catalog_path()),message)
+            self.assertIn('Asset Catalog',message)
             widget.close();widget.deleteLater()
 
 if __name__=='__main__':unittest.main()

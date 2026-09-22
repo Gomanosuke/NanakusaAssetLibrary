@@ -313,8 +313,9 @@ Sketchfab等のパックは、同じ原点付近に複数の独立したトッ�
 選択欄を右クリックすると「Open Catalog」「Select Catalog...」「New Catalog...」を使用できます。
 「Select Catalog...」では別の場所の既存DBも指定でき、「New Catalog...」は空のDBを作成します。既存ファイルは上書きしません。
 選択はライブラリールートごとに保存されます。ルート内のDBは相対パスで記録します。
-「Add Catalog」は選択中のDBへの登録で、「Open Catalog」でそのDBをHoudiniのAsset Catalogとして開きます。
-`open_catalog`は`hou.AssetGalleryDataSource`を`hou.ui.setSharedAssetGalleryDataSource`で渡してから、Python Panelインターフェース`asset_gallery`をフローティングペインで開く。**`setSharedLayoutDataSource`（似た名前の別関数、Labs Layoutツール用）を誤って呼ぶと**、`asset_gallery`インターフェースがデータソースを持てず空の「Quick Start」プレースホルダーにフォールバックし、以後セッション内のHoudiniネイティブなメニュー・ポップアップ（自作のNanakusaAssetLibraryパネル自身のメニューは除く）が一切反応しなくなる（要Houdini再起動）。使い捨てのhoudinifx.exeインスタンスで実際に再現・修正確認済み（2026-09-23）。
+「Add Catalog」は選択中のDBへの登録です。「Open Catalog」はスクリプトからは開かず、代わりに手動での開き方（パネルの「+」→Python Panel→Asset Catalog→そのパネル自身のメニュー→Open Asset Database File...→対象のDBパス）を`hou.ui.displayMessage`で案内するだけです。
+理由: HoudiniのAsset Gallery/Asset Catalogネイティブメニュー（`$HFS/houdini/AssetGallerySourceMenu.xml`）は`hou.ui.setSharedLayoutDataSource(hou.AssetGalleryDataSource(...))`を使っており、`asset_gallery`というPython Panelインターフェース（ラベル「Asset Catalog」、`layout/assetgallery.py`）も`hou.qt._createAssetGallery()`を引数無しで呼ぶことから、このAPIが正しい呼び先だと確認済み。似た名前の`setSharedAssetGalleryDataSource(source, gallery_name)`は別物で、組み込みの`'layout'`（Paint Instances LOP）/`'material'`（Material LOP）専用のギャラリーにしか使えず、`gallery_name`必須のため以前の実装ではTypeErrorになっていた。
+**しかし実機検証の結果、`hou.ui.setSharedLayoutDataSource`自体を呼ぶだけで（ペインを一切作らなくても）、以後セッション内のHoudiniネイティブなメニュー・ポップアップ（自作のNanakusaAssetLibraryパネル自身のメニューは除く）が一切反応しなくなる（要Houdini再起動）ことを、使い捨てのhoudinifx.exeインスタンスで何度もクリーンな前後比較を行い確認した。** `createFloatingPaneTab`（フローティング）・`Pane.createTab`（ドッキング）のどちらでペインを作っても症状は同じ。Houdini 22.0.447自体のエンジンバグと判断し、この呼び出し自体を行わないことにした（2026-09-23調査）。
 未作成の標準DBには「(new)」を表示し、最初のAdd Catalogで作成します。
 旧`_catalog`内のDBは`Catalog`へ移してRescanするか、Select Catalogで指定してください。自動移動・削除は行いません。
 

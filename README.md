@@ -209,6 +209,7 @@ proxy（`purpose=proxy`）が無いUSDは、Scene Viewでも重いレンダー�
 ## USD / Asset Catalog
 
 - 左下の **Catalog** 選択欄で、登録先のカタログを選びます。素材フォルダーの `Catalog` フォルダー内のデータベースが自動で見つかります。選択欄を右クリックすると、**Open Catalog** / **Select Catalog...** / **New Catalog...** が使えます。
+  - **Open Catalog** は、Houdini 22.0.447の既知の不具合（スクリプトから`hou.ui.setSharedLayoutDataSource`を呼ぶとHoudiniのメニューが全て反応しなくなる）を避けるため、自動でパネルを開く代わりに手順を案内するダイアログを表示します。案内に従って、Houdiniの「+」ボタン→Python Panel→Asset Catalog→そのパネル自身のメニュー→Open Asset Database File...から、表示されたパスのDBを手動で開いてください。
 - USDを選んで右クリックの **Add Catalog** で登録します。複数のUSDをまとめて登録できます。同じパスの重複は登録されません。
 - 右クリックの **Publish Static USD...** は、素材単体の現在のフレームをUSDとして書き出します。元の画像への参照は書き換わらないので、画像も一緒に共有してください。
 - 外部の画像を参照するUSDを他のPCへ渡すときは、その画像と相対パスも保ってください。

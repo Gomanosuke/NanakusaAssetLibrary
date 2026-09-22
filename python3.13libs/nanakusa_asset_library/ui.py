@@ -1546,18 +1546,32 @@ class LibraryWidget(QtWidgets.QWidget):
     def open_catalog(self):
         path=self.catalog_path()
         if not path.exists():raise ValueError('Add a USD asset to the Catalog first.')
-        source=hou.AssetGalleryDataSource(path.as_posix())
-        # hou.ui has two similarly-named setters: setSharedLayoutDataSource feeds the Labs Layout
-        # tool's own gallery, not this one. Calling it here (instead of
-        # setSharedAssetGalleryDataSource) left the 'asset_gallery' Python Panel interface with no
-        # data source of its own: it silently fell back to its blank "Quick Start" placeholder, and
-        # every native Houdini menu/popup elsewhere in the session stopped responding to clicks
-        # (custom Qt widgets, including this panel's own menus, were unaffected) until the session
-        # was restarted. Regression-tested live: reproduced with setSharedLayoutDataSource, confirmed
-        # fixed with setSharedAssetGalleryDataSource, in a disposable Houdini instance.
-        hou.ui.setSharedAssetGalleryDataSource(source)
-        pane=hou.ui.curDesktop().createFloatingPaneTab(hou.paneTabType.PythonPanel)
-        pane.setActiveInterface(hou.pypanel.interfaceByName('asset_gallery'))
+        # hou.ui.setSharedLayoutDataSource(hou.AssetGalleryDataSource(...)) is the exact call
+        # SideFX's own Asset Gallery menu uses to point the built-in 'asset_gallery' Python Panel
+        # interface (labelled "Asset Catalog") at a database - see
+        # $HFS/houdini/AssetGallerySourceMenu.xml and python3.13libs/layout/assetgallery.py, which
+        # confirm setSharedAssetGalleryDataSource(source, gallery_name) is a different, unrelated
+        # API (it only feeds the 'layout'/'material' node-parameter browsers, not this panel; an
+        # earlier version of this method called it, which was wrong and just raised a TypeError).
+        #
+        # setSharedLayoutDataSource is correct, but live-testing (many isolated before/after
+        # comparisons in a disposable Houdini 22.0.447 instance, restarted between each) showed
+        # that call alone - with no pane ever created - reliably leaves every native Houdini
+        # menu/popup in the session unresponsive until Houdini is restarted (this panel's own Qt
+        # menus keep working; every native one does not). Creating the interface's pane, whether
+        # floating (createFloatingPaneTab) or docked (Pane.createTab), does not avoid it either.
+        # This looks like a genuine Houdini 22.0.447 engine bug in this exact call, not something
+        # fixable from a Python Panel, so this no longer attempts it - the same result is one
+        # native, unscripted UI action away.
+        hou.ui.displayMessage(
+            'Houdini 22.0.447 has a bug: calling hou.ui.setSharedLayoutDataSource() from a script '
+            '(what "Open Catalog" used to do) freezes every native menu in the session until '
+            'Houdini is restarted. Open the same Asset Catalog by hand instead - this uses only '
+            "Houdini's own UI and does not hit the bug:\n\n"
+            '1. Click the "+" on any pane tab row, then Python Panel > Asset Catalog.\n'
+            '2. In that panel, use its own menu (top right) > Open Asset Database File...\n'
+            '3. Choose this file:\n' + str(path),
+            title='Open Catalog')
 
     def publish_asset(self):
         row=self.selected(); path=self.library.resolve(row)
