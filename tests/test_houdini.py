@@ -112,6 +112,10 @@ class HoudiniTests(unittest.TestCase):
         self.assertEqual(node.parm('variantnameindex1').eval(),0)
         # the switch is the new terminal node: still exactly one mesh visible downstream of it
         self.assertEqual(UsdGeom.Imageable(node.stage().GetPrimAtPath('/assets/test_asset/Root/a')).ComputeVisibility(),'inherited')
+        # laid out straight below its Reference, not beside it
+        reference=node.inputs()[0]
+        self.assertAlmostEqual(node.position()[0],reference.position()[0])
+        self.assertAlmostEqual(node.position()[1],reference.position()[1]-ops.CHAIN_STEP)
 
     def test_variant_switch_node_is_not_added_without_a_variant_or_without_the_flag(self):
         node=self.load(self.obj,'model')   # unrelated kind: never eligible

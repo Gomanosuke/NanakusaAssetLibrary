@@ -200,6 +200,22 @@ def _source_prim(path):
         return str(roots[0].GetPath())
     raise ValueError('Multiple root prims and no defaultPrim. Use USD Sublayer mode, or author a defaultPrim first.')
 
+CHAIN_STEP = 1.0   # vertical distance between nodes one import wires in a row (network units)
+
+def import_chain(node, created):
+    """The nodes one import made that feed `node` through first inputs, top first and `node` last
+    (e.g. Reference -> Set Variant). Stops at a node the import did not create (an upstream LOP)."""
+    chain = [node]
+    while chain[0].inputs() and chain[0].inputs()[0] in created and chain[0].inputs()[0] not in chain:
+        chain.insert(0, chain[0].inputs()[0])
+    return chain
+
+def place_chain(chain, top):
+    """Put the first node of `chain` at `top` and each following node straight below it."""
+    import hou
+    for i, node in enumerate(chain):
+        node.setPosition(top + hou.Vector2(0, -i * CHAIN_STEP))
+
 def _add_variant_switch(parent, node):
     """Insert a Set Variant LOP after `node` if its composed stage has an "element" variant set
     (from element_gen.py), pre-wired to the branch prim so a drag-and-dropped multi-object pack
@@ -335,9 +351,14 @@ def import_asset(path, kind, label, target='/stage', upstream=None, usd_mode='re
                     node = assign
             else:
                 raise ValueError('Unsupported asset kind: ' + kind)
-            for created in set(parent.children()) - before:
+            made = set(parent.children()) - before
+            for created in made:
                 created.setUserData('sal_source', p.as_posix())
                 created.moveToGoodPosition()
+            # Nodes wired after the first one (Set Variant, Assign Material) go straight below it,
+            # not wherever moveToGoodPosition found room (which was beside it).
+            chain = import_chain(node, made)
+            place_chain(chain, chain[0].position())
             # Cook now: report actual import errors, do not leave a misleading success.
             stage = node.stage()
             if stage is None or node.errors():

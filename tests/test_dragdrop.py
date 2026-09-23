@@ -54,6 +54,27 @@ class DropTests(unittest.TestCase):
             dd.import_payloads([tagged,untagged,no_tags_key],self.lop)
         self.assertEqual([call[4] for call in calls],[True,False,False])
 
+    def test_dropped_variant_pack_puts_set_variant_below_its_reference(self):
+        pack=self.root/'pack.usda';s=Usd.Stage.CreateNew(str(pack));root=UsdGeom.Xform.Define(s,'/Root')
+        for name in ('a','b'):UsdGeom.Mesh.Define(s,f'/Root/{name}')
+        vset=root.GetPrim().GetVariantSets().AddVariantSet('element')
+        for i in range(2):vset.AddVariant(f'Element{i}')
+        vset.SetVariantSelection('Element0');s.SetDefaultPrim(root.GetPrim());s.GetRootLayer().Save()
+        plain=self.root/'plain.usda';p=Usd.Stage.CreateNew(str(plain));x=UsdGeom.Xform.Define(p,'/x');p.SetDefaultPrim(x.GetPrim());p.GetRootLayer().Save()
+        variant={'kind':'usd','path':str(pack),'label':'pack','tags':'variant'}
+        switch,=dd.import_payloads([variant],self.lop,hou.Vector2(10,-4))
+        reference=switch.inputs()[0]
+        self.assertEqual(switch.type().name(),'setvariant')
+        self.assertEqual(tuple(reference.position()),(10.0,-4.0))   # the Reference sits at the drop point
+        self.assertEqual(tuple(switch.position()),(10.0,-4.0-dd.ops.CHAIN_STEP))   # its Set Variant straight below
+        # several at once: every chain keeps its own column, rows and the merge leave room for the chains
+        nodes=dd.import_payloads([variant,{'kind':'usd','path':str(plain),'label':'plain'},variant],self.lop,hou.Vector2(0,-20))
+        tops=[dd.ops.import_chain(n,set(self.lop.children()))[0] for n in nodes]
+        self.assertEqual([tuple(t.position()) for t in tops],[(0.0,-20.0),(3.0,-20.0),(6.0,-20.0)])
+        self.assertEqual(tuple(nodes[2].position()),(6.0,-20.0-dd.ops.CHAIN_STEP))
+        merge=self.lop.displayNode();self.assertEqual(merge.type().name(),'merge')
+        self.assertLess(merge.position()[1],min(n.position()[1] for n in nodes))
+
     def test_pbr_batch_shared_uv_and_output_preservation(self):
         mat=self.lop.createNode('materiallibrary')
         payloads=[]

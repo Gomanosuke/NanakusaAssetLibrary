@@ -301,7 +301,7 @@ Sketchfab等のパックは、同じ原点付近に複数の独立したトッ�
 `ui.py`の`ElementJob`（`ProxyJob`と`_MeshGenerateJob`を共通基底とする）が`hython element_gen.py <元ファイル> <一時出力> <結果JSON>`を実行し、成功時のみ`data/backups/element/`へバックアップしてから`os.replace`で置き換える。失敗・スキップ時は元ファイルを一切変更しない。
 右クリックの「Generate Selected Element Switch...」は選択したUSD資産に生成する（ダイアログでの値入力は無い）。「Libraries... → Cancel Element Switches」で待機分を解除できる。フォルダー移動・素材移動は、待機中のelement switch生成がある間はできない。
 
-配置後にどのオブジェクトを表示するか切り替えるには、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに分岐点プリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。`variant`タグの付いた資産をD&D/Import Selectedで配置した場合、このノードは`houdini_ops._add_variant_switch`が既に自動で挿入している（[D&D](#dd)を参照）。
+配置後にどのオブジェクトを表示するか切り替えるには、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに分岐点プリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。`variant`タグの付いた資産をD&D/Import Selectedで配置した場合、このノードは`houdini_ops._add_variant_switch`が既に自動で挿入している（[D&D](#dd)を参照）。配置は、1回の取り込みで作ったノードの連なり（`import_chain`: Reference → Set Variant / Assign Material）の先頭をドロップ位置・格子のセルに置き、続くノードを`CHAIN_STEP`（1.0）ずつ真下に並べる（`place_chain`）。複数ドロップの行間とMergeの位置は最長の連なりに合わせる。
 
 ### 削除・自動タグ・サムネイルバッジ
 

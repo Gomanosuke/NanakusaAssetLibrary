@@ -132,7 +132,7 @@ asset/
 - Scene Viewなど、ドロップ先として想定していない場所に落としても、何も起きません。
 - テクスチャを通常のstageやobjに落としても、ノードは作りません。材質ネットワークか、入力欄に落としてください。
 - Import Selected（右クリック）でも、同じ取り込みができます。単体のUSDでは、Options で取り込み先・Reference / Sublayer・Prim割り当てを指定できます。
-- **`variant`タグの付いたUSD**（[複数オブジェクト入りUSDの切り替え](#複数オブジェクト入りusdの切り替え)を参照）をstage / LOPネットワークへドロップ、またはImport Selectedで取り込むと、Reference LOPの直後に**Set Variantノードが自動で追加されます**（Variant Set = `element`、Choose Variant Name by Index = ON、Index = 0）。切り替えたい場合は、このノードの Variant Name Index を変えるだけで済みます。
+- **`variant`タグの付いたUSD**（[複数オブジェクト入りUSDの切り替え](#複数オブジェクト入りusdの切り替え)を参照）をstage / LOPネットワークへドロップ、またはImport Selectedで取り込むと、Reference LOPの直後（ネットワーク上ではすぐ下）に**Set Variantノードが自動で追加されます**（Variant Set = `element`、Choose Variant Name by Index = ON、Index = 0）。切り替えたい場合は、このノードの Variant Name Index を変えるだけで済みます。
 
 ## PBRテクスチャからマテリアルを作る
 

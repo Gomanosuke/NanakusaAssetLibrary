@@ -89,15 +89,20 @@ def import_payloads(payloads, parent, position=None):
             else:
                 for p in payloads:nodes.append(ops.import_into_context(p['path'],p['kind'],p['label'],parent,'variant' in p.get('tags','').split()))
             origin=position if position is not None else hou.Vector2(0,0)
-            for i,node in enumerate(nodes):
+            # Each import is a short chain (Reference -> Set Variant ...): its first node goes at the
+            # drop point / grid cell and the rest straight below it, so rows are as tall as the longest chain.
+            created=set(parent.children())-before
+            chains=[ops.import_chain(node,created) for node in nodes]
+            row=max(2,max(len(c) for c in chains)+1)*ops.CHAIN_STEP
+            for i,(node,chain) in enumerate(zip(nodes,chains)):
                 # A surface inside an existing builder was already laid out with its UV and images.
-                if node.type().name()!='mtlxstandard_surface':node.setPosition(origin+hou.Vector2((i%5)*3,-(i//5)*2))
+                if node.type().name()!='mtlxstandard_surface':ops.place_chain(chain,origin+hou.Vector2((i%5)*3,-(i//5)*row))
                 node.setSelected(True,clear_all_selected=(i==0))
             output=nodes[-1]
             if len(nodes)>1 and parent.childTypeCategory() in (hou.lopNodeTypeCategory(),hou.sopNodeTypeCategory()):
                 output=parent.createNode('merge','asset_merge')
                 for i,node in enumerate(nodes):output.setInput(i,node)
-                output.setPosition(origin+hou.Vector2(3,-((len(nodes)-1)//5+1)*2))
+                output.setPosition(origin+hou.Vector2(3,-((len(nodes)-1)//5+1)*row))
                 output.setSelected(True)
             if hasattr(output,'setDisplayFlag'):output.setDisplayFlag(True)
             if hasattr(output,'setRenderFlag'):output.setRenderFlag(True)
