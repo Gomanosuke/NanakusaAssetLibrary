@@ -330,10 +330,21 @@ def bound(stage, path):
     return str(material.GetPath()) if material else None
 
 
+def binding_targets(stage, path):
+    return [str(t) for t in UsdShade.MaterialBindingAPI(stage.GetPrimAtPath(path)).GetDirectBindingRel().GetTargets()]
+
+
 class ProxyGenLookTests(unittest.TestCase):
     """A proxy must not draw with the material its render mesh inherits: without UVs it reads the
-    opacity map at (0, 0), which is 0 on leaf cards, and the viewport cut the proxy away."""
+    opacity map at (0, 0), which is 0 on leaf cards, and the viewport cut the proxy away. Nor may
+    it draw with an empty Material: Houdini's Scene View shows that plain grey, ignoring @Cd."""
     LOOK='/Plant/'+proxy_gen.PROXY_LOOK
+
+    def assertNoMaterial(self,stage,path,msg=None):
+        """Bound to the look Scope, so the binding resolves to no material at all."""
+        self.assertEqual(binding_targets(stage,path),[self.LOOK],msg)
+        self.assertIsNone(bound(stage,path),msg)
+        self.assertEqual(stage.GetPrimAtPath(self.LOOK).GetTypeName(),'Scope',msg)
 
     def leaf(self,folder,with_proxy=False):
         src=Path(folder)/'plant.usda';stage=Usd.Stage.CreateNew(str(src))
@@ -349,14 +360,13 @@ class ProxyGenLookTests(unittest.TestCase):
         stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
         return src
 
-    def test_a_new_proxy_is_bound_to_the_shaderless_look_and_carries_only_points_and_display_color(self):
+    def test_a_new_proxy_resolves_to_no_material_and_carries_only_points_and_display_color(self):
         with tempfile.TemporaryDirectory() as folder:
             out=Path(folder)/'out.usda'
             generate(self.leaf(folder),out)
             stage=Usd.Stage.Open(str(out))
-            self.assertEqual(bound(stage,'/Plant/geo/leaf_proxy'),self.LOOK)
+            self.assertNoMaterial(stage,'/Plant/geo/leaf_proxy')   # the viewport draws its displayColor
             self.assertEqual(bound(stage,'/Plant/geo/leaf'),'/Plant/mtl/leaf')   # the render mesh keeps its own
-            self.assertEqual(list(stage.GetPrimAtPath(self.LOOK).GetChildren()),[])   # no shader: the viewport's fallback draws displayColor
             proxy=stage.GetPrimAtPath('/Plant/geo/leaf_proxy')
             # no texture to bake here, so not even displayColor; never st, normals or opacity
             self.assertEqual(sorted(a.GetName() for a in proxy.GetAuthoredAttributes()),
@@ -368,8 +378,21 @@ class ProxyGenLookTests(unittest.TestCase):
             src=self.leaf(folder,with_proxy=True);out=Path(folder)/'out.usda'
             self.assertEqual(generate(src,out),{'restyled':['/Plant/geo/leaf_proxy']})
             stage=Usd.Stage.Open(str(out))
-            self.assertEqual(bound(stage,'/Plant/geo/leaf_proxy'),self.LOOK)
+            self.assertNoMaterial(stage,'/Plant/geo/leaf_proxy')
             self.assertEqual(bound(stage,'/Plant/geo/leaf'),'/Plant/mtl/leaf')
+            self.assertEqual(generate(out,Path(folder)/'again.usda'),{'skipped':'already has a proxy'})
+
+    def test_a_proxy_on_the_grey_empty_material_of_0_22_2_is_moved_to_the_scope(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=self.leaf(folder,with_proxy=True)
+            stage=Usd.Stage.Open(str(src))
+            old=UsdShade.Material.Define(stage,self.LOOK)
+            UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath('/Plant/geo/leaf_proxy')).Bind(old)
+            stage.GetRootLayer().Save()
+            out=Path(folder)/'out.usda'
+            self.assertEqual(generate(src,out),{'restyled':['/Plant/geo/leaf_proxy']})
+            stage=Usd.Stage.Open(str(out))
+            self.assertNoMaterial(stage,'/Plant/geo/leaf_proxy')
             self.assertEqual(generate(out,Path(folder)/'again.usda'),{'skipped':'already has a proxy'})
 
     def test_proxies_inside_variants_are_bound_whichever_version_is_chosen(self):
@@ -384,7 +407,7 @@ class ProxyGenLookTests(unittest.TestCase):
                 for level in ('LOD_0','LOD_1'):
                     sets=stage.GetPrimAtPath('/Plant').GetVariantSets()
                     sets.GetVariantSet('variant').SetVariantSelection(chosen);sets.GetVariantSet('LOD').SetVariantSelection(level)
-                    self.assertEqual(bound(stage,f'/Plant/geo/{chosen}_proxy'),self.LOOK,(chosen,level))
+                    self.assertNoMaterial(stage,f'/Plant/geo/{chosen}_proxy',(chosen,level))
                     self.assertEqual(bound(stage,f'/Plant/geo/{chosen}'),'/Plant/mtl/leaf',(chosen,level))
 
 

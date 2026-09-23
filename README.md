@@ -200,11 +200,12 @@ proxy（`purpose=proxy`）が無いUSDは、Scene Viewでも重いレンダー�
 - 元のレンダーメッシュにbase colorテクスチャの材質が設定されている場合、そのテクスチャの色をproxyの頂点カラー（`primvars:displayColor`）へ焼き込みます（Attribute from Map相当）。proxyだけを表示していても、元の資材の色味が大まかに分かります。テクスチャが無い・材質が無い資産は、これまでどおり無地のproxyになります。
 - proxyが持つのは形（点・面）と色（`primvars:displayColor`、Houdiniの`@P`と`@Cd`）だけです。UV・法線・不透明度などは持ちません。
   - 葉などの材質が上の階層（`geo` など）に割り当てられている資産では、proxyもその材質を受け継ぎます。UVの無いproxyでは不透明度テクスチャの端（透明）が読まれ、Scene Viewでproxyが消えていました（例: `AcerPseudoplatanus_abw4u_Leaves_OL.usd`）。
-  - そのため、proxyには中身の無い材質 `NAL_proxy_look`（資産の一番上のプリムの下）を割り当てます。Scene Viewはproxy自身の色（`@Cd`）で表示します。レンダー用のメッシュの材質は変わりません。
+  - そのため、proxyの材質の割り当て先を、材質ではない空のScope `NAL_proxy_look`（資産の一番上のプリムの下）にします。これでproxyは「材質なし」になり、Scene Viewはproxy自身の色（`@Cd`）で表示します。レンダー用のメッシュの材質は変わりません。
+  - 0.22.2では中身の無い材質を割り当てていましたが、HoudiniのScene Viewはそれを灰色の材質として描き、`@Cd`が表示されませんでした（例: `AcerPseudoplatanus_853se_Big_OL.usd`）。0.22.3で修正しました。
 - **USDファイル自体を書き換えます。** 参照・ペイロード先の別ファイルには触れず、その資産自身の入口ファイルにだけproxyを追加します。書き換え前に必ず `data/backups/proxy/` へ元ファイルをバックアップします。
 - `.usdz` は一旦展開し、パッケージのルートレイヤーだけを編集してから、USD標準の方法（`UsdUtils.CreateNewUsdzPackage`）で参照ファイルごと再パッケージします。中の他のファイル（テクスチャ等）はそのまま引き継がれます。
 - 既に `purpose=proxy` を持つ資産、メッシュが無い資産は自動でスキップされます（ファイルは変更されません）。
-  - ただし、既存のproxyが上の階層の材質を受け継いでいる場合は、`NAL_proxy_look` の割り当てだけを追加します（バックアップ後。ステータス欄に "Already has a proxy; proxy material fixed" と出ます）。
+  - ただし、既存のproxyが上の階層の材質を受け継いでいる場合は、`NAL_proxy_look` の割り当てだけを追加します。0.22.2の灰色になる材質が付いている場合も直します（バックアップ後。ステータス欄に "Already has a proxy; proxy material fixed" と出ます）。
 
 ## 複数オブジェクト入りUSDの切り替え
 

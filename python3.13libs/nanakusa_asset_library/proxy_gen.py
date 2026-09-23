@@ -254,23 +254,37 @@ def _sweep_variants(stage, look):
 # (e.g. on the asset's "geo" scope). Having no UVs, it samples that material's textures at
 # (0, 0): leaf and grass opacity maps are 0 there, so with the material's opacity threshold the
 # viewport cut the whole proxy away (AcerPseudoplatanus_abw4u_Leaves_OL). An empty binding
-# does not stop the inheritance, so a proxy is bound to this Material with no shader in it:
-# a viewport then draws the proxy with its fallback shading of the proxy's own displayColor,
-# exactly as if nothing were bound. (A UsdPreviewSurface reading displayColor came out black
-# in husk's Storm, and a shaderless material relies on no renderer's shader support.)
+# does not stop the inheritance (UsdShade keeps looking further up), but a binding whose target
+# is not a Material does: ComputeBoundMaterial stops at the proxy's own binding and returns no
+# material. So a proxy is bound to this plain Scope, and a viewport draws it the way it draws any
+# mesh with no material - in the proxy's own displayColor (@Cd).
+# 0.22.2 made it an empty Material instead: Houdini's Scene View drew that as a plain grey
+# material and ignored the colors (AcerPseudoplatanus_853se_Big_OL); `_proxy_look` turns such a
+# Material into the Scope. (A UsdPreviewSurface reading displayColor came out black in husk's Storm.)
 PROXY_LOOK = 'NAL_proxy_look'
 
 
 def _proxy_look(stage, proxy_path):
-    """Path of the proxy look Material under the proxy's top prim, defined there if missing."""
+    """Path of the binding stop under the proxy's top prim: a Scope, defined there if missing (or
+    turned from the Material 0.22.2 wrote into one)."""
     from pxr import Sdf, UsdShade
     prefixes = proxy_path.GetPrefixes()
     top = prefixes[0] if len(prefixes) > 1 else Sdf.Path.absoluteRootPath   # never under a mesh
     path = top.AppendChild(PROXY_LOOK)
     existing = stage.GetPrimAtPath(path)
-    if not (existing and existing.IsA(UsdShade.Material)):
-        UsdShade.Material.Define(stage, path)
+    if not existing or existing.GetTypeName() != 'Scope':
+        stage.DefinePrim(path, 'Scope')
     return path
+
+
+def _on_old_look(prim):
+    """True for a proxy bound to the empty Material that 0.22.2 made (shown grey in Houdini)."""
+    from pxr import UsdShade
+    for target in UsdShade.MaterialBindingAPI(prim).GetDirectBindingRel().GetTargets():
+        look = prim.GetStage().GetPrimAtPath(target)
+        if target.name == PROXY_LOOK and look and look.IsA(UsdShade.Material):
+            return True
+    return False
 
 
 def _needs_look(prim):
@@ -302,14 +316,16 @@ def _bind_look(layer, path, look):
 
 def _restyle_proxies(stage):
     """Bind every existing proxy that `_needs_look` to the proxy look (proxies made before it
-    existed, and a source's own proxies with the same problem). Returns the paths bound."""
+    existed, and a source's own proxies with the same problem), and move proxies off the 0.22.2
+    Material form of it. Returns the paths bound."""
     from pxr import UsdGeom
     found = set()
 
     def look():
         for prim in stage.Traverse():
             if (prim.GetPath() not in found and prim.IsA(UsdGeom.Mesh) and not prim.IsInstanceProxy()
-                    and UsdGeom.Imageable(prim).ComputePurpose() == UsdGeom.Tokens.proxy and _needs_look(prim)):
+                    and UsdGeom.Imageable(prim).ComputePurpose() == UsdGeom.Tokens.proxy
+                    and (_needs_look(prim) or _on_old_look(prim))):
                 found.add(prim.GetPath())
     _sweep_variants(stage, look)
     layer = stage.GetRootLayer()
