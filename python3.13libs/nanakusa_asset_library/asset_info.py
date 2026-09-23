@@ -70,7 +70,7 @@ def inspect(source, kind, plain=False):
                     has_proxy = True
             elif prim.GetTypeName() == 'Volume':
                 volumes += 1
-            elif prim.IsA(UsdShade.Material):
+            elif prim.IsA(UsdShade.Material) and prim.GetName() != 'NAL_proxy_look':   # proxy_gen.PROXY_LOOK: not one of the asset's own
                 materials += 1
         result = {'Polygons': f'{faces:,}', 'Points': f'{points:,}', 'Meshes': meshes}
         if volumes:

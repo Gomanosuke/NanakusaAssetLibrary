@@ -227,6 +227,15 @@ def _collect_meshes(stage):
                            'defined_outside_variants': any(spec.specifier == Sdf.SpecifierDef and not spec.path.ContainsPrimVariantSelection()
                                                            for spec in prim.GetPrimStack())}
 
+    _sweep_variants(stage, look)
+    return found
+
+
+def _sweep_variants(stage, look):
+    """Call `look()` with the stage as authored, then with each other variant of every variant set
+    that is not a level-of-detail set selected in turn (one set at a time, in the session layer,
+    never in the file)."""
+    from pxr import Usd
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         look()
         sets = [(prim.GetPath(), name) for prim in stage.Traverse()
@@ -239,7 +248,74 @@ def _collect_meshes(stage):
                     variant_set.SetVariantSelection(variant)
                     look()
             variant_set.ClearVariantSelection()   # the session opinion only; the file's selection stays
-    return found
+
+
+# A proxy is a sibling of its render mesh, so it inherits whatever material is bound above them
+# (e.g. on the asset's "geo" scope). Having no UVs, it samples that material's textures at
+# (0, 0): leaf and grass opacity maps are 0 there, so with the material's opacity threshold the
+# viewport cut the whole proxy away (AcerPseudoplatanus_abw4u_Leaves_OL). An empty binding
+# does not stop the inheritance, so a proxy is bound to this Material with no shader in it:
+# a viewport then draws the proxy with its fallback shading of the proxy's own displayColor,
+# exactly as if nothing were bound. (A UsdPreviewSurface reading displayColor came out black
+# in husk's Storm, and a shaderless material relies on no renderer's shader support.)
+PROXY_LOOK = 'NAL_proxy_look'
+
+
+def _proxy_look(stage, proxy_path):
+    """Path of the proxy look Material under the proxy's top prim, defined there if missing."""
+    from pxr import Sdf, UsdShade
+    prefixes = proxy_path.GetPrefixes()
+    top = prefixes[0] if len(prefixes) > 1 else Sdf.Path.absoluteRootPath   # never under a mesh
+    path = top.AppendChild(PROXY_LOOK)
+    existing = stage.GetPrimAtPath(path)
+    if not (existing and existing.IsA(UsdShade.Material)):
+        UsdShade.Material.Define(stage, path)
+    return path
+
+
+def _needs_look(prim):
+    """True for a proxy mesh that would draw with a material bound above it: nothing bound on the
+    proxy itself and no UVs of its own to read that material's textures with."""
+    from pxr import Sdf, UsdGeom, UsdShade
+    binding = UsdShade.MaterialBindingAPI(prim)
+    if binding.GetDirectBindingRel().GetTargets():
+        return False
+    uv_types = (Sdf.ValueTypeNames.TexCoord2fArray, Sdf.ValueTypeNames.TexCoord2dArray,
+                Sdf.ValueTypeNames.TexCoord2hArray, Sdf.ValueTypeNames.Float2Array)
+    if any(p.GetTypeName() in uv_types for p in UsdGeom.PrimvarsAPI(prim).GetPrimvarsWithValues()):
+        return False
+    return bool(binding.ComputeBoundMaterial()[0])
+
+
+def _bind_look(layer, path, look):
+    """Bind the prim at `path` to `look`, authored with Sdf in `layer` (the prim may be defined
+    inside a variant that is not selected now; an "over" at its plain path reaches it there)."""
+    from pxr import Sdf
+    spec = layer.GetPrimAtPath(path) or Sdf.CreatePrimInLayer(layer, path)
+    schemas = spec.GetInfo('apiSchemas')
+    if 'MaterialBindingAPI' not in list(schemas.prependedItems) + list(schemas.explicitItems):
+        schemas.prependedItems = list(schemas.prependedItems) + ['MaterialBindingAPI']
+        spec.SetInfo('apiSchemas', schemas)
+    rel = spec.relationships.get('material:binding') or Sdf.RelationshipSpec(spec, 'material:binding', custom=False)
+    rel.targetPathList.explicitItems = [look]
+
+
+def _restyle_proxies(stage):
+    """Bind every existing proxy that `_needs_look` to the proxy look (proxies made before it
+    existed, and a source's own proxies with the same problem). Returns the paths bound."""
+    from pxr import UsdGeom
+    found = set()
+
+    def look():
+        for prim in stage.Traverse():
+            if (prim.GetPath() not in found and prim.IsA(UsdGeom.Mesh) and not prim.IsInstanceProxy()
+                    and UsdGeom.Imageable(prim).ComputePurpose() == UsdGeom.Tokens.proxy and _needs_look(prim)):
+                found.add(prim.GetPath())
+    _sweep_variants(stage, look)
+    layer = stage.GetRootLayer()
+    for path in found:
+        _bind_look(layer, path, _proxy_look(stage, path))
+    return sorted(str(p) for p in found)
 
 
 def _variant_specs(layer):
@@ -312,13 +388,18 @@ def _add_proxies(stage, target_triangles):
     like its mesh (_copy_switching), and the mesh itself becomes purpose=render. Assets whose
     meshes only some variant selections show (a source's own "variant" set) get a proxy for every
     one of them (_collect_meshes), so the viewport shows the selected version's proxy only.
+
+    A proxy carries only points and displayColor (Houdini's @P and @Cd), and one that would
+    otherwise draw with a material bound above it is bound to the proxy look (PROXY_LOOK). An
+    asset that already has proxies only gets that binding where they lack it ({'restyled': [...]}).
     """
     from pxr import Sdf, Tf, UsdGeom
 
     if any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue()
            and UsdGeom.Imageable(p).GetPurposeAttr().Get() == UsdGeom.Tokens.proxy
            for p in stage.Traverse()):
-        return {'skipped': 'already has a proxy'}
+        restyled = _restyle_proxies(stage)
+        return {'restyled': restyled} if restyled else {'skipped': 'already has a proxy'}
 
     meshes = _collect_meshes(stage)
     if not meshes:
@@ -350,7 +431,10 @@ def _add_proxies(stage, target_triangles):
         if colors:
             proxy.CreateDisplayColorPrimvar(UsdGeom.Tokens.vertex).Set(colors)
         UsdGeom.Imageable(proxy.GetPrim()).CreatePurposeAttr().Set(UsdGeom.Tokens.proxy)
-        defs = _variant_definitions(layer, path, variant_specs)
+        if _needs_look(proxy.GetPrim()):
+            # bound before it is copied into variants, so every copy carries the binding
+            _bind_look(layer, proxy_path, _proxy_look(stage, proxy_path))
+        defs =_variant_definitions(layer, path, variant_specs)
         if not data['defined_outside_variants'] and defs:
             # The mesh only exists inside variants (e.g. every LOD variant defines its own
             # version): define the proxy in each of them too, so it exists exactly where its mesh does.

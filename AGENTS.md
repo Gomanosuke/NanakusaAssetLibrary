@@ -96,6 +96,7 @@
 - proxy_gen.py（purpose=proxy）が別プロセス（hython）で追加する。対象資産自身の入口ファイルだけを編集し、参照・ペイロード先には触れない。
 - デシメート前に`fuse`（UV・材質境界の分離頂点を結合。結合しないと境界の断片が個別に潰れて形が崩れる）と`divide`（三角形化。しないとpolyreduceの目標数＝プリミティブ数になり、四角形主体のメッシュで指定数のおよそ2倍が残る）を必ず通す。値はどちらも`_decimate`内で計算・固定。数値を変える時はここを見る。
 - proxyは対象メッシュの束縛材質からbase colorテクスチャを検出できれば、UVでサンプルした色を頂点カラー（primvars:displayColor、vertex補間）としてattribfrommap相当で焼き込む（0〜1にクランプ）。見つからなければ無地のまま。
+- **proxyの点属性は`@P`と`@Cd`（displayColor）だけ**（ユーザー指示 2026-09-24）。UV・法線・不透明度などを足さない。上の階層の材質を受け継ぐproxyは、シェーダーの無い`NAL_proxy_look`へ束縛する（`_needs_look`/`_bind_look`）。受け継いだ葉の材質の不透明度マップを(0,0)で読み、Scene Viewでproxyが消えていたため（Acer）。空の束縛では継承が止まらない。UsdPreviewSurfaceでdisplayColorを読む材質はhusk（Storm）で黒くなったので使わない。既にproxyがある資産でも、この束縛だけは追加する（`{'restyled': ...}`）。
 - `.usdz`はUsdUtils.ExtractUsdzPackageで展開し、アーカイブ先頭エントリ（usdz仕様のルートレイヤー）を編集してからUsdUtils.CreateNewUsdzPackageで再パッケージする。手動でのzip操作はしない。
 - ui.pyの`ProxyJob`が結果を検証してから、data/backups/proxy/へ元ファイルをバックアップし、os.replaceで置き換える。失敗・スキップ時は元ファイルを一切変更しない（生成スクリプト単体はSave()せずExport/CreateNewUsdzPackageで新規ファイルに書き出すだけ）。
 - **一時出力ファイルは元ファイルと同じフォルダーに書く**（tempfile.TemporaryDirectory()配下ではない）。os.replaceはWindowsで別ドライブ間の置き換えができない（WinError 17）。素材ライブラリーとシステムTEMPが別ドライブの構成で実際に踏んだ既知の不具合（バックアップだけ作られ元ファイルは変更されないまま失敗する）。

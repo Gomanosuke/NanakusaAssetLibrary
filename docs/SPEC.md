@@ -276,12 +276,17 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
 `purpose=proxy`が無いUSDはScene Viewでもレンダー用の形状がそのまま表示される。`proxy_gen.py`が別プロセス（hython）で簡易形状を追加する。
 
 - 対象はUSD種別の資産全て（`.usd`/`.usda`/`.usdc`/`.usdz`）。既に`purpose=proxy`を持つ資産、メッシュが無い資産は`{'skipped': 理由}`を返しスキップする。
+  - 例外: 既存のproxyのうち`_needs_look`に当たるもの（下記）があれば、`NAL_proxy_look`の割り当てだけを書いて`{'restyled': [パス]}`を返す（`_restyle_proxies`。variantは`_sweep_variants`で全て見る）。ProxyJobの表示は"Already has a proxy; proxy material fixed (N mesh(es))"で、`proxy`タグも付く。
 - 対象の入口ファイル自身（`Usd.Stage.Open`のルートレイヤー）だけを編集する。参照・ペイロード先の別ファイルは変更しない。
 - デシメートはHoudiniの`polyreduce::2.0`（Output Polygon Count）を使う。事前に2つの前処理をしている：
   - `fuse`（Snap Distance、対角線の0.02%）でUV・材質境界の分離頂点を結合してから減らす。結合しないと、境界で分かれた各断片が個別に潰れて形が崩れる。
   - `divide`（Convex Polygons、最大3辺）で三角形化してから減らす。`polyreduce`の目標数はプリミティブ数であり、四角形・多角形主体のメッシュのまま渡すと、指定した三角形数のおよそ2倍が残ってしまう。
 - 各`UsdGeom.Mesh`を、三角形換算で`target_triangles`（ダイアログで指定、既定`TARGET_TRIANGLES`=300）を超える場合のみデシメートする。小さいメッシュはそのまま複製する。結果は元プリムの兄弟として`<name>_proxy`に追加し、`purpose=proxy`を設定する。元プリムには`purpose=render`を明示する（Scene Viewでproxyが優先されるため）。名前衝突時は`_`を付けて回避する。
   - 元プリムの束縛材質からbase colorテクスチャを検出できた場合（`UsdPreviewSurface`の`diffuseColor`/`baseColor`が`UsdUVTexture`に接続され、`file`が解決できる形）、そのUV primvar（`UsdPrimvarReader`の`varname`、既定`st`。`faceVarying`/`vertex`/`uniform`/`constant`のいずれの補間にも対応）を使い、Houdiniの`attribfrommap`相当でテクスチャ色を頂点（点）ごとにサンプルし、`primvars:displayColor`（vertex補間）としてproxyへ焼き込む。デシメート後も色は点属性としてそのまま補間で引き継がれる（`polyreduce`が境界で多少オーバーシュートすることがあるため0〜1にクランプする）。材質・テクスチャが見つからない場合は無地のまま。
+  - proxyに書く属性は`points`・`faceVertexCounts`・`faceVertexIndices`・`purpose`と、色がある時の`primvars:displayColor`だけ（Houdiniでは`@P`と`@Cd`）。UV・法線・不透明度は書かない。
+  - **材質**: proxyはレンダーメッシュの兄弟なので、上の階層（例: 資産の`geo` Scope）に束縛された材質を受け継ぐ。UVの無いproxyはその材質のテクスチャを(0,0)で読み、葉・草の不透明度マップは(0,0)が0のため、`opacityThreshold`（0.5）でproxy全体が切り抜かれてScene Viewから消えた（`AcerPseudoplatanus_abw4u_Leaves_OL.usd`で確認）。空の`material:binding`は継承を止めない（UsdShadeはさらに上を探す）。
+  - そのため、直接の束縛もUVも無く、何かの材質を受け継ぐproxy（`_needs_look`）は、一番上のプリム直下の`NAL_proxy_look`（`PROXY_LOOK`。シェーダーを持たない`UsdShade.Material`）へ束縛する（`_bind_look`、Sdfで書く。variantへ複製する前に書くので複製にも付く）。シェーダーが無いため、ビューポートは束縛が無い時と同じフォールバック（proxy自身の`displayColor`）で描く。`UsdPreviewSurface`＋`UsdPrimvarReader_float3`（displayColor）の材質は、husk（Storm）では定数色でも黒くなったため採らなかった。材質を受け継がないproxyには何も書かない。
+  - 2026-09-24に実ライブラリーの既存proxyへ同じ割り当てを追加した（Plantsの235ファイル・3835メッシュ。元ファイルは`data/backups/proxy_look_repair_20260924_002800/`、各ファイルの差分は割り当ての追加だけであることを確認）。asset_infoのMaterials数には`NAL_proxy_look`を数えない。
 - **variantのある資産**（例: `ThymusVulgaris_e95j6_*_OL.usd`。各`LOD_*` variantが`var_01`〜を定義し、`variant` setが選ばれなかったものを`active=false`にする）:
   - 対象メッシュは、そのままの状態に加え、LOD以外の各variant setの各variantを1つずつsession layerで選んで集める（`_collect_meshes`。ファイルの選択は変えない）。LOD系のset（`lod`で始まる名前）は切り替えない（形状が変わるだけで、proxyは1つで全段を代表する）。
   - proxyはメッシュが定義されている場所に作る。メッシュがvariantの中でだけ定義されている場合は、定義している全variantへ`Sdf.CopySpec`で同じproxyを置く（`_variant_definitions`）。

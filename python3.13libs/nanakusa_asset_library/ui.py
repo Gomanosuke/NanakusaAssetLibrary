@@ -389,6 +389,8 @@ class ProxyJob(_MeshGenerateJob):
     def __init__(self, asset_id, source, backup_dir, target_triangles):
         super().__init__(asset_id, source, backup_dir, (target_triangles,))
     def summary(self, result):
+        if 'restyled' in result:
+            return f"Already has a proxy; proxy material fixed ({len(result['restyled'])} mesh(es))"
         return f"Proxy added ({len(result['proxied'])} mesh(es))"
 
 

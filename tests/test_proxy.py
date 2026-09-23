@@ -313,6 +313,81 @@ class ProxyGenColorTests(unittest.TestCase):
             self.assertFalse(proxy.GetDisplayColorPrimvar().HasValue())
 
 
+def cutout_material(stage, path):
+    """A leaf-like material: opacity from a texture, cut at 0.5 (AcerPseudoplatanus_abw4u_Leaves_OL)."""
+    mat=UsdShade.Material.Define(stage,path)
+    surf=UsdShade.Shader.Define(stage,path+'/surface');surf.CreateIdAttr('UsdPreviewSurface')
+    surf.CreateInput('opacityThreshold',Sdf.ValueTypeNames.Float).Set(0.5)
+    tex=UsdShade.Shader.Define(stage,path+'/opacity');tex.CreateIdAttr('UsdUVTexture')
+    tex.CreateInput('file',Sdf.ValueTypeNames.Asset).Set('./textures/opacity.png')
+    surf.CreateInput('opacity',Sdf.ValueTypeNames.Float).ConnectToSource(tex.ConnectableAPI(),'r')
+    mat.CreateSurfaceOutput().ConnectToSource(surf.ConnectableAPI(),'surface')
+    return mat
+
+
+def bound(stage, path):
+    material=UsdShade.MaterialBindingAPI(stage.GetPrimAtPath(path)).ComputeBoundMaterial()[0]
+    return str(material.GetPath()) if material else None
+
+
+class ProxyGenLookTests(unittest.TestCase):
+    """A proxy must not draw with the material its render mesh inherits: without UVs it reads the
+    opacity map at (0, 0), which is 0 on leaf cards, and the viewport cut the proxy away."""
+    LOOK='/Plant/'+proxy_gen.PROXY_LOOK
+
+    def leaf(self,folder,with_proxy=False):
+        src=Path(folder)/'plant.usda';stage=Usd.Stage.CreateNew(str(src))
+        top=UsdGeom.Xform.Define(stage,'/Plant').GetPrim();geo=stage.DefinePrim('/Plant/geo','Scope')
+        mat=cutout_material(stage,'/Plant/mtl/leaf')
+        UsdShade.MaterialBindingAPI.Apply(geo).Bind(mat)   # bound above the mesh, as in the source files
+        mesh,_=grid_mesh(stage,'/Plant/geo/leaf',4)
+        UsdGeom.PrimvarsAPI(mesh).CreatePrimvar('st',Sdf.ValueTypeNames.TexCoord2fArray,UsdGeom.Tokens.vertex).Set([(0,0)]*16)
+        if with_proxy:   # a proxy made before the look existed
+            proxy,_=grid_mesh(stage,'/Plant/geo/leaf_proxy',2)
+            UsdGeom.Imageable(proxy.GetPrim()).CreatePurposeAttr().Set(UsdGeom.Tokens.proxy)
+            UsdGeom.Imageable(mesh.GetPrim()).CreatePurposeAttr().Set(UsdGeom.Tokens.render)
+        stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
+        return src
+
+    def test_a_new_proxy_is_bound_to_the_shaderless_look_and_carries_only_points_and_display_color(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder)/'out.usda'
+            generate(self.leaf(folder),out)
+            stage=Usd.Stage.Open(str(out))
+            self.assertEqual(bound(stage,'/Plant/geo/leaf_proxy'),self.LOOK)
+            self.assertEqual(bound(stage,'/Plant/geo/leaf'),'/Plant/mtl/leaf')   # the render mesh keeps its own
+            self.assertEqual(list(stage.GetPrimAtPath(self.LOOK).GetChildren()),[])   # no shader: the viewport's fallback draws displayColor
+            proxy=stage.GetPrimAtPath('/Plant/geo/leaf_proxy')
+            # no texture to bake here, so not even displayColor; never st, normals or opacity
+            self.assertEqual(sorted(a.GetName() for a in proxy.GetAuthoredAttributes()),
+                             ['faceVertexCounts','faceVertexIndices','points','purpose'])
+            self.assertEqual(list(UsdGeom.PrimvarsAPI(proxy).FindInheritablePrimvars()),[])
+
+    def test_proxies_made_before_the_look_get_it_and_a_second_run_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=self.leaf(folder,with_proxy=True);out=Path(folder)/'out.usda'
+            self.assertEqual(generate(src,out),{'restyled':['/Plant/geo/leaf_proxy']})
+            stage=Usd.Stage.Open(str(out))
+            self.assertEqual(bound(stage,'/Plant/geo/leaf_proxy'),self.LOOK)
+            self.assertEqual(bound(stage,'/Plant/geo/leaf'),'/Plant/mtl/leaf')
+            self.assertEqual(generate(out,Path(folder)/'again.usda'),{'skipped':'already has a proxy'})
+
+    def test_proxies_inside_variants_are_bound_whichever_version_is_chosen(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=ProxyGenVariantTests.native_variants(None,folder)
+            stage=Usd.Stage.Open(str(src))
+            UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath('/Plant/geo')).Bind(cutout_material(stage,'/Plant/mtl/leaf'))
+            stage.GetRootLayer().Save()
+            out=Path(folder)/'out.usda';generate(src,out)
+            stage=Usd.Stage.Open(str(out));stage.SetEditTarget(stage.GetSessionLayer())
+            for chosen in ('var_01','var_02','var_03'):
+                for level in ('LOD_0','LOD_1'):
+                    sets=stage.GetPrimAtPath('/Plant').GetVariantSets()
+                    sets.GetVariantSet('variant').SetVariantSelection(chosen);sets.GetVariantSet('LOD').SetVariantSelection(level)
+                    self.assertEqual(bound(stage,f'/Plant/geo/{chosen}_proxy'),self.LOOK,(chosen,level))
+                    self.assertEqual(bound(stage,f'/Plant/geo/{chosen}'),'/Plant/mtl/leaf',(chosen,level))
+
+
 class ProxyGenUsdzTests(unittest.TestCase):
     def package(self, folder, extra=lambda stage,xform:None):
         src_dir=Path(folder)/'src';(src_dir/'textures').mkdir(parents=True)
