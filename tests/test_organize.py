@@ -35,6 +35,22 @@ class OrganizeTests(unittest.TestCase):
         self.scan()   # a rescan must keep the same asset instead of creating a new one
         rows=self.lib.assets(missing=True);self.assertEqual(len(rows),1);self.assertEqual(rows[0]['id'],old['id']);self.assertEqual(rows[0]['tags'],'wood red')
 
+    def test_usd_files_sharing_a_folder_move_only_with_the_folder(self):
+        for rel in ('USD/Misc/Plant_OL/Plant_Big.usd','USD/Misc/Plant_OL/Plant_Small.usd','USD/Misc/Plant_OL/textures/a.png'):self.write(rel)
+        (self.root/'USD/Props').mkdir();self.scan()
+        big=self.row('USD/Misc/Plant_OL/Plant_Big.usd');self.lib.update(big['id'],tags='plant')
+        with self.assertRaises(MoveError) as caught:self.move(['USD/Misc/Plant_OL/Plant_Big.usd'],'USD/Props')
+        self.assertIn('Move the folder "Plant_OL" instead',str(caught.exception))
+        self.assertTrue((self.root/'USD/Misc/Plant_OL/Plant_Big.usd').is_file())   # nothing moved
+        # its hidden subfolders are not a place to put assets either
+        self.write('USD/Misc/loose.usdz');self.scan()
+        with self.assertRaises(MoveError):self.move(['USD/Misc/loose.usdz'],'USD/Misc/Plant_OL/textures')
+        self.move(['USD/Misc/loose.usdz'],'USD/Misc/Plant_OL')   # the folder itself is fine
+        # the folder moves with all of its files and both assets keep their ids and tags
+        organize.move_folders(self.lib,self.rid,['USD/Misc/Plant_OL'],'USD/Props',self.data)
+        self.assertTrue((self.root/'USD/Props/Plant_OL/textures/a.png').is_file())
+        moved=self.row('USD/Props/Plant_OL/Plant_Big.usd');self.assertEqual((moved['id'],moved['tags']),(big['id'],'plant'))
+
     def test_usd_package_moves_as_folder_with_thumbnail_and_dependencies(self):
         self.write('USD/Misc/Chair/Chair.usd');self.write('USD/Misc/Chair/thumbnail.png');self.write('USD/Misc/Chair/textures/a.png')
         (self.root/'USD/Props').mkdir();self.scan()

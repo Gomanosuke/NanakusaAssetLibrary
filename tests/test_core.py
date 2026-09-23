@@ -28,6 +28,34 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(rows['USD/post.usdz']['label'],'post')
         self.assertEqual(rows['USD/Props/sign.USDZ']['label'],'sign')
 
+    def test_several_usd_files_sharing_a_folder_are_each_an_asset(self):
+        # e.g. ErodiumCiconium_6j98t_OL: Big and Small versions, one textures folder, no entry file named after the folder
+        for rel in ('USD/Misc/Plant_OL/Plant_Big_OL.usd','USD/Misc/Plant_OL/Plant_Small_OL.usda','USD/Misc/Plant_OL/extra.usdz',
+                    'USD/Misc/Plant_OL/textures/leaf/a.png','USD/Misc/Plant_OL/textures/leaf/a.png.rat',
+                    'USD/Misc/Plant_OL/Plant_Big_OL.nanakusa_generate_tmp.usd',   # a running job's output: never listed
+                    'USD/loose.usd'):   # loose layers right under USD/ stay unlisted
+            self.write(rel)
+        self.lib.scan(self.rid)
+        rows={r['relpath']:r for r in self.lib.assets()}
+        self.assertEqual(set(rows),{'USD/Misc/Plant_OL/Plant_Big_OL.usd','USD/Misc/Plant_OL/Plant_Small_OL.usda','USD/Misc/Plant_OL/extra.usdz'})
+        self.assertEqual(rows['USD/Misc/Plant_OL/Plant_Big_OL.usd']['label'],'Plant_Big_OL')
+        # listed in their own folder, whose subfolders are its files rather than library folders
+        listed=self.lib.stream(stacked=False,folder='USD/Misc/Plant_OL',recursive=False).next(50)
+        self.assertEqual({e['rep']['relpath'] for e in listed},set(rows))
+        self.assertIn('USD/Misc/Plant_OL',self.lib.folders(self.rid))
+        self.assertFalse(any(f.startswith('USD/Misc/Plant_OL/') for f in self.lib.folders(self.rid)))
+        self.assertNotIn('USD/Misc/Plant_OL/textures',visible_folders(self.root))
+        from nanakusa_asset_library import core,storage
+        big=rows['USD/Misc/Plant_OL/Plant_Big_OL.usd']
+        self.assertFalse(core.is_usd_package(big));self.assertTrue(core.is_shared_usd_layer(big))
+        self.assertFalse(core.is_shared_usd_layer(rows['USD/Misc/Plant_OL/extra.usdz']))   # a .usdz carries its own files
+        # each has its own thumbnail next to it (a package's folder thumbnail would be shared by both)
+        self.assertEqual(storage.thumbnail_destination(big,self.base).name,'Plant_Big_OL_thumbnail.png')
+        # a folder with an entry file named after it is still one package, whatever else it holds
+        self.write('USD/Misc/Tree/Tree.usd');self.write('USD/Misc/Tree/geo.usdc');self.lib.scan(self.rid)
+        tree=[r for r in self.lib.assets() if r['relpath'].startswith('USD/Misc/Tree/')]
+        self.assertEqual([r['relpath'] for r in tree],['USD/Misc/Tree/Tree.usd']);self.assertTrue(core.is_usd_package(tree[0]))
+
     def test_fixed_genres_and_single_file_models(self):
         for path in ('3DModel/a.obj','3DModel/b.fbx','3DModel/smoke.vdb','Texture/a.tif','Texture/sky.hdr'):self.write(path)
         for path in ('3DModel/color.png','3DModel/multi.gltf','Texture/model.obj','Other/a.obj'):self.write(path)

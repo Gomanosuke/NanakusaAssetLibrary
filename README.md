@@ -83,6 +83,8 @@ asset/
 ```
 
 - **USD**: フォルダーと同じ名前の `.usd / .usdc / .usda / .usdz` を入口として、フォルダー全体を1つの素材として表示します。単体の `.usdz` も表示されます。
+  - フォルダーと同じ名前のファイルがなく、`.usd / .usdc / .usda` が複数ある（例: `ErodiumCiconium_6j98t_OL` の中の `…_Big_OL.usd` と `…_Small_OL.usd`、共通の `textures` フォルダー）場合は、それぞれのUSDを別の素材として、そのフォルダーの中に表示します。中の `textures` などはツリーに出しません。
+  - このようなUSDは同じフォルダーのテクスチャを使うため、1つだけ別のフォルダーへ移動することはできません。移動する場合はフォルダーごと移動してください。サムネイルは `…_Big_OL_thumbnail.png` のようにUSDごとに作られます。
 - **3DModel**: `.obj .fbx .abc .glb .stl .ply .vdb .bgeo(.sc) .geo(.sc)` など、1つのファイルで形状を読める形式です。FBXの外部画像や元の材質は再構築しません。
 - **Texture**: PNG・JPEG・TIFF・HDR・EXRなどの画像です。Houdiniが元画像の隣に作る変換キャッシュ（`sky_8k.hdr.rat`、`wood.png.tx` のように拡張子が2つ重なるもの）は表示しません。自分で保存した `.rat` / `.tx`（拡張子1つ）は表示します。
 

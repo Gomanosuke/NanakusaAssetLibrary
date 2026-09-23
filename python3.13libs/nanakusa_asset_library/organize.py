@@ -34,8 +34,11 @@ def check_destination(root_path, dest_rel):
         raise MoveError('Folder not found: ' + '/'.join(parts))
     if parts[0] == 'USD':
         for i in range(2, len(parts) + 1):
-            if core.package_entry(core.inside(root_path, '/'.join(parts[:i]))):
+            folder_i = core.inside(root_path, '/'.join(parts[:i]))
+            if core.package_entry(folder_i):
                 raise MoveError('A USD package cannot contain other assets.')
+            if i < len(parts) and core.package_entries(folder_i):
+                raise MoveError('This folder belongs to the USD files above it (textures...).')
     return folder
 
 
@@ -111,6 +114,10 @@ def check_assets_target(rows, root_id, dest_rel):
     for row in rows:
         if GENRE_OF_KIND.get(row['kind']) != genre:
             raise MoveError('%s assets can only be moved under %s.' % (row['kind'], GENRE_OF_KIND.get(row['kind'], '?')))
+        if core.is_shared_usd_layer(row):
+            folder = Path(row['relpath']).parent
+            raise MoveError('"%s" uses files in its folder (textures...) together with the other USD files there. '
+                            'Move the folder "%s" instead.' % (Path(row['relpath']).name, folder.name))
     return dest
 
 

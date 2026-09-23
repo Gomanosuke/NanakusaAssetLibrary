@@ -304,7 +304,7 @@ class _MeshGenerateJob(QtCore.QThread):
 
     def run(self):
         source = Path(self.source)
-        temp_usd = source.with_name(source.stem+'.nanakusa_generate_tmp'+source.suffix)
+        temp_usd = source.with_name(source.stem+core.GENERATE_TMP+source.suffix)
         try:
             with tempfile.TemporaryDirectory(prefix='nanakusa_generate_') as folder:
                 base = Path(folder)
@@ -1414,8 +1414,8 @@ class LibraryWidget(QtWidgets.QWidget):
         folder=self.current_folder()
         if not folder:raise ValueError('Select the parent folder on the left.')
         if not folder[1]:raise ValueError('Choose a folder under USD, Texture or 3DModel. These top-level categories are fixed.')
-        if folder[1].startswith('USD/') and core.package_entry(core.inside(folder[2],folder[1])):
-            raise ValueError('Cannot create folders inside a USD package.')
+        if folder[1].startswith('USD/') and core.package_entries(core.inside(folder[2],folder[1])):
+            raise ValueError('Cannot create folders inside a USD package (or a folder of USD files sharing its textures).')
         name,ok=QtWidgets.QInputDialog.getText(self,'New Folder','Name (use / for nested folders)')
         if ok and name.strip():
             path=core.inside(core.inside(folder[2],folder[1]),name.strip()); path.mkdir(parents=True,exist_ok=True)

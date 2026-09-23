@@ -29,10 +29,34 @@ def package_entry(folder):
             return p
     return None
 
+USD_LAYERS = ('.usd', '.usdc', '.usda')
+GENERATE_TMP = '.nanakusa_generate_tmp'   # name part of a generation job's temporary output (never an asset)
+
+def package_entries(folder):
+    """The USD assets a folder under USD/ is made of: its entry file named after the folder (the
+    whole folder is one asset), otherwise every USD layer directly in it - e.g. Big and Small
+    versions sharing one ./textures folder. [] for a plain folder (standalone .usdz files in a
+    plain folder are self-contained assets and do not make it one of these)."""
+    entry = package_entry(folder)
+    if entry:
+        return [entry]
+    try:
+        return sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in USD_LAYERS and p.is_file())
+    except OSError:
+        return []
+
 def is_usd_package(row):
+    """True for the entry file of a package folder (named after its folder): the folder is the asset.
+    USD layers sharing a folder without such an entry are assets of their own, but still depend on
+    the folder's other files (see is_shared_usd_layer)."""
     path=Path(row['relpath'])
-    return row['kind']=='usd' and not (path.suffix.lower()=='.usdz' and
-        (len(path.parts)==2 or path.stem.lower()!=path.parent.name.lower()))
+    return row['kind']=='usd' and len(path.parts)>2 and path.stem.lower()==path.parent.name.lower()
+
+def is_shared_usd_layer(row):
+    """A USD layer listed next to other files it needs (textures...) in a folder without an entry file:
+    moving it alone would break its relative paths, so it moves only with its folder."""
+    path=Path(row['relpath'])
+    return row['kind']=='usd' and path.suffix.lower() in USD_LAYERS and not is_usd_package(row)
 
 def visible_folders(base, cancel=lambda: False):
     """Only the three genres; USD package contents are opaque."""
@@ -49,7 +73,7 @@ def visible_folders(base, cancel=lambda: False):
             dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not (Path(folder)/d).is_symlink())
             if Path(folder) != start:
                 result.append(Path(folder).relative_to(base).as_posix())
-            if genre == 'USD' and package_entry(folder):
+            if genre == 'USD' and Path(folder) != start and package_entries(folder):
                 dirs[:] = []
     return result
 
@@ -281,7 +305,16 @@ class Library:
                     names = [entry.name]
                     dirs[:] = []
                 else:
-                    names = [name for name in names if name.lower().endswith('.usdz')]
+                    # Several USD layers without an entry file named after the folder (e.g. Big /
+                    # Small sharing ./textures): each is an asset, and like a package the folder's
+                    # subfolders are its files, not library folders. Loose layers right under USD/
+                    # stay unlisted, as before.
+                    layers = [name for name in names if name.lower().endswith(USD_LAYERS)] if len(parts) > 1 else []
+                    if layers:
+                        dirs[:] = []
+                    names = [name for name in names if name.lower().endswith('.usdz')] + layers
+                # A generation job's output before it replaces its source (ui._MeshGenerateJob).
+                names = [name for name in names if GENERATE_TMP not in name.lower()]
             for name in names:
                 if cancel():
                     return {"cancelled": True, "count": 0, "errors": errors}
