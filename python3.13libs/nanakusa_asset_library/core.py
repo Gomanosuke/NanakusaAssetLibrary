@@ -77,6 +77,24 @@ def visible_folders(base, cancel=lambda: False):
                 dirs[:] = []
     return result
 
+def is_lod_set(name):
+    """A variant set that holds levels of detail ("LOD" from lod_gen.py, or a source's own "LOD",
+    "lods", "LOD_levels"...)."""
+    return name.lower().startswith('lod')
+
+def sync_auto_tags(tags, set_names):
+    """`tags` with the automatic ones matching the variant sets on an asset's top prim: "lod" for
+    a level-of-detail set, "variant" for any other (element switch, a source's own variants).
+    Other words and their order are kept."""
+    words = tags.split()
+    for tag, wanted in (('lod', any(is_lod_set(n) for n in set_names)),
+                        ('variant', any(not is_lod_set(n) for n in set_names))):
+        if wanted and tag not in words:
+            words.append(tag)
+        elif not wanted and tag in words:
+            words = [w for w in words if w != tag]
+    return ' '.join(words)
+
 def is_texture_cache(name):
     """A texture Houdini converted from a source image and saved beside it (photo.hdr.rat,
     photo.exr.tx: two image extensions). Not an asset of its own; a .rat / .tx saved on purpose
@@ -151,7 +169,7 @@ class Library:
     # folder = the folder that lists the asset (a USD package is listed by its parent folder),
     # pkg = the package folder of a USD package, stack / channel = PBR set key and channel of an
     # image that has partners in its folder, gkey = one stack's identity (root, folder, key).
-    VERSION = 5
+    VERSION = 6
 
     def _migrate(self, db):
         version = db.execute('PRAGMA user_version').fetchone()[0]
@@ -192,6 +210,11 @@ class Library:
             derived = self.derive([(r['root_id'], r['relpath'], r['kind']) for r in rows])
             db.executemany('UPDATE assets SET folder=?, pkg=?, stack=?, channel=?, gkey=? WHERE id=?',
                            [d + (r['id'],) for d, r in zip(derived, rows)])
+        if version < 6:
+            # vstamp: the file state ("mtime:size") whose variant sets last set the automatic
+            # "lod" / "variant" tags (variant_scan.py), so only new or changed USD files are opened.
+            if 'vstamp' not in {r[1] for r in db.execute('PRAGMA table_info(assets)')}:
+                db.execute('ALTER TABLE assets ADD COLUMN vstamp TEXT')
         # The list order, as one index the panel can page through with a key (see EntryStream).
         db.execute('DROP INDEX IF EXISTS asset_order')
         db.execute('CREATE INDEX asset_order ON assets(label COLLATE NOCASE, relpath, root_id)')
@@ -490,6 +513,33 @@ class Library:
         if not p.is_file():
             raise FileNotFoundError("Asset is missing or library is offline: " + str(p))
         return p
+
+    @staticmethod
+    def file_stamp(row):
+        return '%r:%d' % (float(row['mtime'] or 0), int(row['size'] or 0))
+
+    def variant_check_rows(self):
+        """Present USD assets whose file changed since its variant sets last set the automatic tags."""
+        with self.connect() as db:
+            rows = db.execute('''SELECT a.id, a.relpath, a.mtime, a.size, a.vstamp, r.path AS root_path
+                FROM assets a JOIN roots r ON r.id=a.root_id WHERE a.kind='usd' AND a.present=1''').fetchall()
+        return [dict(r) for r in rows if r['vstamp'] != self.file_stamp(r)]
+
+    def save_variant_tags(self, updates):
+        """Apply [(id, variant set names or None, stamp)] from variant_scan.py: the automatic tags
+        follow the sets (None: the file could not be read - only the stamp is kept, so it is not
+        retried until it changes). Tags are read and written in one transaction, so a tag the user
+        edits meanwhile is kept. Returns how many assets' tags changed."""
+        changed = 0
+        with self.connect() as db:
+            for aid, names, stamp in updates:
+                row = db.execute('SELECT tags FROM assets WHERE id=?', (aid,)).fetchone()
+                if row is None:
+                    continue
+                tags = row['tags'] if names is None else sync_auto_tags(row['tags'], names)
+                changed += tags != row['tags']
+                db.execute('UPDATE assets SET tags=?, vstamp=? WHERE id=?', (tags, stamp, aid))
+        return changed
 
     def backup_index(self):
         from datetime import datetime

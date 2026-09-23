@@ -151,6 +151,21 @@ class HoudiniTests(unittest.TestCase):
         # without the flag (no "lod" tag) nothing is added
         self.assertEqual(ops.import_asset(lods,'usd','plain',self.net.path()).type().name(),'reference::2.0')
 
+    def test_a_sources_own_variant_and_lod_sets_get_set_variant_and_auto_select_lod(self):
+        # e.g. ErodiumCiconium_6j98t_Big_OL.usd: "LOD" LOD_0..LOD_2 and "variant" var_01.. on its top prim
+        p=self.root/'native.usda';stage=Usd.Stage.CreateNew(str(p));top=UsdGeom.Xform.Define(stage,'/Plant').GetPrim()
+        for set_name,names in (('LOD',('LOD_0','LOD_1','LOD_2')),('variant',('var_01','var_02'))):
+            vs=top.GetVariantSets().AddVariantSet(set_name)
+            for n in names:vs.AddVariant(n)
+            vs.SetVariantSelection(names[0])
+        stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
+        node=self.load(p,'usd',add_variant_switch=True,add_lod_select=True)
+        self.assertEqual(node.type().name(),'autoselectlod')
+        self.assertEqual((node.parm('primpattern').eval(),node.parm('variantset1').eval(),node.parm('numoflods').eval()),('/assets/test_asset','LOD',3))
+        switch=node.inputs()[0]
+        self.assertEqual(switch.type().name(),'setvariant')
+        self.assertEqual((switch.parm('primpattern1').eval(),switch.parm('variantset1').eval()),('/assets/test_asset','variant'))   # never the LOD set
+
     def _variant_pack_without_switch(self):
         p=self.root/'plain_pack.usda';stage=Usd.Stage.CreateNew(str(p))
         top=UsdGeom.Xform.Define(stage,'/Top');UsdGeom.Xform.Define(stage,'/Top/Root')

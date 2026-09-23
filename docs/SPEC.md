@@ -340,6 +340,13 @@ UI:
 - 成功で`lod`タグとバッジ、削除で外す。素材情報にはUSDの一番上のプリムのvariant set（例: `LOD (4), element (5)`）を表示する。
 - D&D / Import Selected: `lod`タグがあれば`houdini_ops._add_lod_select`がAuto Select LODを追加する（Primitives=配置プリム、Variant Set=`LOD`、段数、距離=対角線×4×2^(k-2)、カメラ=上流の最初のカメラ、無ければ`/cameras/camera1`）。
 
+## 自動タグ（lod / variant）
+
+- `variant_scan.py`（Houdini同梱のPython、`VariantTagJob`）が、索引の`vstamp`（`"mtime:size"`、索引v6で追加）が現在のファイルと違うUSD資産だけを開き、一番上のプリム（default prim、無ければ最初のルートプリム）のvariant set名を読む。`Usd.Stage.OpenMasked`（そのプリムだけ、payloadなし）なので、実ライブラリー914件で約1.2秒、変更なしなら約0.1秒。
+- `core.sync_auto_tags`: 名前が`lod`で始まる（大文字小文字無視、`core.is_lod_set`）セットがあれば`lod`、それ以外のセットがあれば`variant`を付け、無ければ外す。他の語と順序は保つ。`Library.save_variant_tags`は1トランザクション内で現在のtagsを読み直してから書く（並行してユーザーが編集したタグを失わない）。読めなかったファイルはタグに触れずstampだけ記録する。
+- 起動時（1.5秒後、`AUTO_TAGS`）とスキャン完了時に実行し、変化があれば一覧を再読み込みする（バッジはタグから描く）。生成ジョブのタグ操作（`set_tag`）とは独立で、ファイルが変わるため次回の確認で同じ結果になる。
+- D&Dの自動ノード（`houdini_ops._find_variant_set`）は、Referenceで配置したプリム自身→その子孫→（Sublayerでは）ステージ全体の順に探す。Set Variantは`element`を優先し、無ければLOD以外の最初のセット。Auto Select LODは`LOD`、無ければ`is_lod_set`の最初のセット。
+
 ## USD / Asset Catalog
 
 左下の「Libraries...」ボタンの下にある「Catalog」選択欄でUSDの登録先を選びます。素材ルートの`Catalog`内のDBを自動検出します。
@@ -403,6 +410,7 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
 | `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ |
 | `element_gen.py` | 別プロセスでの複数オブジェクトパックの切り替え（`element` variant set）。proxy_gen.pyのファイル入出力を再利用。`anchor`・`remove_variant_set`はlod_gen.pyと共用 |
+| `variant_scan.py` | 別プロセスでUSDのvariant setを読み、`lod` / `variant`タグを同期（新規・変更分のみ） |
 | `lod_gen.py` | 別プロセスでのLOD生成・削除（`LOD` variant set、Auto Select LOD / Stage Manager対応） |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。

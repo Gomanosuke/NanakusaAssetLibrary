@@ -84,6 +84,7 @@ asset/
 
 - **USD**: フォルダーと同じ名前の `.usd / .usdc / .usda / .usdz` を入口として、フォルダー全体を1つの素材として表示します。単体の `.usdz` も表示されます。
   - フォルダーと同じ名前のファイルがなく、`.usd / .usdc / .usda` が複数ある（例: `ErodiumCiconium_6j98t_OL` の中の `…_Big_OL.usd` と `…_Small_OL.usd`、共通の `textures` フォルダー）場合は、それぞれのUSDを別の素材として、そのフォルダーの中に表示します。中の `textures` などはツリーに出しません。
+  - 元から `LOD` や `variant` などのvariant setを持つUSDにも、自動で `lod` / `variant` タグとバッジが付きます（下の「タグとバッジの自動付与」）。
   - このようなUSDは同じフォルダーのテクスチャを使うため、1つだけ別のフォルダーへ移動することはできません。移動する場合はフォルダーごと移動してください。サムネイルは `…_Big_OL_thumbnail.png` のようにUSDごとに作られます。
 - **3DModel**: `.obj .fbx .abc .glb .stl .ply .vdb .bgeo(.sc) .geo(.sc)` など、1つのファイルで形状を読める形式です。FBXの外部画像や元の材質は再構築しません。
 - **Texture**: PNG・JPEG・TIFF・HDR・EXRなどの画像です。Houdiniが元画像の隣に作る変換キャッシュ（`sky_8k.hdr.rat`、`wood.png.tx` のように拡張子が2つ重なるもの）は表示しません。自分で保存した `.rat` / `.tx`（拡張子1つ）は表示します。
@@ -232,6 +233,16 @@ USD資産に、ポリゴン数を減らした段階（LOD）を追加します�
 - 生成に成功すると **`lod` タグ** が付き、サムネイルに **「LOD」** バッジが出ます。
 - **Delete LODs** で、生成前と同じ内容に戻せます（Element Switchなど他の変更は残ります）。変更前のファイルは `data/backups/lod/` に保存されます。
 - 既にLODがある資産はスキップします（段数を変える場合は、先に Delete LODs）。表示・非表示が既に設定されているメッシュを含む資産など、正しく作れない資産も何もせずスキップします。
+
+## タグとバッジの自動付与（lod / variant）
+
+USDの一番上のプリム（配置したプリム）が持つvariant setを読み、タグとサムネイルのバッジを自動で付けます。このツールで作ったものも、元から入っているもの（例: `ErodiumCiconium_6j98t_Big_OL.usd` の `LOD`（LOD_0〜2）と `variant`（var_01〜））も対象です。
+
+- 名前が `LOD` で始まるvariant set → **`lod`** タグ・「LOD」バッジ。
+- それ以外のvariant set（`element`、`variant` など） → **`variant`** タグ・「VARIANT」バッジ。
+- variant setがなくなれば、タグも自動で外れます。他のタグはそのままです。
+- Rescanの後と、パネルを開いた時に、新しいUSDと変更されたUSDだけを裏で調べます（900件程度で約1秒）。
+- ドロップ時の自動ノードも、ファイルのvariant setに合わせます。`variant` タグなら Set Variant（`element` があればそれ、なければ `variant` など最初のもの）、`lod` タグなら Auto Select LOD（`LOD` で始まるvariant set、例: `LOD_0`〜`LOD_2`）が付きます。
 
 ## USD / Asset Catalog
 

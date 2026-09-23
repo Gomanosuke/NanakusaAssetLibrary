@@ -216,22 +216,48 @@ def place_chain(chain, top):
     for i, node in enumerate(chain):
         node.setPosition(top + hou.Vector2(0, -i * CHAIN_STEP))
 
-def _add_variant_switch(parent, node):
-    """Insert a Set Variant LOP after `node` if its composed stage has an "element" variant set
-    (from element_gen.py), pre-wired to the branch prim so a drag-and-dropped multi-object pack
-    is immediately switchable instead of showing every object at once. A no-op if there is none.
-    """
+def _find_variant_set(node, wanted):
+    """(prim, variant set name) the import `node` placed, for the first set name `wanted(names)`
+    picks: the placed prim itself first (where element_gen / lod_gen and most sources put them),
+    then prims below it (older element switches), then - for a sublayer, which has no single
+    placed prim - the whole stage. (None, None) if there is none."""
+    import hou
+    from pxr import Usd
     node.cook(force=True)
     stage = node.stage()
-    target_path = next((str(p.GetPath()) for p in stage.Traverse() if p.GetVariantSets().HasVariantSet('element')), None) if stage else None
-    if target_path is None:
+    if stage is None:
+        return None, None
+    placed = None
+    for parm_name in ('primpath1', 'primpath'):
+        parm = node.parm(parm_name)
+        if parm is not None and node.type().name().startswith('reference'):
+            placed = stage.GetPrimAtPath(parm.eval())
+            break
+    prims = Usd.PrimRange(placed) if placed else stage.Traverse()
+    for prim in prims:
+        name = wanted(list(prim.GetVariantSets().GetNames()))
+        if name:
+            return prim, name
+    return None, None
+
+def _add_variant_switch(parent, node):
+    """Insert a Set Variant LOP after `node` if the placed asset has a variant set to choose from:
+    "element" (element_gen.py, a multi-object pack) or else the source's own (e.g. "variant"
+    var_01..), never a level-of-detail set. Pre-wired to that prim and index 0 (the first variant),
+    so a dropped pack is switchable at once. A no-op if there is none."""
+    def wanted(names):
+        others = [n for n in names if not core.is_lod_set(n)]
+        return 'element' if 'element' in others else (others[0] if others else None)
+    prim, set_name = _find_variant_set(node, wanted)
+    if prim is None:
         return node
+    target_path = str(prim.GetPath())
     switch = parent.createNode('setvariant', node.name() + '_variant')
     switch.setInput(0, node)
     switch.parm('num_variants').set(1)
     switch.parm('enable1').set(True)
     switch.parm('primpattern1').set(target_path)
-    switch.parm('variantset1').set('element')
+    switch.parm('variantset1').set(set_name)
     # Requested so the node reads correctly no matter how many elements the pack has, without
     # needing to know the variant names in advance: index 0 is always Element0, the default shown.
     switch.parm('variantnameuseindex1').set(True)
@@ -243,21 +269,22 @@ LOD_DISTANCE_FACTOR = 4.0   # LOD_2 from 4x the asset's diagonal away, then twic
 DEFAULT_CAMERA = '/cameras/camera1'   # where a Camera LOP puts its first camera
 
 def _add_lod_select(parent, node):
-    """Append an Auto Select LOD LOP set up for the asset's "LOD" variant set (lod_gen.py): the
-    placed prim, one entry per level, and thresholds scaled from the asset's size, so it picks a
-    level by camera distance out of the box. A no-op if the asset has no LODs."""
+    """Append an Auto Select LOD LOP set up for the asset's level-of-detail variant set ("LOD" from
+    lod_gen.py, or a source's own such as LOD_0..LOD_2): the placed prim, one entry per level, and
+    thresholds scaled from the asset's size, so it picks a level by camera distance out of the box.
+    A no-op if the asset has no LODs."""
     import hou
     from pxr import Usd, UsdGeom
-    node.cook(force=True)
-    stage = node.stage()
-    prim = next((p for p in stage.Traverse() if p.GetVariantSets().HasVariantSet(LOD_VARIANT_SET)), None) if stage else None
+    prim, set_name = _find_variant_set(node, lambda names: next(
+        (n for n in names if n == LOD_VARIANT_SET), next((n for n in names if core.is_lod_set(n)), None)))
     if prim is None:
         return node
-    names = prim.GetVariantSet(LOD_VARIANT_SET).GetVariantNames()
+    stage = node.stage()
+    names = prim.GetVariantSet(set_name).GetVariantNames()
     select = parent.createNode('autoselectlod', node.name() + '_lod')
     select.setInput(0, node)
     select.parm('primpattern').set(str(prim.GetPath()))
-    select.parm('variantset1').set(LOD_VARIANT_SET)
+    select.parm('variantset1').set(set_name)
     select.parm('numoflods').set(len(names))
     bound = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ['default', 'render']).ComputeWorldBound(prim).ComputeAlignedRange()
     size = bound.GetSize().GetLength() if not bound.IsEmpty() else 1.0

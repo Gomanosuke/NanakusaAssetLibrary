@@ -122,6 +122,8 @@
 - ui.pyの`ElementJob`が結果を検証してから、data/backups/element/へ元ファイルをバックアップし、os.replaceで置き換える。ダイアログでの値入力は無い（設定不要な機能）。
 - 取り消し用に`ElementDeleteJob`（`_MeshGenerateJob`、extra_args=('remove',)）と「Delete Element Switch」メニューがある。`UsdVariantSets`にこのUSDバージョンでは`RemoveVariantSet`が無いため、element_gen.pyの`_remove_element_switch`は`Sdf.PrimSpec`（`spec.variantSets`/`variantSelections`/`variantSetNameList`）を直接編集して消す。新しいUSDバージョンで`RemoveVariantSet`相当が使えるようになっても、Sdf直接編集の方が「バリアント内に書いた可視性の上書きも含めて丸ごと消える」ことが検証済みなので、無理に置き換えなくてよい。
 - 生成成功時（`ElementJob`のresultメッセージが"Element switch added"で始まる時）、ui.pyの`set_variant_tag(aid, True)`が対象資産のtagsへ`variant`を自動追加する。削除成功時（`ElementDeleteJob`のresultが"Element switch removed"で始まる時）は`set_variant_tag(aid, False)`で外す。スキップ時（既にある/対象がない）は触らない。generator側（element_gen.py）はタグの存在を知らない・関与しない。
+- `lod` / `variant`タグは、生成ジョブの成功時（`set_tag`）に加え、`variant_scan.py`（VariantTagJob、起動時とスキャン後、`vstamp`が古いUSDだけ）がファイルの一番上のプリムのvariant setから同期する（元から入っているLOD / variantにも付く。ユーザー指示 2026-09-23）。テストのパネルでは`ui.LibraryWidget.AUTO_TAGS=False`（tests/test_ui.py冒頭）で自動起動を止めている。
+- テストでジョブを実際に起動させない（ダイアログをpatchしても`queue_*`が本物だと、終了時に実行中のQThreadでhythonが異常終了する: 0xC0000409）。
 - 一覧のサムネイルは`load_icons()`が`entry['rep']['tags']`（DBの`tags`列、ファイルを開かない）に`variant`があるかどうかだけで`variant_badge()`を重ねるかを決める。USDを毎回開いて`HasVariantSet`を確認するのは大きいライブラリーで遅すぎるため、このタグをキャッシュ代わりに使う設計。ユーザーが手動でtagsに`variant`を足し引きした場合もバッジは連動する（それが仕様）。
 - `set_variant_tag`はDB更新後、`item_index`→`icons_loaded.discard`+`icon_todo.appendleft`+`icon_timer.start(0)`で該当アイテムの再描画を強制する（`thumbnail_done`と同じパターン）。選択中の資産ならTagsフィールド反映のため`selection_changed()`も呼ぶ。
 

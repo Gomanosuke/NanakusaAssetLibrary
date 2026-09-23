@@ -193,6 +193,40 @@ class ScanJob(QtCore.QThread):
                 results.append((root['label'], {'count': 0, 'errors': [str(exc)]}))
         self.done.emit(results)
 
+class VariantTagJob(QtCore.QThread):
+    """Sync the automatic "lod" / "variant" tags with the variant sets USD files really have
+    (variant_scan.py, Houdini's plain Python, only new or changed files)."""
+    done = QtCore.Signal(object)
+    def __init__(self, library):
+        super().__init__()
+        self.library = library
+        self.hfs = hou.getenv('HFS')
+        self.python = ScanJob.find_python(self.hfs)
+
+    def run(self):
+        result = {'checked': 0, 'changed': 0, 'errors': []}
+        try:
+            process = subprocess.Popen([str(self.python), str(Path(__file__).with_name('variant_scan.py')), str(self.library.data_dir)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=plain_python_env(self.hfs), **background())
+            try:
+                while True:
+                    if self.isInterruptionRequested():
+                        return
+                    try:
+                        out, err = process.communicate(timeout=.2); break
+                    except subprocess.TimeoutExpired:
+                        pass
+            finally:
+                if process.poll() is None:
+                    process.kill(); process.communicate()
+            lines = [line[9:] for line in out.decode('utf-8', errors='replace').splitlines() if line.startswith('NAL_TAGS:')]
+            if not lines:
+                raise RuntimeError(err.decode(errors='replace')[-500:] or 'The variant check failed')
+            result = json.loads(lines[-1])
+        except Exception as exc:
+            result['errors'].append(str(exc))
+        self.done.emit(result)
+
 class ThumbnailJob(QtCore.QThread):
     done = QtCore.Signal(str, str, str)
     def __init__(self, asset_id, source, dest):
@@ -463,6 +497,7 @@ class ManifestDialog(QtWidgets.QDialog):
 class LibraryWidget(QtWidgets.QWidget):
     CHUNK = 200   # items added each time the list is scrolled near its end
     ICON_THREADS = max(2, min(4, QtCore.QThread.idealThreadCount() - 1))
+    AUTO_TAGS = True   # sync "lod" / "variant" tags from USD variant sets after scans and on opening (tests switch it off)
     def __init__(self, parent=None, data_dir=None, initial_root=None):
         super().__init__(parent)
         self.setObjectName('NanakusaAssetLibrary')
@@ -509,10 +544,13 @@ class LibraryWidget(QtWidgets.QWidget):
         self.icon_sink=IconSink();self.icon_sink.decoded.connect(self.icon_decoded);self.icon_waiting={}
         self.info_wanted=None;self.info_timer=QtCore.QTimer(self);self.info_timer.setSingleShot(True);self.info_timer.setInterval(250);self.info_timer.timeout.connect(self.start_info)
         self.missing_scan=None
+        self.tag_job=None;self.tag_again=False
+        self.tag_timer=QtCore.QTimer(self);self.tag_timer.setSingleShot(True);self.tag_timer.timeout.connect(self.start_variant_tags)
         dragdrop.install()
         self._setup()
         self.rebuild_tree()
         self.refresh()
+        if self.AUTO_TAGS:self.tag_timer.start(1500)   # after the panel has drawn: new / changed files only
 
     def _button(self, text, callback, layout):
         button = QtWidgets.QPushButton(text)
@@ -521,7 +559,7 @@ class LibraryWidget(QtWidgets.QWidget):
         return button
 
     def closeEvent(self,event):
-        for timer in (self.scroll_timer,self.icon_timer,self.info_timer,self.folder_timer,self.search_timer,self.jobs_timer):timer.stop()
+        for timer in (self.scroll_timer,self.icon_timer,self.info_timer,self.folder_timer,self.search_timer,self.jobs_timer,self.tag_timer):timer.stop()
         self.missing_scan=None;self.close_stream()
         self.icon_todo.clear();self.icon_pool.clear();self.icon_pool.waitForDone(2000)
         # A folder migration only reads/writes the index; stop it and wait briefly so it never
@@ -1409,6 +1447,25 @@ class LibraryWidget(QtWidgets.QWidget):
         for name,result in results:
             messages.append(name+': '+('Cancel' if result.get('cancelled') else str(result['count'])+' assets')+(' / '+ '; '.join(result['errors'][:3]) if result.get('errors') else ''))
         self.status.setText(' | '.join(messages) or 'No libraries to scan')
+        if self.AUTO_TAGS:self.start_variant_tags()
+
+    def start_variant_tags(self):
+        """Open new / changed USD files in the background and set their "lod" / "variant" tags."""
+        if self.tag_job is not None:
+            self.tag_again=True;return   # a scan finished while checking: check its files too
+        job=VariantTagJob(self.library)
+        if job.python is None:return
+        self.tag_job=job;job.done.connect(self.variant_tags_done)
+        _keep_job(job)
+
+    def variant_tags_done(self,result):
+        self.tag_job=None
+        if result.get('changed'):
+            self.refresh()   # the list holds the old tags; refresh keeps the scroll position
+            self.status.setText(f"Tagged from USD variant sets: {result['changed']} asset(s) got or lost the lod / variant tag"
+                                +(' ('+'; '.join(result['errors'][:2])+')' if result.get('errors') else ''))
+        if self.tag_again:
+            self.tag_again=False;self.start_variant_tags()
 
     def new_folder(self):
         folder=self.current_folder()
@@ -1437,6 +1494,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.missing_scan is not None:parts.append('checking thumbnails')
         if self.missing_proxy_scan is not None:parts.append('checking USD for proxies')
         if self.missing_lod_scan is not None:parts.append('checking USD for LODs')
+        if self.tag_job is not None:parts.append('reading USD variant sets for tags')
         if parts:self.jobs_label.setText('Background: '+'  ·  '.join(parts)+' remaining')
         self.jobs_bar.setVisible(bool(parts))
 

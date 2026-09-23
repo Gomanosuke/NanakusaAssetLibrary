@@ -4,6 +4,7 @@ from unittest.mock import patch,MagicMock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 from hutil.PySide import QtWidgets
 from nanakusa_asset_library import ui
+ui.LibraryWidget.AUTO_TAGS=False   # no background variant-tag process from every test panel (tested on its own below)
 
 
 class LibraryUiTests(unittest.TestCase):
@@ -394,8 +395,11 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(widget.proxy_queue,ui.deque())   # cancelled: nothing queued
             self.assertNotIn('proxy_target_triangles',widget.settings)
 
-            with patch.object(ui.QtWidgets.QInputDialog,'getInt',return_value=(150,True)):
+            # queue_proxy patched: a real proxy job on this dummy file could still be running when the
+            # test process exits, which aborts hython ("QThread destroyed while still running").
+            with patch.object(ui.QtWidgets.QInputDialog,'getInt',return_value=(150,True)),patch.object(ui.LibraryWidget,'queue_proxy') as queue:
                 widget.generate_proxy()
+            queue.assert_called_once()
             self.assertEqual(widget.settings['proxy_target_triangles'],150)
             with patch.object(ui.QtWidgets.QInputDialog,'getInt') as dlg2:
                 dlg2.return_value=(150,False)
@@ -714,6 +718,49 @@ class LibraryUiTests(unittest.TestCase):
         with self.assertRaises(asset_info.NeedsHython):asset_info.inspect('x.obj','model',plain=True)
         env=ui.plain_python_env('C:/HFS')
         self.assertNotIn('PXR_PLUGINPATH_NAME',env);self.assertTrue(env['PATH'].startswith(str(Path('C:/HFS')/'bin')))
+
+    def test_variant_sets_in_usd_files_set_lod_and_variant_tags_and_badges(self):
+        # The real worker (variant_scan.py in Houdini's plain Python) on real USD files.
+        from pxr import Usd,UsdGeom
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            def usd(rel,sets):
+                p=root/rel;p.parent.mkdir(parents=True,exist_ok=True)
+                stage=Usd.Stage.CreateNew(str(p));top=UsdGeom.Xform.Define(stage,'/Top').GetPrim()
+                for name,variants in sets.items():
+                    vs=top.GetVariantSets().AddVariantSet(name)
+                    for v in variants:vs.AddVariant(v)
+                stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
+            usd('USD/Misc/Plant_OL/Plant_Big_OL.usda',{'LOD':['LOD_0','LOD_1'],'variant':['var_01','var_02']})
+            usd('USD/Misc/Plant_OL/Plant_Small_OL.usda',{'LOD':['LOD_0','LOD_1']})
+            usd('USD/Misc/Plain/Plain.usda',{})
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            rid=widget.library.roots()[0]['id'];widget.library.scan(rid)
+            plain=next(r for r in widget.library.assets() if r['label']=='Plain')
+            widget.library.update(plain['id'],tags='keep variant')   # a stale automatic tag goes, the user's word stays
+            tags=lambda:{r['label']:r['tags'] for r in widget.library.assets()}
+            original=ui.LibraryWidget.variant_tags_done
+            def run():
+                done=[]
+                def record(self_,result):done.append(result);original(self_,result)
+                with patch.object(ui.LibraryWidget,'variant_tags_done',record):
+                    widget.start_variant_tags();self.assertIsNotNone(widget.tag_job)
+                    start=time.monotonic()
+                    while not done and time.monotonic()-start<60:self.app.processEvents()
+                return done[0]
+            result=run()
+            self.assertEqual(result['checked'],3,result);self.assertFalse(result['errors'],result)
+            self.assertEqual(tags(),{'Plant_Big_OL':'lod variant','Plant_Small_OL':'lod','Plain':'keep'})
+            self.assertEqual(run()['checked'],0)   # unchanged files are not opened again
+            # badges follow the tags in the list
+            widget.refresh()
+            big=widget.page_entries[widget.item_index[next(r['id'] for r in widget.rows if r['label']=='Plant_Big_OL')]]
+            with patch.object(ui.LibraryWidget,'variant_badge',return_value=ui.QtGui.QIcon()) as badge:
+                index=widget.item_index[big['rep']['id']];widget.icons_loaded.discard(index);widget.icon_todo.append(index);widget.load_icons()
+                start=time.monotonic()
+                while widget.icons_pending() and time.monotonic()-start<10:self.app.processEvents()
+                self.assertIn(['VARIANT','LOD'],[c.args[1] for c in badge.call_args_list])
+            widget.close();widget.deleteLater()
 
     def test_lod_menus_jobs_and_tag(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):

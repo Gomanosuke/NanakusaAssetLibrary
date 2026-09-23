@@ -56,6 +56,30 @@ class LibraryTests(unittest.TestCase):
         tree=[r for r in self.lib.assets() if r['relpath'].startswith('USD/Misc/Tree/')]
         self.assertEqual([r['relpath'] for r in tree],['USD/Misc/Tree/Tree.usd']);self.assertTrue(core.is_usd_package(tree[0]))
 
+    def test_automatic_tags_follow_variant_sets_and_keep_the_users_words(self):
+        from nanakusa_asset_library.core import sync_auto_tags,is_lod_set
+        self.assertTrue(is_lod_set('LOD'));self.assertTrue(is_lod_set('lods'));self.assertFalse(is_lod_set('variant'))
+        self.assertEqual(sync_auto_tags('wood',['LOD','variant']),'wood lod variant')
+        self.assertEqual(sync_auto_tags('lod wood variant',['element']),'wood variant')
+        self.assertEqual(sync_auto_tags('lod wood variant',[]),'wood')
+        self.assertEqual(sync_auto_tags('variant wood lod',['LOD_levels','model']),'variant wood lod')   # order kept
+        self.write('USD/a/a.usda');self.lib.scan(self.rid);row=self.lib.assets()[0]
+        self.assertEqual([r['id'] for r in self.lib.variant_check_rows()],[row['id']])
+        stamp=Library.file_stamp(row)
+        self.lib.update(row['id'],tags='mine')   # edited after the worker read the list: kept
+        self.assertEqual(self.lib.save_variant_tags([(row['id'],['LOD'],stamp)]),1)
+        self.assertEqual(self.lib.assets()[0]['tags'],'mine lod');self.assertEqual(self.lib.variant_check_rows(),[])
+        self.assertEqual(self.lib.save_variant_tags([(row['id'],None,stamp)]),0)   # unreadable: tags untouched
+        self.write('USD/a/a.usda','changed');self.lib.scan(self.rid)
+        self.assertEqual(len(self.lib.variant_check_rows()),1)   # a changed file is checked again
+
+    def test_index_upgrade_adds_the_variant_stamp_column(self):
+        with self.lib.connect() as db:db.execute('ALTER TABLE assets DROP COLUMN vstamp');db.execute('PRAGMA user_version=5')
+        again=Library(self.base/'index')
+        with again.connect() as db:
+            self.assertIn('vstamp',{r[1] for r in db.execute('PRAGMA table_info(assets)')})
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],Library.VERSION)
+
     def test_fixed_genres_and_single_file_models(self):
         for path in ('3DModel/a.obj','3DModel/b.fbx','3DModel/smoke.vdb','Texture/a.tif','Texture/sky.hdr'):self.write(path)
         for path in ('3DModel/color.png','3DModel/multi.gltf','Texture/model.obj','Other/a.obj'):self.write(path)
