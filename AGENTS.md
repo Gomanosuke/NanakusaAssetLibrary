@@ -100,6 +100,7 @@
 - ui.pyの`ProxyJob`が結果を検証してから、data/backups/proxy/へ元ファイルをバックアップし、os.replaceで置き換える。失敗・スキップ時は元ファイルを一切変更しない（生成スクリプト単体はSave()せずExport/CreateNewUsdzPackageで新規ファイルに書き出すだけ）。
 - **一時出力ファイルは元ファイルと同じフォルダーに書く**（tempfile.TemporaryDirectory()配下ではない）。os.replaceはWindowsで別ドライブ間の置き換えができない（WinError 17）。素材ライブラリーとシステムTEMPが別ドライブの構成で実際に踏んだ既知の不具合（バックアップだけ作られ元ファイルは変更されないまま失敗する）。
 - 実行時にダイアログでtarget trianglesを聞く。値はsettings.jsonに保存し次回の初期値にする。ダイアログをテストする時はQtWidgets.QInputDialog.getIntをpatchする。
+- variantでメッシュを切り替える資産（配布元の`variant` set: `var_01`〜、各`LOD_*`がメッシュを定義し、選ばれなかったものを`active=false`）では、今の選択で見えるメッシュだけを見てはいけない。proxy_genはLOD以外の各variantを1つずつsession layerで選んで全メッシュを集め、proxyをメッシュと同じvariantに定義し、メッシュの`active`/`visibility`の意見をproxyにも写す（LOD系setは除外）。tests/test_proxy.pyの`ProxyGenVariantTests`が、全組み合わせで「Scene Viewは選んだもののproxyだけ、レンダーはそのメッシュだけ」を確認する。2026-09-23に旧方式で壊れた52件を作り直した（壊れた版は`data/backups/proxy_repair/`）。
 - ui.pyの`_MeshGenerateJob`（`ProxyJob`/`ElementJob`/`LodJob`などの共通基底）が共有の subprocess/backup/os.replace ロジックを持つ。新しいジェネレーターもこのクラスを再利用する。
 
 ## LOD

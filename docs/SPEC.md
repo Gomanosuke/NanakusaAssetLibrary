@@ -282,6 +282,13 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
   - `divide`（Convex Polygons、最大3辺）で三角形化してから減らす。`polyreduce`の目標数はプリミティブ数であり、四角形・多角形主体のメッシュのまま渡すと、指定した三角形数のおよそ2倍が残ってしまう。
 - 各`UsdGeom.Mesh`を、三角形換算で`target_triangles`（ダイアログで指定、既定`TARGET_TRIANGLES`=300）を超える場合のみデシメートする。小さいメッシュはそのまま複製する。結果は元プリムの兄弟として`<name>_proxy`に追加し、`purpose=proxy`を設定する。元プリムには`purpose=render`を明示する（Scene Viewでproxyが優先されるため）。名前衝突時は`_`を付けて回避する。
   - 元プリムの束縛材質からbase colorテクスチャを検出できた場合（`UsdPreviewSurface`の`diffuseColor`/`baseColor`が`UsdUVTexture`に接続され、`file`が解決できる形）、そのUV primvar（`UsdPrimvarReader`の`varname`、既定`st`。`faceVarying`/`vertex`/`uniform`/`constant`のいずれの補間にも対応）を使い、Houdiniの`attribfrommap`相当でテクスチャ色を頂点（点）ごとにサンプルし、`primvars:displayColor`（vertex補間）としてproxyへ焼き込む。デシメート後も色は点属性としてそのまま補間で引き継がれる（`polyreduce`が境界で多少オーバーシュートすることがあるため0〜1にクランプする）。材質・テクスチャが見つからない場合は無地のまま。
+- **variantのある資産**（例: `ThymusVulgaris_e95j6_*_OL.usd`。各`LOD_*` variantが`var_01`〜を定義し、`variant` setが選ばれなかったものを`active=false`にする）:
+  - 対象メッシュは、そのままの状態に加え、LOD以外の各variant setの各variantを1つずつsession layerで選んで集める（`_collect_meshes`。ファイルの選択は変えない）。LOD系のset（`lod`で始まる名前）は切り替えない（形状が変わるだけで、proxyは1つで全段を代表する）。
+  - proxyはメッシュが定義されている場所に作る。メッシュがvariantの中でだけ定義されている場合は、定義している全variantへ`Sdf.CopySpec`で同じproxyを置く（`_variant_definitions`）。
+  - メッシュの`active`・`visibility`の意見（直接のもの、およびLOD以外の全variantの中のもの）をproxyにも同じ場所で書く（`_copy_switching`）。これで選ばれなかったversionのproxyも一緒に消える。LOD系のsetは写さない（lod_genが元メッシュを隠しても、proxyは代表として残す）。
+  - `purpose=render`はSdfで直接書く（メッシュが今の選択では合成されていない場合があるため）。lod_genが先に作った`<名前>_LOD_k`の複製も`purpose=render`にする（`_mark_lod_copies_render`。そうしないとScene Viewにproxyと並んで出る）。
+  - 修正前（0.21.0まで）は今の選択で見えるメッシュ（var_01）だけにproxyを作り、variantの外に置いていたため、var_02以降を選ぶとScene Viewに「var_01のproxy」と「選んだものの形状」が並んで出た。実ライブラリーの52件を、proxy生成前のバックアップ（旧proxyを取り除いた結果がバックアップと完全一致することを確認）から作り直した（壊れていたファイルは`data/backups/proxy_repair/`）。
+- デシメートへの受け渡しはメモリー上のジオメトリ（Stash SOP）、読み戻しは一括の属性読み取り（点番号を点属性にして角へpromoteし`vertexIntAttribValues`）。以前のOBJ書き出し＋頂点ごとのPythonループでは、100万三角形×6のSalixCaprea_1x94n_Big_OL（葉が離れた部品のためpolyreduceでも約25万三角形までしか減らない）が201秒かかりジョブの240秒制限を超えた。現在は69秒。
 - 出力は常に新規ファイルへの書き出し（`Sdf.Layer.Export`）。元ファイルへの`Save()`は行わない。
 - `.usdz`は`UsdUtils.ExtractUsdzPackage`で展開し、アーカイブの先頭エントリ（usdz仕様のルートレイヤー）だけを編集する。展開先で参照・テクスチャは相対パスのまま解決できる。編集後は`UsdUtils.CreateNewUsdzPackage`で参照ファイルごと再パッケージする。
 

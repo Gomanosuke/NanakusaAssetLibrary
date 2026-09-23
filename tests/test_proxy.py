@@ -135,6 +135,79 @@ class ProxyGenTests(unittest.TestCase):
             self.assertEqual(check.GetPrimAtPath('/Asset/geo_proxy_').GetTypeName(),'Mesh')
 
 
+def shown(stage, root='/Plant'):
+    """(viewport, render): visible meshes whose purpose the viewport (default + proxy) and a
+    render (default + render) draw."""
+    viewport,render=[],[]
+    for p in Usd.PrimRange(stage.GetPrimAtPath(root)):
+        if not p.IsA(UsdGeom.Mesh) or UsdGeom.Imageable(p).ComputeVisibility()=='invisible':continue
+        purpose=UsdGeom.Imageable(p).ComputePurpose()
+        if purpose in ('default','proxy'):viewport.append(p.GetName())
+        if purpose in ('default','render'):render.append(p.GetName())
+    return viewport,render
+
+
+class ProxyGenVariantTests(unittest.TestCase):
+    def native_variants(self,folder):
+        """Like ThymusVulgaris_e95j6_*_OL.usd: every LOD variant defines its own var_01..var_03
+        meshes, and the "variant" set deactivates the versions not chosen."""
+        src=Path(folder)/'plant.usda';stage=Usd.Stage.CreateNew(str(src))
+        top=UsdGeom.Xform.Define(stage,'/Plant').GetPrim();stage.DefinePrim('/Plant/geo','Scope')
+        lod=top.GetVariantSets().AddVariantSet('LOD')
+        for level,n in (('LOD_0',6),('LOD_1',4)):
+            lod.AddVariant(level);lod.SetVariantSelection(level)
+            with lod.GetVariantEditContext():
+                for name in ('var_01','var_02','var_03'):grid_mesh(stage,f'/Plant/geo/{name}',n)
+        lod.SetVariantSelection('LOD_0')
+        choice=top.GetVariantSets().AddVariantSet('variant')
+        for chosen in ('var_01','var_02','var_03'):
+            choice.AddVariant(chosen);choice.SetVariantSelection(chosen)
+            with choice.GetVariantEditContext():
+                for other in ('var_01','var_02','var_03'):
+                    if other!=chosen:stage.OverridePrim(f'/Plant/geo/{other}').SetActive(False)
+        choice.SetVariantSelection('var_01')
+        stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
+        return src
+
+    def test_every_version_gets_a_proxy_that_is_switched_with_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=self.native_variants(folder);out=Path(folder)/'out.usda'
+            before=Usd.Stage.Open(str(src));self.assertEqual(shown(before),(['var_01'],['var_01']))
+            result=generate(src,out)
+            self.assertEqual(result['proxied'],['/Plant/geo/var_01','/Plant/geo/var_02','/Plant/geo/var_03'])
+            stage=Usd.Stage.Open(str(out));stage.SetEditTarget(stage.GetSessionLayer())
+            sets=stage.GetPrimAtPath('/Plant').GetVariantSets()
+            self.assertEqual(sets.GetVariantSet('variant').GetVariantSelection(),'var_01')   # the file's selections are untouched
+            for chosen in ('var_01','var_02','var_03'):
+                for level in ('LOD_0','LOD_1'):
+                    sets.GetVariantSet('variant').SetVariantSelection(chosen);sets.GetVariantSet('LOD').SetVariantSelection(level)
+                    # the viewport shows only the chosen version's proxy, a render only its mesh
+                    self.assertEqual(shown(stage),([chosen+'_proxy'],[chosen]),(chosen,level))
+
+    def test_a_proxy_keeps_standing_in_while_our_own_lod_hides_the_original_mesh(self):
+        from nanakusa_asset_library import lod_gen
+        with tempfile.TemporaryDirectory() as folder:
+            src=Path(folder)/'asset.usda';stage=Usd.Stage.CreateNew(str(src))
+            top=UsdGeom.Xform.Define(stage,'/Plant').GetPrim();grid_mesh(stage,'/Plant/body',12)
+            stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
+            lod_gen.generate(src,Path(folder)/'lod.usda',2,50)
+            generate(Path(folder)/'lod.usda',Path(folder)/'out.usda')
+            out=Usd.Stage.Open(str(Path(folder)/'out.usda'));out.SetEditTarget(out.GetSessionLayer())
+            self.assertEqual(shown(out),(['body_proxy'],['body']))
+            out.GetPrimAtPath('/Plant').GetVariantSet('LOD').SetVariantSelection('LOD_2')
+            self.assertEqual(shown(out),(['body_proxy'],['body_LOD_2']))   # the LOD copy is render-only
+
+    def test_the_mesh_as_authored_still_gets_a_sibling_proxy_outside_any_variant(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=Path(folder)/'asset.usda';stage=Usd.Stage.CreateNew(str(src))
+            top=UsdGeom.Xform.Define(stage,'/Plant').GetPrim();grid_mesh(stage,'/Plant/body',4)
+            stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
+            generate(src,Path(folder)/'out.usda')
+            layer=Sdf.Layer.FindOrOpen(str(Path(folder)/'out.usda'))
+            self.assertEqual(layer.GetPrimAtPath('/Plant/body_proxy').specifier,Sdf.SpecifierDef)
+            self.assertEqual(layer.GetPrimAtPath('/Plant/body').attributes['purpose'].default,'render')
+
+
 def textured_quad(stage, path, tex_path):
     """A UsdPreviewSurface-bound quad whose left half samples red and right half samples blue."""
     import OpenImageIO as oiio

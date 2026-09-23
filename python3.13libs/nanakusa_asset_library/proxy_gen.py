@@ -38,86 +38,89 @@ def _decimate(points, face_vertex_counts, face_vertex_indices, target=None, text
     `face_vertex_indices`), and/or reduce to about `target` triangles (fuse+triangulate+polyreduce).
 
     Returns (points, face_vertex_counts, face_vertex_indices, colors_or_None). Callers skip this
-    entirely when there is neither a target nor a texture, since even a no-op call round-trips
-    through an OBJ file and a node network.
+    entirely when there is neither a target nor a texture, since even a no-op call builds a node
+    network.
+
+    The mesh goes in as in-memory geometry (a Stash SOP) and comes back through bulk attribute
+    reads: meshes of a million triangles (SalixCaprea_1x94n_Big_OL.usd), whose thousands of
+    separate leaves polyreduce cannot bring below ~250k triangles, took minutes per mesh through
+    an OBJ file and a per-vertex Python loop and ran into the job's time limit.
     """
     import hou
+    import numpy
+    points = numpy.asarray(points, dtype=numpy.float64).reshape(-1, 3)
     scratch = hou.node('/obj').createNode('geo', 'nanakusa_proxy_scratch')
     try:
-        source = scratch.createNode('file')
-        handle, obj_name = tempfile.mkstemp(suffix='.obj', prefix='nanakusa_proxy_')
-        os.close(handle)
-        obj_path = Path(obj_name)
-        with obj_path.open('w') as stream:
-            for x, y, z in points:
-                stream.write('v %.9g %.9g %.9g\n' % (x, y, z))
-            if uvs:
-                for u, v in uvs:
-                    stream.write('vt %.9g %.9g\n' % (u, v))
-            offset = 0
-            for count in face_vertex_counts:
-                if uvs:
-                    # face_vertex_indices[i] is the point (v); i itself is this face-vertex's
-                    # position in the flat, face-vertex-ordered uvs list (vt) written above.
-                    corners = ('%d/%d' % (face_vertex_indices[i]+1, i+1) for i in range(offset, offset+count))
-                else:
-                    corners = (str(i+1) for i in face_vertex_indices[offset:offset+count])
-                stream.write('f ' + ' '.join(corners) + '\n')
-                offset += count
-        try:
-            source.parm('file').set(str(obj_path))
-            node = source
-            if texture_path and uvs:
-                bake = scratch.createNode('attribfrommap')
-                bake.setInput(0, node)
-                bake.parm('use_file').set('on')
-                bake.parm('filename').set(str(texture_path))
-                bake.parm('uvattrib').set('uv')
-                bake.parm('export_attribute').set('Cd')
-                bake.parm('attrib_type').set('vector')
-                node = bake
-            if target is not None:
-                # Points meant to be connected often arrive as separate coincident copies (UV or
-                # material seams), so without this polyreduce treats every seam-bound island as
-                # its own tiny piece and shrinks each independently, breaking the overall shape.
-                lo = [min(p[axis] for p in points) for axis in range(3)]
-                hi = [max(p[axis] for p in points) for axis in range(3)]
-                diagonal = sum((hi[axis]-lo[axis])**2 for axis in range(3))**0.5
-                fuse = scratch.createNode('fuse')
-                fuse.setInput(0, node)
-                fuse.parm('usetol3d').set(True)
-                fuse.parm('tol3d').set(max(diagonal*0.0002, 1e-6))
-                # polyreduce's "Output Polygon Count" counts primitives, not triangles; triangulating
-                # first (quads and n-gons are common in source meshes) makes that count exactly the
-                # triangle count `target` means, instead of leaving roughly twice as many as asked.
-                triangulate = scratch.createNode('divide')
-                triangulate.setInput(0, fuse)
-                triangulate.parm('convex').set(True)
-                triangulate.parm('usemaxsides').set(True)
-                triangulate.parm('numsides').set(3)
-                reduce_node = scratch.createNode('polyreduce::2.0')
-                reduce_node.setInput(0, triangulate)
-                reduce_node.parm('target').set('poly_count')
-                reduce_node.parm('finalcount').set(max(int(target), 4))
-                node = reduce_node
-            node.cook(force=True)
-            if node.errors():
-                raise RuntimeError('; '.join(node.errors()))
-            geo = node.geometry()
-            out_points = [tuple(p.position()) for p in geo.points()]
-            out_counts, out_indices = [], []
-            for prim in geo.prims():
-                verts = prim.vertices()
-                out_counts.append(len(verts))
-                out_indices.extend(v.point().number() for v in verts)
-            colors = None
-            cd = geo.findPointAttrib('Cd')
-            if cd is not None:
-                # polyreduce's attribute blending can overshoot slightly at sharp color edges.
-                colors = [tuple(min(1.0, max(0.0, c)) for c in p.attribValue('Cd')) for p in geo.points()]
-            return out_points, out_counts, out_indices, colors
-        finally:
-            obj_path.unlink(missing_ok=True)
+        geo = hou.Geometry()
+        geo.createPoints(points.tolist())
+        polys, offset = [], 0
+        for count in face_vertex_counts:
+            polys.append(tuple(face_vertex_indices[offset:offset + count]))
+            offset += count
+        geo.createPolygons(polys)
+        if uvs:
+            # one (u, v) per face-vertex, in the same face-vertex order the polygons were made in
+            geo.addAttrib(hou.attribType.Vertex, 'uv', (0.0, 0.0, 0.0))
+            flat = numpy.zeros((len(uvs), 3)); flat[:, :2] = numpy.asarray(uvs, dtype=numpy.float64).reshape(-1, 2)
+            geo.setVertexFloatAttribValues('uv', flat.ravel().tolist())
+        source = scratch.createNode('stash')
+        source.parm('stash').set(geo)
+        node = source
+        if texture_path and uvs:
+            bake = scratch.createNode('attribfrommap')
+            bake.setInput(0, node)
+            bake.parm('use_file').set('on')
+            bake.parm('filename').set(str(texture_path))
+            bake.parm('uvattrib').set('uv')
+            bake.parm('export_attribute').set('Cd')
+            bake.parm('attrib_type').set('vector')
+            node = bake
+        if target is not None:
+            # Points meant to be connected often arrive as separate coincident copies (UV or
+            # material seams), so without this polyreduce treats every seam-bound island as
+            # its own tiny piece and shrinks each independently, breaking the overall shape.
+            diagonal = float(numpy.linalg.norm(points.max(axis=0) - points.min(axis=0))) if len(points) else 0.0
+            fuse = scratch.createNode('fuse')
+            fuse.setInput(0, node)
+            fuse.parm('usetol3d').set(True)
+            fuse.parm('tol3d').set(max(diagonal*0.0002, 1e-6))
+            # polyreduce's "Output Polygon Count" counts primitives, not triangles; triangulating
+            # first (quads and n-gons are common in source meshes) makes that count exactly the
+            # triangle count `target` means, instead of leaving roughly twice as many as asked.
+            triangulate = scratch.createNode('divide')
+            triangulate.setInput(0, fuse)
+            triangulate.parm('convex').set(True)
+            triangulate.parm('usemaxsides').set(True)
+            triangulate.parm('numsides').set(3)
+            reduce_node = scratch.createNode('polyreduce::2.0')
+            reduce_node.setInput(0, triangulate)
+            reduce_node.parm('target').set('poly_count')
+            reduce_node.parm('finalcount').set(max(int(target), 4))
+            node = reduce_node
+        node.cook(force=True)
+        if node.errors():
+            raise RuntimeError('; '.join(node.errors()))
+        out = node.geometry().freeze()
+        colors = None
+        if out.findPointAttrib('Cd') is not None:
+            # polyreduce's attribute blending can overshoot slightly at sharp color edges.
+            colors = numpy.clip(numpy.asarray(out.pointFloatAttribValues('Cd')).reshape(-1, 3), 0.0, 1.0).tolist()
+        if target is None:
+            # Only a color bake: the topology is the one that went in.
+            return points.tolist(), list(face_vertex_counts), list(face_vertex_indices), colors
+        out_points = numpy.asarray(out.pointFloatAttribValues('P')).reshape(-1, 3).tolist()
+        if out.vertexCount() != 3 * len(out.prims()):
+            raise RuntimeError('reduction left non-triangles')   # never expected after divide + polyreduce
+        # Each face corner's point number, read in bulk: number the points, then promote that
+        # attribute to the corners (hou has no bulk read of polygon connectivity).
+        out.addAttrib(hou.attribType.Point, 'nal_point', 0)
+        out.setPointIntAttribValues('nal_point', list(range(len(out.points()))))
+        promote = hou.sopNodeTypeCategory().nodeVerb('attribpromote')
+        promote.setParms({'inname': 'nal_point', 'inclass': 2, 'outclass': 3, 'method': 8, 'deletein': 1})
+        corners = hou.Geometry()
+        promote.execute(corners, [out])
+        out_indices = list(corners.vertexIntAttribValues('nal_point'))
+        return out_points, [3] * (len(out_indices) // 3), out_indices, colors
     finally:
         scratch.destroy()
 
@@ -190,46 +193,156 @@ def _face_vertex_uvs(prim, uv_name, face_vertex_counts, face_vertex_indices):
     return None
 
 
+def _is_lod_set(name):
+    # Same rule as core.is_lod_set (this worker script does not import the package's core).
+    return name.lower().startswith('lod')
+
+
+def _collect_meshes(stage):
+    """{path: mesh data} of every render mesh the asset can show, not only the ones the authored
+    variant selections compose: after the stage as authored, each other variant of every variant
+    set is selected in turn (one set at a time, in the session layer, never in the file). A
+    level-of-detail set is left at its selection - its levels swap a mesh's geometry, and one
+    proxy stands in for all of them. The first look at a mesh wins (the authored selections for
+    the rest), and its data are read while it is composed."""
+    from pxr import Sdf, Usd, UsdGeom
+    found = {}
+
+    def look():
+        for prim in stage.Traverse():
+            path = prim.GetPath()
+            if (path in found or not prim.IsA(UsdGeom.Mesh) or prim.IsInstanceProxy()
+                    or UsdGeom.Imageable(prim).ComputePurpose() == UsdGeom.Tokens.proxy):
+                continue
+            mesh = UsdGeom.Mesh(prim)
+            points = mesh.GetPointsAttr().Get()
+            if not points:
+                continue
+            counts = mesh.GetFaceVertexCountsAttr().Get()
+            indices = mesh.GetFaceVertexIndicesAttr().Get()
+            texture = _find_base_color_texture(prim)
+            uvs = _face_vertex_uvs(prim, texture[1], counts, indices) if texture else None
+            found[path] = {'points': points, 'counts': counts, 'indices': indices,
+                           'texture': texture[0] if texture and uvs else None, 'uvs': uvs if texture else None,
+                           'defined_outside_variants': any(spec.specifier == Sdf.SpecifierDef and not spec.path.ContainsPrimVariantSelection()
+                                                           for spec in prim.GetPrimStack())}
+
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        look()
+        sets = [(prim.GetPath(), name) for prim in stage.Traverse()
+                for name in prim.GetVariantSets().GetNames() if not _is_lod_set(name)]
+        for path, name in sets:
+            variant_set = stage.GetPrimAtPath(path).GetVariantSet(name)
+            authored = variant_set.GetVariantSelection()
+            for variant in variant_set.GetVariantNames():
+                if variant != authored:
+                    variant_set.SetVariantSelection(variant)
+                    look()
+            variant_set.ClearVariantSelection()   # the session opinion only; the file's selection stays
+    return found
+
+
+def _variant_specs(layer):
+    """(variant set name, variant prim spec) for every variant in `layer`, nested ones included."""
+    out = []
+
+    def walk(spec):
+        for child in spec.nameChildren:
+            for set_name, variant_set in child.variantSets.items():
+                for variant in variant_set.variants.values():
+                    out.append((set_name, variant.primSpec))
+                    walk(variant.primSpec)
+            walk(child)
+    walk(layer.pseudoRoot)
+    return out
+
+
+def _variant_definitions(layer, mesh_path, variant_specs):
+    """Paths of the specs inside variants of `layer` that define the prim at `mesh_path` ("def",
+    not "over"), whichever variants are selected now."""
+    from pxr import Sdf
+    found = []
+    for _set_name, variant in variant_specs:
+        owner = variant.path.StripAllVariantSelections()
+        if mesh_path.HasPrefix(owner):
+            spec = layer.GetPrimAtPath(mesh_path.ReplacePrefix(owner, variant.path))
+            if spec is not None and spec.specifier == Sdf.SpecifierDef:
+                found.append(spec.path)
+    return found
+
+
+def _copy_switching(layer, mesh_path, proxy_path, variant_specs):
+    """Give the proxy the same "active" / "visibility" opinions its render mesh gets - authored
+    directly, and inside every variant of a variant set that is not a level-of-detail set - so
+    whatever switches a mesh off (a source's own `variant` set deactivating the other versions)
+    switches its proxy off with it. A level-of-detail set is skipped on purpose: when one hides
+    the original mesh for a reduced copy (lod_gen.py), its proxy still stands in for the asset."""
+    from pxr import Sdf
+    places = [(Sdf.Path.absoluteRootPath, Sdf.Path.absoluteRootPath)]
+    for set_name, variant in variant_specs:
+        owner = variant.path.StripAllVariantSelections()
+        if not _is_lod_set(set_name) and mesh_path.HasPrefix(owner):
+            places.append((owner, variant.path))
+    for owner, base in places:
+        mesh_spec = layer.GetPrimAtPath(mesh_path.ReplacePrefix(owner, base))
+        if mesh_spec is None:
+            continue
+        visibility = mesh_spec.attributes.get('visibility')
+        has_active = mesh_spec.HasInfo('active')
+        if not has_active and (visibility is None or not visibility.HasDefaultValue()):
+            continue
+        target = proxy_path.ReplacePrefix(owner, base)
+        spec = layer.GetPrimAtPath(target) or Sdf.CreatePrimInLayer(layer, target)
+        if has_active:
+            spec.active = mesh_spec.active
+        if visibility is not None and visibility.HasDefaultValue():
+            attr = spec.attributes.get('visibility') or Sdf.AttributeSpec(spec, 'visibility', Sdf.ValueTypeNames.Token)
+            attr.default = visibility.default
+
+
 def _add_proxies(stage, target_triangles):
-    """Author proxy siblings directly onto an already-open, editable stage.
+    """Author a proxy for every render mesh directly onto an already-open, editable stage.
 
     Returns {'skipped': reason} or {'proxied': [...prim paths...]} - the same shape `generate()`
     returns, so both the plain-file and the .usdz path (which edits an extracted copy of the
     package's root layer) can share this.
+
+    Each proxy is a purpose=proxy sibling of its mesh, defined where the mesh is defined (inside
+    the same variants when the mesh only exists inside variants), switched on and off exactly
+    like its mesh (_copy_switching), and the mesh itself becomes purpose=render. Assets whose
+    meshes only some variant selections show (a source's own "variant" set) get a proxy for every
+    one of them (_collect_meshes), so the viewport shows the selected version's proxy only.
     """
-    from pxr import UsdGeom
+    from pxr import Sdf, Tf, UsdGeom
 
     if any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue()
            and UsdGeom.Imageable(p).GetPurposeAttr().Get() == UsdGeom.Tokens.proxy
            for p in stage.Traverse()):
         return {'skipped': 'already has a proxy'}
 
-    targets = [p for p in stage.Traverse()
-               if p.IsA(UsdGeom.Mesh) and not p.IsInstanceProxy()
-               and UsdGeom.Mesh(p).GetPointsAttr().Get()]
-    if not targets:
+    meshes = _collect_meshes(stage)
+    if not meshes:
         return {'skipped': 'no mesh geometry'}
 
+    layer = stage.GetRootLayer()
+    variant_specs = _variant_specs(layer)
+    taken = set(meshes)
     proxied = []
-    for prim in targets:
-        mesh = UsdGeom.Mesh(prim)
-        points = mesh.GetPointsAttr().Get()
-        counts = mesh.GetFaceVertexCountsAttr().Get()
-        indices = mesh.GetFaceVertexIndicesAttr().Get()
-
+    for path, data in meshes.items():
+        points, counts, indices = data['points'], data['counts'], data['indices']
         # Give the proxy a sense of the render mesh's look: bake its base color texture down to
         # one color per point, the way an Attribute from Map SOP would, so a plain grey stand-in
         # is not the only option in the viewport.
-        texture = _find_base_color_texture(prim)
-        uvs = _face_vertex_uvs(prim, texture[1], counts, indices) if texture else None
         target = target_triangles if _triangle_count(counts) > target_triangles else None
         colors = None
-        if target is not None or (texture and uvs):
-            points, counts, indices, colors = _decimate(points, counts, indices, target,
-                texture[0] if texture and uvs else None, uvs)
+        if target is not None or data['texture']:
+            points, counts, indices, colors = _decimate(points, counts, indices, target, data['texture'], data['uvs'])
 
-        parent = prim.GetParent()
-        proxy_path = parent.GetPath().AppendChild(_sibling_name(parent, prim.GetName()))
+        name = Tf.MakeValidIdentifier(path.name + '_proxy')
+        while path.GetParentPath().AppendChild(name) in taken or stage.GetPrimAtPath(path.GetParentPath().AppendChild(name)):
+            name += '_'
+        proxy_path = path.GetParentPath().AppendChild(name)
+        taken.add(proxy_path)
         proxy = UsdGeom.Mesh.Define(stage, proxy_path)
         proxy.CreatePointsAttr(points)
         proxy.CreateFaceVertexCountsAttr(counts)
@@ -237,9 +350,51 @@ def _add_proxies(stage, target_triangles):
         if colors:
             proxy.CreateDisplayColorPrimvar(UsdGeom.Tokens.vertex).Set(colors)
         UsdGeom.Imageable(proxy.GetPrim()).CreatePurposeAttr().Set(UsdGeom.Tokens.proxy)
-        UsdGeom.Imageable(prim).CreatePurposeAttr().Set(UsdGeom.Tokens.render)
-        proxied.append(str(prim.GetPath()))
-    return {'proxied': proxied}
+        defs = _variant_definitions(layer, path, variant_specs)
+        if not data['defined_outside_variants'] and defs:
+            # The mesh only exists inside variants (e.g. every LOD variant defines its own
+            # version): define the proxy in each of them too, so it exists exactly where its mesh does.
+            for mesh_def in defs:
+                Sdf.CopySpec(layer, proxy_path, layer, mesh_def.GetParentPath().AppendChild(name))
+            _remove_spec(layer, proxy_path)
+        _copy_switching(layer, path, proxy_path, variant_specs)
+        # The mesh may not be composed right now (another variant is selected), so author with Sdf.
+        mesh_spec = layer.GetPrimAtPath(path) or Sdf.CreatePrimInLayer(layer, path)
+        purpose = mesh_spec.attributes.get('purpose') or Sdf.AttributeSpec(
+            mesh_spec, 'purpose', Sdf.ValueTypeNames.Token, Sdf.VariabilityUniform)
+        purpose.default = UsdGeom.Tokens.render
+        _mark_lod_copies_render(layer, path, variant_specs)
+        proxied.append(str(path))
+    return {'proxied': sorted(proxied)}
+
+
+def _mark_lod_copies_render(layer, mesh_path, variant_specs):
+    """lod_gen.py's reduced copies of a mesh ("<mesh>_LOD_k", defined in its LOD variants) copy
+    the mesh's purpose when they are made. Made before this proxy, they are still default and the
+    viewport would draw one next to the proxy, so they become render-only like their mesh."""
+    from pxr import Sdf, UsdGeom
+    for set_name, variant in variant_specs:
+        owner = variant.path.StripAllVariantSelections()
+        if not _is_lod_set(set_name) or not mesh_path.HasPrefix(owner):
+            continue
+        parent = layer.GetPrimAtPath(mesh_path.GetParentPath().ReplacePrefix(owner, variant.path))
+        if parent is None:
+            continue
+        for child in parent.nameChildren:
+            if child.name.startswith(mesh_path.name + '_LOD_') and child.specifier == Sdf.SpecifierDef and child.typeName == 'Mesh':
+                purpose = child.attributes.get('purpose') or Sdf.AttributeSpec(
+                    child, 'purpose', Sdf.ValueTypeNames.Token, Sdf.VariabilityUniform)
+                purpose.default = UsdGeom.Tokens.render
+
+
+def _remove_spec(layer, path):
+    """Delete a prim spec, then any parent "over" left with nothing in it."""
+    from pxr import Sdf
+    spec = layer.GetPrimAtPath(path)
+    while spec is not None and spec.path != Sdf.Path.absoluteRootPath:
+        parent = spec.nameParent
+        del parent.nameChildren[spec.name]
+        spec = parent if parent.path != Sdf.Path.absoluteRootPath and parent.specifier == Sdf.SpecifierOver and parent.IsInert() else None
 
 
 def generate_plain(source, destination, add_fn):
