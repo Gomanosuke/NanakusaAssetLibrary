@@ -130,8 +130,8 @@ Explorerでの手動移動は不要です。
 - タグ・お気に入り・メモは素材IDに保存しているため、移動後も保持します。Rescanしても引き継ぎます。
 - 移動先に同名のファイル・フォルダーがある場合は、上書きせずにエラーにして何も変更しません。
 - 途中で失敗した場合は、移動済みのファイルを元に戻し、インデックスも変更しません。
-- 移動のたびにインデックスを`data/backups`へバックアップします。
-- USDを移動すると、Asset Catalog内の同じUSDのパスも、Catalogフォルダー内の全DBについて更新します（更新前のDBを`data/backups`へ保存）。
+- 移動のたびにインデックスを`data/backups/index`へバックアップします。
+- USDを移動すると、Asset Catalog内の同じUSDのパスも、Catalogフォルダー内の全DBについて更新します（更新前のDBを`data/backups/catalog`へ保存）。
 - フォルダーを選んだ時の一覧更新は、マウスを押した瞬間ではなく120ms後に行い、ドラッグ中は止めます（ドラッグ後に実行）。
   一覧の更新が遅いと、押した直後のドラッグが効かなくなるためです。一覧のアイコンは再利用します。
 - スキャン中、またはサムネイル生成の待機中は移動できません。
@@ -287,13 +287,13 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
   - **材質**: proxyはレンダーメッシュの兄弟なので、上の階層（例: 資産の`geo` Scope）に束縛された材質を受け継ぐ。UVの無いproxyはその材質のテクスチャを(0,0)で読み、葉・草の不透明度マップは(0,0)が0のため、`opacityThreshold`（0.5）でproxy全体が切り抜かれてScene Viewから消えた（`AcerPseudoplatanus_abw4u_Leaves_OL.usd`で確認）。空の`material:binding`は継承を止めない（UsdShadeはさらに上を探す）。
   - そのため、直接の束縛もUVも無く、何かの材質を受け継ぐproxy（`_needs_look`）は、一番上のプリム直下の`NAL_proxy_look`（`PROXY_LOOK`。**Materialではない空のScope**）へ束縛する（`_bind_look`、Sdfで書く。variantへ複製する前に書くので複製にも付く）。束縛先がMaterialでないと、`ComputeBoundMaterial`はproxy自身の束縛で探索を止め、材質なしを返す（上の階層へは進まない。plain Pythonで確認）。ビューポートは材質の無いメッシュとしてproxy自身の`displayColor`で描く。
   - 0.22.2ではシェーダーの無い`UsdShade.Material`にしていたが、HoudiniのScene Viewはそれを灰色の材質として描き、`@Cd`を無視した（ユーザーのスクリーンショット、`AcerPseudoplatanus_853se_Big_OL.usd`）。`_proxy_look`はその形のMaterialをScopeへ変え、`_restyle_proxies`は旧形式に束縛されたproxy（`_on_old_look`）も対象にする。`UsdPreviewSurface`＋`UsdPrimvarReader_float3`（displayColor）の材質は、husk（Storm）では定数色でも黒くなったため採らなかった。材質を受け継がないproxyには何も書かない。
-  - 2026-09-24に実ライブラリーの既存proxyへ同じ割り当てを追加した（Plantsの235ファイル・3835メッシュ。元ファイルは`data/backups/proxy_look_repair_20260924_002800/`、各ファイルの差分は割り当ての追加だけであることを確認）。同日、0.22.3で同じ235ファイルの`NAL_proxy_look`をScopeへ変えた（元ファイルは`data/backups/proxy_look_scope_20260924_010737/`、差分はその型だけ、全proxyが材質なしになることを確認）。asset_infoのMaterials数には`NAL_proxy_look`を数えない（旧形式の名残）。
+  - 2026-09-24に実ライブラリーの既存proxyへ同じ割り当てを追加した（Plantsの235ファイル・3835メッシュ。元ファイルは`data/backups/repairs/proxy_look_repair_20260924_002800/`、各ファイルの差分は割り当ての追加だけであることを確認）。同日、0.22.3で同じ235ファイルの`NAL_proxy_look`をScopeへ変えた（元ファイルは`data/backups/_delete_candidates/proxy_look_scope_20260924_010737/`（削除候補）、差分はその型だけ、全proxyが材質なしになることを確認）。asset_infoのMaterials数には`NAL_proxy_look`を数えない（旧形式の名残）。
 - **variantのある資産**（例: `ThymusVulgaris_e95j6_*_OL.usd`。各`LOD_*` variantが`var_01`〜を定義し、`variant` setが選ばれなかったものを`active=false`にする）:
   - 対象メッシュは、そのままの状態に加え、LOD以外の各variant setの各variantを1つずつsession layerで選んで集める（`_collect_meshes`。ファイルの選択は変えない）。LOD系のset（`lod`で始まる名前）は切り替えない（形状が変わるだけで、proxyは1つで全段を代表する）。
   - proxyはメッシュが定義されている場所に作る。メッシュがvariantの中でだけ定義されている場合は、定義している全variantへ`Sdf.CopySpec`で同じproxyを置く（`_variant_definitions`）。
   - メッシュの`active`・`visibility`の意見（直接のもの、およびLOD以外の全variantの中のもの）をproxyにも同じ場所で書く（`_copy_switching`）。これで選ばれなかったversionのproxyも一緒に消える。LOD系のsetは写さない（lod_genが元メッシュを隠しても、proxyは代表として残す）。
   - `purpose=render`はSdfで直接書く（メッシュが今の選択では合成されていない場合があるため）。lod_genが先に作った`<名前>_LOD_k`の複製も`purpose=render`にする（`_mark_lod_copies_render`。そうしないとScene Viewにproxyと並んで出る）。
-  - 修正前（0.21.0まで）は今の選択で見えるメッシュ（var_01）だけにproxyを作り、variantの外に置いていたため、var_02以降を選ぶとScene Viewに「var_01のproxy」と「選んだものの形状」が並んで出た。実ライブラリーの52件を、proxy生成前のバックアップ（旧proxyを取り除いた結果がバックアップと完全一致することを確認）から作り直した（壊れていたファイルは`data/backups/proxy_repair/`）。
+  - 修正前（0.21.0まで）は今の選択で見えるメッシュ（var_01）だけにproxyを作り、variantの外に置いていたため、var_02以降を選ぶとScene Viewに「var_01のproxy」と「選んだものの形状」が並んで出た。実ライブラリーの52件を、proxy生成前のバックアップ（旧proxyを取り除いた結果がバックアップと完全一致することを確認）から作り直した（壊れていたファイルは`data/backups/_delete_candidates/proxy_repair/`、削除候補）。
 - デシメートへの受け渡しはメモリー上のジオメトリ（Stash SOP）、読み戻しは一括の属性読み取り（点番号を点属性にして角へpromoteし`vertexIntAttribValues`）。以前のOBJ書き出し＋頂点ごとのPythonループでは、100万三角形×6のSalixCaprea_1x94n_Big_OL（葉が離れた部品のためpolyreduceでも約25万三角形までしか減らない）が201秒かかりジョブの240秒制限を超えた。現在は69秒。
 - 出力は常に新規ファイルへの書き出し（`Sdf.Layer.Export`）。元ファイルへの`Save()`は行わない。
 - `.usdz`は`UsdUtils.ExtractUsdzPackage`で展開し、アーカイブの先頭エントリ（usdz仕様のルートレイヤー）だけを編集する。展開先で参照・テクスチャは相対パスのまま解決できる。編集後は`UsdUtils.CreateNewUsdzPackage`で参照ファイルごと再パッケージする。
@@ -376,7 +376,9 @@ UI:
 
 USDを選択して右クリックの「Add Catalog」でHoudini Asset Catalogのデータベースへ登録できます。
 複数のUSDをまとめて登録できます。同じパスの重複を防ぎ、ファイル所有権は移しません。Catalogは素材ルートの `Catalog` に保存します（素材分類としては表示しません）。
-DB更新前のバックアップは`data/backups`へ保存します。
+DB更新前のバックアップは`data/backups/index`へ、インストール時の設定の控えは`data/backups/install/<日時>/`へ保存します。
+
+`data/backups`の構成（2026-09-24に整理。実データ側の`backups/README.md`にも記載）: 生成ジョブは`proxy/`・`element/`・`lod/`、索引は`index/`、Asset Catalog DBは`catalog/`、インストールは`install/`、一括修正の前の状態は`repairs/`、開発作業前の控えは`dev-snapshots/`。`proxy/`は整理時に資産ごとの一番古い世代（proxyを付ける前の元ファイル）だけを残し、それ以降の世代・置き換え済みの修正前状態は`_delete_candidates/`へ移した（削除はユーザーが判断する）。移動記録は`backups/reorg_log_20260924.tsv`。
 右クリックの「Publish Static USD...」は素材単体の現在フレームを書き出します。画像を同梱する機能ではないため、元画像の参照先も共有する必要があります。
 外部依存を持つUSDを他PCへ渡すときは、その依存ファイルと相対パスも保ってください。
 

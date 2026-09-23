@@ -187,7 +187,7 @@ class Library:
                 if is_texture_cache(r[1].rpartition('/')[2])]
             if caches:
                 from datetime import datetime
-                folder = self.data_dir / 'backups'
+                folder = self.data_dir / 'backups' / 'index'
                 folder.mkdir(parents=True, exist_ok=True)
                 target = sqlite3.connect(str(folder / ('index_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_before_v5.sqlite3')))
                 try:
@@ -551,7 +551,7 @@ class Library:
 
     def backup_index(self):
         from datetime import datetime
-        folder = self.data_dir / 'backups'
+        folder = self.data_dir / 'backups' / 'index'
         folder.mkdir(parents=True, exist_ok=True)
         p = folder / ('index_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.sqlite3')
         with self.connect() as source:

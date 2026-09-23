@@ -32,7 +32,7 @@ class LibraryUiTests(unittest.TestCase):
             self.assertIn('Add Catalog',[a.text() for a in widget.build_asset_menu().actions()])
             self.assertFalse(any(b.text() in ('Import Selected','Copy Paths') for b in widget.findChildren(QtWidgets.QPushButton)))
             self.assertFalse(widget.preview.isHidden())
-            self.assertTrue(widget.library.backup_index().parent.samefile(base/'data'/'backups'))
+            self.assertTrue(widget.library.backup_index().parent.samefile(base/'data'/'backups'/'index'))
             widget.close();widget.deleteLater()
 
     def test_folder_tree_migrates_older_indexes_in_the_background(self):

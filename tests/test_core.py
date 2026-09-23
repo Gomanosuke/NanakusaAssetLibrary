@@ -112,12 +112,12 @@ class LibraryTests(unittest.TestCase):
         with again.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM info WHERE id='cache'").fetchone()[0],0)
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],Library.VERSION)
-        backups=list((self.base/'index'/'backups').glob('*_before_v5.sqlite3'));self.assertEqual(len(backups),1)
+        backups=list((self.base/'index'/'backups'/'index').glob('*_before_v5.sqlite3'));self.assertEqual(len(backups),1)
         saved=sqlite3.connect(str(backups[0]))
         try:self.assertEqual(saved.execute("SELECT relpath FROM assets WHERE id='cache'").fetchone()[0],'Texture/HDR/sky.hdr.rat')
         finally:saved.close()
         self.assertEqual(Library(self.base/'index').assets(),[])   # already upgraded: no second backup
-        self.assertEqual(len(list((self.base/'index'/'backups').glob('*_before_v5.sqlite3'))),1)
+        self.assertEqual(len(list((self.base/'index'/'backups'/'index').glob('*_before_v5.sqlite3'))),1)
 
     def test_rescan_preserves_metadata(self):
         self.write('3DModel/chair.obj');self.lib.scan(self.rid)

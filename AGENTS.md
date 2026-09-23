@@ -14,7 +14,7 @@
 - インストーラーの--dataとpackage JSONのNAL_DATA_DIRでdataを設定する。通常はassetと同階層のdata。
 - HoudiniのDocuments設定フォルダーへ画像キャッシュを戻さない。
 - 設定、タグ、お気に入り、SQLiteインデックス、Textureの画像キャッシュはdataへ保存する。
-- バックアップはdata/backupsへ統一する。assetやdataの親に新たなbackupsを作らない。
+- バックアップはdata/backupsへ統一する。assetやdataの親に新たなbackupsを作らない。直下にファイルを散らさず、種類ごとのサブフォルダー（proxy / element / lod / index / catalog / install / repairs / dev-snapshots）へ置く（ユーザー指示で2026-09-24に整理。構成はdocs/SPEC.mdの「検証」の後ろとbackups/README.md）。バックアップを削除しない。不要と判断したものは`_delete_candidates/`へ移し、削除はユーザーに任せる。
 - asset直下の分類はUSD / Texture / 3DModelの3つで固定。CatalogはDB専用とし、素材分類として表示しない。
 - USDはフォルダーと同名の入口USDを検出し、パッケージを1件として表示する。内部レイヤー・画像を列挙しない。
 - 単体USDZはUSD直下・整理用フォルダー内でも検出し、ファイル名で表示する。既存USDパッケージの内部は列挙しない。単体USDZのサムネイルは<ファイル名>_thumbnail.pngとして衝突を防ぐ。
@@ -69,7 +69,7 @@
 - UIスレッドで、素材数に比例する処理・ディスクの走査・画像の一括デコードをしない。目安: 2.8万ファイルの合成ライブラリー（tests外のベンチ）でfolder切替が20ms台、初期表示が0.5秒以内。
 - フォルダー一覧は索引のfoldersテーブルから読む（Library.folders）。スキャンが更新し、パネルでの作成・移動はadd_folder / relocate(folder_moves)で反映する。旧版の索引でテーブルが空の時だけ、一度ディスクをたどって保存する。
 - 一覧はLibrary.stream（EntryStream）で、ラベル順の索引（asset_order）から必要な件数だけ読む。直前のキー（label, relpath, root_id）より後ろを短い接続で読むため、DB接続や読み取りトランザクションを開いたままにしない（開いたままだとWALが縮まず、閉じる時にUIが数秒止まる。Windowsではファイルも掴む）。ページ分けはせず、スクロールでappend_itemsが続きを足す（CHUNK件ずつ）。全件を読んでPythonで絞らない・数えない（総数はLibrary.count）。フォルダー指定はrelpathの前方一致（'/'の次の'0'が上限）か、非再帰はfolder/pkg列。移動処理も対象フォルダー分だけを索引から読む（assets_by_ids、assets(folder=)）。
-- 列・索引の追加はLibrary._migrate（PRAGMA user_version）で行い、旧索引を一度だけ変換する。行を消す変換は、先にdata/backupsへ索引を複製する（v5: Houdiniのテクスチャキャッシュ `*.<画像拡張子>.rat/.tx` の行とinfoを削除し、PBRスタックの派生列を再計算。判定はcore.is_texture_cache、スキャン・classify・suggest_mapsでも同じ関数で除外）。
+- 列・索引の追加はLibrary._migrate（PRAGMA user_version）で行い、旧索引を一度だけ変換する。行を消す変換は、先にdata/backups/indexへ索引を複製する（v5: Houdiniのテクスチャキャッシュ `*.<画像拡張子>.rat/.tx` の行とinfoを削除し、PBRスタックの派生列を再計算。判定はcore.is_texture_cache、スキャン・classify・suggest_mapsでも同じ関数で除外）。
 - 画像は表示位置の前後1画面分だけ持ち（schedule_icons）、3画面より遠いものは捨てる。アイテムにはrowを持たせずid（ROLE）だけにする。
 - フォルダーツリーは開いた階層だけアイテムを作る（populate / ensure_item。閉じたフォルダーはplaceholderの子を持つ）。
 - スキャンは別プロセス（scan_worker.py、Houdini同梱のPython）。QThreadの中ではhouを呼ばない（ジョブのコンストラクターで必要な値を取っておく）。補助プロセスはui.background()で低優先度にする。素材情報はinfoテーブルにも保存し、同じ素材ではhythonを再起動しない。
@@ -101,7 +101,7 @@
 - ui.pyの`ProxyJob`が結果を検証してから、data/backups/proxy/へ元ファイルをバックアップし、os.replaceで置き換える。失敗・スキップ時は元ファイルを一切変更しない（生成スクリプト単体はSave()せずExport/CreateNewUsdzPackageで新規ファイルに書き出すだけ）。
 - **一時出力ファイルは元ファイルと同じフォルダーに書く**（tempfile.TemporaryDirectory()配下ではない）。os.replaceはWindowsで別ドライブ間の置き換えができない（WinError 17）。素材ライブラリーとシステムTEMPが別ドライブの構成で実際に踏んだ既知の不具合（バックアップだけ作られ元ファイルは変更されないまま失敗する）。
 - 実行時にダイアログでtarget trianglesを聞く。値はsettings.jsonに保存し次回の初期値にする。ダイアログをテストする時はQtWidgets.QInputDialog.getIntをpatchする。
-- variantでメッシュを切り替える資産（配布元の`variant` set: `var_01`〜、各`LOD_*`がメッシュを定義し、選ばれなかったものを`active=false`）では、今の選択で見えるメッシュだけを見てはいけない。proxy_genはLOD以外の各variantを1つずつsession layerで選んで全メッシュを集め、proxyをメッシュと同じvariantに定義し、メッシュの`active`/`visibility`の意見をproxyにも写す（LOD系setは除外）。tests/test_proxy.pyの`ProxyGenVariantTests`が、全組み合わせで「Scene Viewは選んだもののproxyだけ、レンダーはそのメッシュだけ」を確認する。2026-09-23に旧方式で壊れた52件を作り直した（壊れた版は`data/backups/proxy_repair/`）。
+- variantでメッシュを切り替える資産（配布元の`variant` set: `var_01`〜、各`LOD_*`がメッシュを定義し、選ばれなかったものを`active=false`）では、今の選択で見えるメッシュだけを見てはいけない。proxy_genはLOD以外の各variantを1つずつsession layerで選んで全メッシュを集め、proxyをメッシュと同じvariantに定義し、メッシュの`active`/`visibility`の意見をproxyにも写す（LOD系setは除外）。tests/test_proxy.pyの`ProxyGenVariantTests`が、全組み合わせで「Scene Viewは選んだもののproxyだけ、レンダーはそのメッシュだけ」を確認する。2026-09-23に旧方式で壊れた52件を作り直した（壊れた版は`data/backups/_delete_candidates/proxy_repair/`、削除候補）。
 - ui.pyの`_MeshGenerateJob`（`ProxyJob`/`ElementJob`/`LodJob`などの共通基底）が共有の subprocess/backup/os.replace ロジックを持つ。新しいジェネレーターもこのクラスを再利用する。
 
 ## LOD

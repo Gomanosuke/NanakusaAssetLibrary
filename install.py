@@ -34,7 +34,7 @@ def install(prefs, library=None, data_dir=None):
     stamp=datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     for path in (package,settings):
         if path.exists():
-            backup=data/'backups'/stamp/path.name
+            backup=data/'backups'/'install'/stamp/path.name
             backup.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(path,backup)
             if backup.read_bytes()!=path.read_bytes():raise RuntimeError('Backup verification failed')

@@ -822,7 +822,7 @@ class LibraryWidget(QtWidgets.QWidget):
             result=organize.move_folders(self.library,root_id,[f['rel'] for f in payload['folders']],dest_rel,self.data_dir)
             message=f"Moved {result['folders']} folder(s) ({result['moved']} assets) to {dest_rel}";select=(root_id,result['new_rel'],target[2])
         try:
-            relinked=ops.relink_catalog_paths([self.catalogs.itemData(i) for i in range(self.catalogs.count())],result['catalog'],self.data_dir/'backups') if result['catalog'] else 0
+            relinked=ops.relink_catalog_paths([self.catalogs.itemData(i) for i in range(self.catalogs.count())],result['catalog'],self.data_dir/'backups'/'catalog') if result['catalog'] else 0
             if relinked:message+=f' / {relinked} Catalog entries updated'
         except Exception as exc:message+=' / Catalog entries were not updated: '+str(exc)
         self.info_cache.clear();self.info_key=None
@@ -1947,7 +1947,7 @@ class LibraryWidget(QtWidgets.QWidget):
         items=[]
         for row in rows:
             path=self.library.resolve(row);thumb=self.thumbnail_path(row)
-            item,added=ops.register_catalog(path,self.catalog_path(),row['label'],row['tags'],str(thumb) if thumb else '',backup_dir=self.data_dir/'backups')
+            item,added=ops.register_catalog(path,self.catalog_path(),row['label'],row['tags'],str(thumb) if thumb else '',backup_dir=self.data_dir/'backups'/'catalog')
             items.append(item)
         self.refresh_catalogs()
         self.status.setText(f'Catalog ready: {len(items)} USD assets (existing entries kept).')
