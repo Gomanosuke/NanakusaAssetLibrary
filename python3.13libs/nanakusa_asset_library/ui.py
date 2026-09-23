@@ -39,6 +39,7 @@ def background():
         return {'creationflags': subprocess.CREATE_NO_WINDOW | PROCESS_MODE_BACKGROUND_BEGIN}
     return {'preexec_fn': lambda: os.nice(10)}
 _jobs = set()  # Keep background workers alive when a pane is closed mid-scan.
+_session_scanned = False   # the first panel of a Houdini session rescans (LibraryWidget.AUTO_SCAN)
 
 def plain_python_env(hfs):
     """Environment for Houdini's plain Python (asset_info.py / thumbnail_scene.py 'plain' mode): its
@@ -497,7 +498,8 @@ class ManifestDialog(QtWidgets.QDialog):
 class LibraryWidget(QtWidgets.QWidget):
     CHUNK = 200   # items added each time the list is scrolled near its end
     ICON_THREADS = max(2, min(4, QtCore.QThread.idealThreadCount() - 1))
-    AUTO_TAGS = True   # sync "lod" / "variant" tags from USD variant sets after scans and on opening (tests switch it off)
+    AUTO_TAGS = True   # sync "lod" / "variant" / "proxy" tags from USD files after scans and on opening (tests switch it off)
+    AUTO_SCAN = True   # Rescan when the first panel of a Houdini session opens (tests switch it off)
     def __init__(self, parent=None, data_dir=None, initial_root=None):
         super().__init__(parent)
         self.setObjectName('NanakusaAssetLibrary')
@@ -550,7 +552,11 @@ class LibraryWidget(QtWidgets.QWidget):
         self._setup()
         self.rebuild_tree()
         self.refresh()
-        if self.AUTO_TAGS:self.tag_timer.start(1500)   # after the panel has drawn: new / changed files only
+        if self.AUTO_SCAN and not _session_scanned and self.settings.get('rescan_on_first_open',True) and self.library.roots():
+            # First panel of this Houdini session: pick up what changed on disk while Houdini was
+            # closed. The scan runs in its own process; its end also starts the tag check.
+            QtCore.QTimer.singleShot(800,self,self.first_open_scan)   # bound to this panel: dropped if it closes first
+        elif self.AUTO_TAGS:self.tag_timer.start(1500)   # after the panel has drawn: new / changed files only
 
     def _button(self, text, callback, layout):
         button = QtWidgets.QPushButton(text)
@@ -976,7 +982,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
         else:
             words=entry['rep']['tags'].split()
-            labels=[label for tag,label in (('variant','VARIANT'),('lod','LOD')) if tag in words]
+            labels=[label for tag,label in (('variant','VARIANT'),('lod','LOD'),('proxy','PROXY')) if tag in words]
             if labels:icon=self.variant_badge(icon,labels)
         self.items.item(index).setIcon(icon);self.icons_loaded.add(index)
 
@@ -1007,16 +1013,17 @@ class LibraryWidget(QtWidgets.QWidget):
         return QtGui.QIcon(out)
 
     def variant_badge(self,icon,labels=('VARIANT',)):
-        """Small corner markers for a USD carrying the "variant" tag (an element switch) and/or the
-        "lod" tag (LODs), so both are recognisable without opening its info panel."""
+        """Small corner markers for a USD carrying the automatic "variant" / "lod" / "proxy" tags,
+        so what it offers is recognisable without opening its info panel."""
         edge=self.icon_edge();out=QtGui.QPixmap(edge,edge);out.fill(QtCore.Qt.GlobalColor.transparent)
         painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.scale(edge/256,edge/256)
         painter.drawPixmap(QtCore.QRect(0,0,256,256),icon.pixmap(edge,edge))
         font=painter.font();font.setBold(True);font.setPixelSize(14);painter.setFont(font)
         x=6
         for label in labels:
-            width=96 if label=='VARIANT' else 52
-            painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(45,95,180) if label=='VARIANT' else QtGui.QColor(150,95,30))
+            width={'VARIANT':96,'LOD':52,'PROXY':82}.get(label,96)
+            color={'VARIANT':(45,95,180),'LOD':(150,95,30),'PROXY':(40,130,70)}.get(label,(90,90,90))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(*color))
             painter.drawRoundedRect(x,6,width,28,6,6)
             painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(x,6,width,28),QtCore.Qt.AlignmentFlag.AlignCenter,label)
             x+=width+6
@@ -1096,6 +1103,8 @@ class LibraryWidget(QtWidgets.QWidget):
         if error:
             self.proxy_failed.add(aid);self.status.setText('Proxy generation failed: '+error)
         else:
+            if message and (message.startswith('Proxy added') or 'already has a proxy' in message.lower()):
+                self.set_tag(aid,'proxy',True)
             self.status.setText((message or 'Already has a proxy')+f' ({len(self.proxy_queue)} remaining)')
 
     def queue_element(self,row):
@@ -1448,6 +1457,13 @@ class LibraryWidget(QtWidgets.QWidget):
             messages.append(name+': '+('Cancel' if result.get('cancelled') else str(result['count'])+' assets')+(' / '+ '; '.join(result['errors'][:3]) if result.get('errors') else ''))
         self.status.setText(' | '.join(messages) or 'No libraries to scan')
         if self.AUTO_TAGS:self.start_variant_tags()
+
+    def first_open_scan(self):
+        global _session_scanned
+        if _session_scanned:return   # another panel opened at the same time got there first
+        _session_scanned=True
+        self.scan()
+        self.status.setText('Rescanning after Houdini started (turn off with "rescan_on_first_open": false in settings.json)... '+self.status.text())
 
     def start_variant_tags(self):
         """Open new / changed USD files in the background and set their "lod" / "variant" tags."""

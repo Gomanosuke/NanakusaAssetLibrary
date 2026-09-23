@@ -1,4 +1,4 @@
-"""Keep the automatic "lod" / "variant" tags in line with the variant sets USD assets really have.
+"""Keep the automatic "lod" / "variant" / "proxy" tags in line with what USD assets really have.
 
 Run by the panel (VariantTagJob) after a scan and when it opens, with Houdini's plain Python like
 scan_worker.py (see asset_info.plain_setup). Only USD files that are new or changed since their
@@ -16,18 +16,23 @@ BATCH = 50
 
 
 def top_variant_sets(path):
-    """Variant set names on the file's top prim (default prim, else its first root prim)."""
-    from pxr import Sdf, Usd
+    """(variant set names on the file's top prim - default prim, else its first root prim -,
+    whether it has purpose=proxy geometry as composed)."""
+    from pxr import Sdf, Usd, UsdGeom
     layer = Sdf.Layer.FindOrOpen(str(path))
     if layer is None:
         raise ValueError('could not open')
     name = layer.defaultPrim or next((p.name for p in layer.rootPrims), '')
     if not name:
-        return []
+        return [], False
     mask = Usd.StagePopulationMask([Sdf.Path.absoluteRootPath.AppendChild(name)])
     stage = Usd.Stage.OpenMasked(layer, mask, Usd.Stage.LoadNone)
     prim = stage.GetPrimAtPath('/' + name)
-    return list(prim.GetVariantSets().GetNames()) if prim else []
+    if not prim:
+        return [], False
+    has_proxy = any(p.IsA(UsdGeom.Gprim) and UsdGeom.Imageable(p).ComputePurpose() == UsdGeom.Tokens.proxy
+                    for p in Usd.PrimRange(prim))
+    return list(prim.GetVariantSets().GetNames()), has_proxy
 
 
 def main(data_dir):
@@ -42,12 +47,12 @@ def main(data_dir):
         for row in library.variant_check_rows():
             path = Path(row['root_path']) / row['relpath']
             try:
-                names = top_variant_sets(path)
+                names, has_proxy = top_variant_sets(path)
             except Exception as exc:
-                names = None
+                names, has_proxy = None, None
                 if len(result['errors']) < 5:
                     result['errors'].append('%s: %s' % (row['relpath'], exc))
-            pending.append((row['id'], names, Library.file_stamp(row)))
+            pending.append((row['id'], names, Library.file_stamp(row), has_proxy))
             result['checked'] += 1
             if len(pending) >= BATCH:
                 result['changed'] += library.save_variant_tags(pending); pending = []

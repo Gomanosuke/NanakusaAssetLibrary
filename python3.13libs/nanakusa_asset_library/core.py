@@ -82,13 +82,17 @@ def is_lod_set(name):
     "lods", "LOD_levels"...)."""
     return name.lower().startswith('lod')
 
-def sync_auto_tags(tags, set_names):
-    """`tags` with the automatic ones matching the variant sets on an asset's top prim: "lod" for
-    a level-of-detail set, "variant" for any other (element switch, a source's own variants).
+def sync_auto_tags(tags, set_names, has_proxy=None):
+    """`tags` with the automatic ones matching the asset: "lod" for a level-of-detail variant set on
+    its top prim, "variant" for any other set there (element switch, a source's own variants),
+    "proxy" when it has purpose=proxy geometry (has_proxy None: leave "proxy" as it is).
     Other words and their order are kept."""
     words = tags.split()
-    for tag, wanted in (('lod', any(is_lod_set(n) for n in set_names)),
-                        ('variant', any(not is_lod_set(n) for n in set_names))):
+    wanted_tags = [('lod', any(is_lod_set(n) for n in set_names)),
+                   ('variant', any(not is_lod_set(n) for n in set_names))]
+    if has_proxy is not None:
+        wanted_tags.append(('proxy', bool(has_proxy)))
+    for tag, wanted in wanted_tags:
         if wanted and tag not in words:
             words.append(tag)
         elif not wanted and tag in words:
@@ -514,9 +518,13 @@ class Library:
             raise FileNotFoundError("Asset is missing or library is offline: " + str(p))
         return p
 
+    # Bumped when variant_scan.py starts reading something new (p1: purpose=proxy geometry), so
+    # every USD is checked once more.
+    STAMP_VERSION = 'p1'
+
     @staticmethod
     def file_stamp(row):
-        return '%r:%d' % (float(row['mtime'] or 0), int(row['size'] or 0))
+        return '%s:%r:%d' % (Library.STAMP_VERSION, float(row['mtime'] or 0), int(row['size'] or 0))
 
     def variant_check_rows(self):
         """Present USD assets whose file changed since its variant sets last set the automatic tags."""
@@ -526,17 +534,17 @@ class Library:
         return [dict(r) for r in rows if r['vstamp'] != self.file_stamp(r)]
 
     def save_variant_tags(self, updates):
-        """Apply [(id, variant set names or None, stamp)] from variant_scan.py: the automatic tags
-        follow the sets (None: the file could not be read - only the stamp is kept, so it is not
-        retried until it changes). Tags are read and written in one transaction, so a tag the user
-        edits meanwhile is kept. Returns how many assets' tags changed."""
+        """Apply [(id, variant set names or None, stamp[, has proxy])] from variant_scan.py: the
+        automatic tags follow the file (None: it could not be read - only the stamp is kept, so it
+        is not retried until it changes). Tags are read and written in one transaction, so a tag
+        the user edits meanwhile is kept. Returns how many assets' tags changed."""
         changed = 0
         with self.connect() as db:
-            for aid, names, stamp in updates:
+            for aid, names, stamp, *rest in updates:
                 row = db.execute('SELECT tags FROM assets WHERE id=?', (aid,)).fetchone()
                 if row is None:
                     continue
-                tags = row['tags'] if names is None else sync_auto_tags(row['tags'], names)
+                tags = row['tags'] if names is None else sync_auto_tags(row['tags'], names, rest[0] if rest else None)
                 changed += tags != row['tags']
                 db.execute('UPDATE assets SET tags=?, vstamp=? WHERE id=?', (tags, stamp, aid))
         return changed

@@ -5,6 +5,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python3.13libs'))
 from hutil.PySide import QtWidgets
 from nanakusa_asset_library import ui
 ui.LibraryWidget.AUTO_TAGS=False   # no background variant-tag process from every test panel (tested on its own below)
+ui.LibraryWidget.AUTO_SCAN=False   # nor a scan when a test panel opens (tested on its own below)
 
 
 class LibraryUiTests(unittest.TestCase):
@@ -724,20 +725,21 @@ class LibraryUiTests(unittest.TestCase):
         from pxr import Usd,UsdGeom
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
             base=Path(folder);root=base/'asset'
-            def usd(rel,sets):
+            def usd(rel,sets,proxy=False):
                 p=root/rel;p.parent.mkdir(parents=True,exist_ok=True)
                 stage=Usd.Stage.CreateNew(str(p));top=UsdGeom.Xform.Define(stage,'/Top').GetPrim()
                 for name,variants in sets.items():
                     vs=top.GetVariantSets().AddVariantSet(name)
                     for v in variants:vs.AddVariant(v)
+                if proxy:UsdGeom.Imageable(UsdGeom.Mesh.Define(stage,'/Top/geo_proxy').GetPrim()).CreatePurposeAttr().Set('proxy')
                 stage.SetDefaultPrim(top);stage.GetRootLayer().Save()
-            usd('USD/Misc/Plant_OL/Plant_Big_OL.usda',{'LOD':['LOD_0','LOD_1'],'variant':['var_01','var_02']})
+            usd('USD/Misc/Plant_OL/Plant_Big_OL.usda',{'LOD':['LOD_0','LOD_1'],'variant':['var_01','var_02']},proxy=True)
             usd('USD/Misc/Plant_OL/Plant_Small_OL.usda',{'LOD':['LOD_0','LOD_1']})
             usd('USD/Misc/Plain/Plain.usda',{})
             widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
             rid=widget.library.roots()[0]['id'];widget.library.scan(rid)
             plain=next(r for r in widget.library.assets() if r['label']=='Plain')
-            widget.library.update(plain['id'],tags='keep variant')   # a stale automatic tag goes, the user's word stays
+            widget.library.update(plain['id'],tags='keep variant proxy')   # stale automatic tags go, the user's word stays
             tags=lambda:{r['label']:r['tags'] for r in widget.library.assets()}
             original=ui.LibraryWidget.variant_tags_done
             def run():
@@ -750,7 +752,7 @@ class LibraryUiTests(unittest.TestCase):
                 return done[0]
             result=run()
             self.assertEqual(result['checked'],3,result);self.assertFalse(result['errors'],result)
-            self.assertEqual(tags(),{'Plant_Big_OL':'lod variant','Plant_Small_OL':'lod','Plain':'keep'})
+            self.assertEqual(tags(),{'Plant_Big_OL':'lod variant proxy','Plant_Small_OL':'lod','Plain':'keep'})
             self.assertEqual(run()['checked'],0)   # unchanged files are not opened again
             # badges follow the tags in the list
             widget.refresh()
@@ -759,7 +761,46 @@ class LibraryUiTests(unittest.TestCase):
                 index=widget.item_index[big['rep']['id']];widget.icons_loaded.discard(index);widget.icon_todo.append(index);widget.load_icons()
                 start=time.monotonic()
                 while widget.icons_pending() and time.monotonic()-start<10:self.app.processEvents()
-                self.assertIn(['VARIANT','LOD'],[c.args[1] for c in badge.call_args_list])
+                self.assertIn(['VARIANT','LOD','PROXY'],[c.args[1] for c in badge.call_args_list])
+            widget.close();widget.deleteLater()
+
+    def test_a_proxy_job_sets_the_proxy_tag_only_when_there_is_a_proxy(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for name in ('a','b','c'):(root/'USD'/name).mkdir(parents=True);(root/'USD'/name/f'{name}.usda').write_text('x')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            ids={r['label']:r['id'] for r in widget.library.assets()}
+            widget.proxy_done(ids['a'],'Proxy added (1 mesh(es))','')
+            widget.proxy_done(ids['b'],'already has a proxy','')
+            widget.proxy_done(ids['c'],'no mesh geometry','')   # a skip without any proxy
+            tags={r['label']:r['tags'] for r in widget.library.assets()}
+            self.assertEqual(tags,{'a':'proxy','b':'proxy','c':''})
+            widget.close();widget.deleteLater()
+
+    def test_the_first_panel_of_a_houdini_session_rescans(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),\
+             patch.object(ui.LibraryWidget,'AUTO_SCAN',True),patch.object(ui,'_session_scanned',False),\
+             patch.object(ui.LibraryWidget,'scan') as scan:
+            base=Path(folder);root=base/'asset';(root/'USD').mkdir(parents=True)
+            def open_panel(wait=True):
+                widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+                start=time.monotonic()
+                while wait and time.monotonic()-start<1.5:self.app.processEvents()
+                return widget
+            first=open_panel();self.assertEqual(scan.call_count,1)
+            self.assertIn('Rescanning after Houdini started',first.status.text())
+            second=open_panel();self.assertEqual(scan.call_count,1)   # once per session, not per panel
+            for w in (first,second):w.close();w.deleteLater()
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),\
+             patch.object(ui.LibraryWidget,'AUTO_SCAN',True),patch.object(ui,'_session_scanned',False),\
+             patch.object(ui.LibraryWidget,'scan') as scan:
+            base=Path(folder);root=base/'asset';(root/'USD').mkdir(parents=True)
+            (base/'data').mkdir();(base/'data'/'settings.json').write_text('{"rescan_on_first_open": false}')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            start=time.monotonic()
+            while time.monotonic()-start<1.5:self.app.processEvents()
+            scan.assert_not_called()   # switched off in settings.json
             widget.close();widget.deleteLater()
 
     def test_lod_menus_jobs_and_tag(self):

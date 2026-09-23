@@ -63,6 +63,9 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(sync_auto_tags('lod wood variant',['element']),'wood variant')
         self.assertEqual(sync_auto_tags('lod wood variant',[]),'wood')
         self.assertEqual(sync_auto_tags('variant wood lod',['LOD_levels','model']),'variant wood lod')   # order kept
+        self.assertEqual(sync_auto_tags('wood',[],True),'wood proxy')
+        self.assertEqual(sync_auto_tags('proxy wood',[],False),'wood')
+        self.assertEqual(sync_auto_tags('proxy wood',[]),'proxy wood')   # unknown: the proxy tag is left alone
         self.write('USD/a/a.usda');self.lib.scan(self.rid);row=self.lib.assets()[0]
         self.assertEqual([r['id'] for r in self.lib.variant_check_rows()],[row['id']])
         stamp=Library.file_stamp(row)
