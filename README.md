@@ -14,6 +14,7 @@ USD・3Dモデル・テクスチャを1つのパネルで探して、ドラッ�
 - **フォルダー整理**: パネル内で素材やフォルダーを別のフォルダーへドラッグして移動できます。サムネイル・タグ・お気に入りも一緒に移ります。
 - **サムネイル自動生成**: USDと3Dモデルは、Karma（CPU）で見栄えの良いサムネイルを作ります。
 - **Asset Catalog登録**: USDをHoudiniのAsset Catalogへ登録できます。
+- **LOD**: USDにポリゴン数を減らした段階を追加し、Auto Select LOD・Stage Manager・Set Variantで切り替えられます。
 
 ## 動作環境
 
@@ -133,6 +134,7 @@ asset/
 - テクスチャを通常のstageやobjに落としても、ノードは作りません。材質ネットワークか、入力欄に落としてください。
 - Import Selected（右クリック）でも、同じ取り込みができます。単体のUSDでは、Options で取り込み先・Reference / Sublayer・Prim割り当てを指定できます。
 - **`variant`タグの付いたUSD**（[複数オブジェクト入りUSDの切り替え](#複数オブジェクト入りusdの切り替え)を参照）をstage / LOPネットワークへドロップ、またはImport Selectedで取り込むと、Reference LOPの直後（ネットワーク上ではすぐ下）に**Set Variantノードが自動で追加されます**（Variant Set = `element`、Choose Variant Name by Index = ON、Index = 0）。切り替えたい場合は、このノードの Variant Name Index を変えるだけで済みます。
+- **`lod`タグの付いたUSD**（[LOD](#lod距離に応じた詳細度の切り替え)を参照）には、さらに **Auto Select LOD** ノードが自動で追加されます（Reference → Set Variant → Auto Select LOD の順に縦に並びます）。
 
 ## PBRテクスチャからマテリアルを作る
 
@@ -211,6 +213,23 @@ proxy（`purpose=proxy`）が無いUSDは、Scene Viewでも重いレンダー�
 - 既に `element` variant setを持つ資産、複数オブジェクトのパックとして検出できない資産（対象を2つ以上検出できる分岐点が無い場合）は自動でスキップされます。
 - 生成に成功すると、その資産に **`variant` タグが自動で付き**、一覧のサムネイル左上に **「VARIANT」** バッジが表示されます。クリックして情報欄を見なくても、どのUSDにこの切り替えがあるか一目で分かります（検索欄に `variant` と入力すれば絞り込みもできます）。
 - 間違えて生成してしまった場合は、対象資産を右クリックの **Delete Element Switch** で元に戻せます。`element` variant setとその中身（表示・非表示の設定）を完全に削除し、生成前と同じ内容に戻します（一番上のプリムに付いたものも、古い版で奥のプリムに付いたものも同様）。`variant` タグも自動で外れます（バッジも消えます）。変更前のファイルは同じく `data/backups/element/` にバックアップされます。まだ生成していない資産を対象にした場合は何もせずスキップします。
+
+## LOD（距離に応じた詳細度の切り替え）
+
+USD資産に、ポリゴン数を減らした段階（LOD）を追加します。Houdiniの標準ノードで切り替えられる形（Create LOD LOPと同じ「配置するプリムに付いたvariant set」）で作るので、専用の仕組みは要りません。
+
+- 対象のUSDを選び、右クリックの **Generate Selected LODs...** で作ります。ダイアログで段数（Levels、2〜9、既定4）と、1段ごとに残す割合（Keep per level、既定50%）を指定します（値は次回も引き継がれます）。
+  - 例: 4段・50% → `LOD_1`（元のまま）、`LOD_2`（1/2）、`LOD_3`（1/4）、`LOD_4`（1/8）。
+  - Libraries... の **Generate Missing LODs...** は、検索・フォルダーの条件に合うUSDのうち、LODがないものをまとめて作ります。
+- 資産の一番上のプリム（配置したプリムそのもの）に、`LOD` という名前のvariant setが付きます。
+  - **Auto Select LOD** LOP: Variant Set に `LOD`、Number of LODs に段数、各段の Threshold Distance を指定すると、カメラからの距離で自動的に切り替わります（Primitives には配置したプリム。Stage Managerの配置なら `/配置名` や `/*` など複数も可）。
+  - **Stage Manager**: 配置したプリムを選ぶと、Inspector の **Variant Sets** に `LOD` のプルダウンが出ます。
+  - **Set Variant** LOP: Variant Set `LOD`、Variant Name `LOD_2` などで固定できます。
+- **`lod`タグの付いたUSDをドロップ（またはImport Selected）すると、Auto Select LODノードが自動で追加されます**。段数と、資産の大きさから決めた距離（LOD_2 = 対角線の4倍、以降1段ごとに2倍）が設定済みで、カメラは上流のカメラ（なければ `/cameras/camera1`）を使います。距離は場面に合わせて変えてください。
+- 元のメッシュは変更しません。各段では、縮小したメッシュ（`元の名前_LOD_2` など）を隣に作り、元のメッシュを非表示にします。UV・法線（縮小後の形で計算し直し）・マテリアルの割り当ては引き継ぎます。Proxy（`purpose=proxy`）とElement Switchはそのまま使えます。
+- 生成に成功すると **`lod` タグ** が付き、サムネイルに **「LOD」** バッジが出ます。
+- **Delete LODs** で、生成前と同じ内容に戻せます（Element Switchなど他の変更は残ります）。変更前のファイルは `data/backups/lod/` に保存されます。
+- 既にLODがある資産はスキップします（段数を変える場合は、先に Delete LODs）。表示・非表示が既に設定されているメッシュを含む資産など、正しく作れない資産も何もせずスキップします。
 
 ## USD / Asset Catalog
 

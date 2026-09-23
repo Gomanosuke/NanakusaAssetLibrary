@@ -715,6 +715,37 @@ class LibraryUiTests(unittest.TestCase):
         env=ui.plain_python_env('C:/HFS')
         self.assertNotIn('PXR_PLUGINPATH_NAME',env);self.assertTrue(env['PATH'].startswith(str(Path('C:/HFS')/'bin')))
 
+    def test_lod_menus_jobs_and_tag(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for name in ('chair','table'):
+                (root/'USD'/name).mkdir(parents=True);(root/'USD'/name/f'{name}.usda').write_text('x')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            widget.items.setCurrentRow(0)
+            labels=[a.text() for a in widget.build_asset_menu().actions()]
+            self.assertIn('Generate Selected LODs...',labels);self.assertIn('Delete LODs',labels)
+            root_labels=[a.text() for a in widget.build_root_menu().actions()]
+            self.assertIn('Generate Missing LODs...',root_labels);self.assertIn('Cancel LODs',root_labels);self.assertIn('Cancel LOD Removals',root_labels)
+            row=widget.item_row(widget.items.currentItem())
+            with patch.object(ui,'LodJob') as job_cls:
+                widget.queue_lod(row,3,40.0);self.app.processEvents()
+                job_cls.assert_called_once_with(row['id'],Path(row['root_path'])/row['relpath'],base/'data'/'backups'/'lod',3,40.0)
+            widget.update_jobs_bar();self.assertIn('LODs 1',widget.jobs_label.text())
+            widget.lod_done(row['id'],'LODs added (3 levels, 100 / 50 / 25 triangles)','')
+            self.assertIn('lod',widget.library.assets_by_ids([row['id']])[0]['tags'].split())
+            # a bulk queue reaches assets that are not loaded in the list: the index is still updated
+            other=next(r for r in widget.library.assets() if r['id']!=row['id'])
+            widget.row_index.pop(other['id'],None)
+            widget.lod_done(other['id'],'LODs added (2 levels, 10 / 5 triangles)','')
+            self.assertIn('lod',widget.library.assets_by_ids([other['id']])[0]['tags'].split())
+            widget.lod_delete_done(row['id'],'LODs removed (1 prim(s))','')
+            self.assertNotIn('lod',widget.library.assets_by_ids([row['id']])[0]['tags'].split())
+            # the dialog remembers its values; cancelling queues nothing
+            with patch.object(ui.QtWidgets.QDialog,'exec',return_value=ui.QtWidgets.QDialog.DialogCode.Rejected):
+                self.assertIsNone(widget.ask_lod_settings())
+            widget.lod_job=None;widget.cancel_lods();widget.close();widget.deleteLater()
+
     def test_show_in_explorer_selects_the_asset_files_themselves(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
             base=Path(folder);root=base/'asset'

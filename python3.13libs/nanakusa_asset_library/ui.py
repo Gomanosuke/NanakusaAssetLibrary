@@ -12,7 +12,7 @@ import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen, element_gen
+from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen, element_gen, lod_gen
 from . import reveal as file_browser
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
@@ -377,6 +377,25 @@ class ElementDeleteJob(_MeshGenerateJob):
         return f"Element switch removed ({len(result['removed_element_switch'])} prim(s))"
 
 
+class LodJob(_MeshGenerateJob):
+    """Add a "LOD" variant set (LOD_1 = as authored, then reduced copies) for Auto Select LOD / Stage Manager (lod_gen.py)."""
+    script, label = 'lod_gen.py', 'LOD generation'
+    def __init__(self, asset_id, source, backup_dir, levels, keep):
+        super().__init__(asset_id, source, backup_dir, ('add', levels, keep))
+    def summary(self, result):
+        lods = result['lods']
+        return f"LODs added ({len(lods['variants'])} levels, {' / '.join(f'{t:,}' for t in lods['triangles'])} triangles)"
+
+
+class LodDeleteJob(_MeshGenerateJob):
+    """Undo LodJob: remove the "LOD" variant set and everything it defined (lod_gen.py remove mode)."""
+    script, label = 'lod_gen.py', 'LOD removal'
+    def __init__(self, asset_id, source, backup_dir):
+        super().__init__(asset_id, source, backup_dir, ('remove',))
+    def summary(self, result):
+        return f"LODs removed ({len(result['removed_lods'])} prim(s))"
+
+
 class FolderMigrationJob(QtCore.QThread):
     """One-time folder listing for an index made before folders were recorded by the scan.
 
@@ -473,6 +492,15 @@ class LibraryWidget(QtWidgets.QWidget):
         self.element_delete_pending = set()
         self.element_delete_failed = set()
         self.element_delete_job = None
+        self.lod_queue = deque()
+        self.lod_pending = set()
+        self.lod_failed = set()
+        self.lod_job = None
+        self.missing_lod_scan = None
+        self.lod_delete_queue = deque()
+        self.lod_delete_pending = set()
+        self.lod_delete_failed = set()
+        self.lod_delete_job = None
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
         self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
@@ -733,6 +761,8 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.proxy_pending:raise ValueError('Wait for proxy generation to finish (or use Libraries... > Cancel Proxies) before moving assets.')
         if self.element_pending:raise ValueError('Wait for element switch generation to finish (or use Libraries... > Cancel Element Switches) before moving assets.')
         if self.element_delete_pending:raise ValueError('Wait for element switch removal to finish before moving assets.')
+        if self.lod_pending or self.missing_lod_scan is not None:raise ValueError('Wait for LOD generation to finish (or use Libraries... > Cancel LODs) before moving assets.')
+        if self.lod_delete_pending:raise ValueError('Wait for LOD removal to finish before moving assets.')
         self.save_metadata()
         root_id,dest_rel,_=target;select=None
         if 'assets' in payload:
@@ -906,7 +936,10 @@ class LibraryWidget(QtWidgets.QWidget):
     def show_icon(self,index,icon):
         entry=self.page_entries[index]
         if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
-        elif 'variant' in entry['rep']['tags'].split():icon=self.variant_badge(icon)
+        else:
+            words=entry['rep']['tags'].split()
+            labels=[label for tag,label in (('variant','VARIANT'),('lod','LOD')) if tag in words]
+            if labels:icon=self.variant_badge(icon,labels)
         self.items.item(index).setIcon(icon);self.icons_loaded.add(index)
 
     def item_text(self,members,rep,label=None):
@@ -935,15 +968,21 @@ class LibraryWidget(QtWidgets.QWidget):
         painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(166,198,50,50),QtCore.Qt.AlignmentFlag.AlignCenter,str(count));painter.end()
         return QtGui.QIcon(out)
 
-    def variant_badge(self,icon):
-        """Small corner marker for a USD carrying the "variant" tag (an element switch, or
-        anything else tagged that way), so it is recognisable without opening its info panel."""
+    def variant_badge(self,icon,labels=('VARIANT',)):
+        """Small corner markers for a USD carrying the "variant" tag (an element switch) and/or the
+        "lod" tag (LODs), so both are recognisable without opening its info panel."""
         edge=self.icon_edge();out=QtGui.QPixmap(edge,edge);out.fill(QtCore.Qt.GlobalColor.transparent)
         painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.scale(edge/256,edge/256)
         painter.drawPixmap(QtCore.QRect(0,0,256,256),icon.pixmap(edge,edge))
-        painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(45,95,180));painter.drawRoundedRect(6,6,96,28,6,6)
         font=painter.font();font.setBold(True);font.setPixelSize(14);painter.setFont(font)
-        painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(6,6,96,28),QtCore.Qt.AlignmentFlag.AlignCenter,'VARIANT');painter.end()
+        x=6
+        for label in labels:
+            width=96 if label=='VARIANT' else 52
+            painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(45,95,180) if label=='VARIANT' else QtGui.QColor(150,95,30))
+            painter.drawRoundedRect(x,6,width,28,6,6)
+            painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(x,6,width,28),QtCore.Qt.AlignmentFlag.AlignCenter,label)
+            x+=width+6
+        painter.end()
         return QtGui.QIcon(out)
 
     def icon_edge(self):
@@ -1073,21 +1112,80 @@ class LibraryWidget(QtWidgets.QWidget):
             if message and message.startswith('Element switch removed'):self.set_variant_tag(aid,False)
             self.status.setText((message or 'No element switch to remove')+f' ({len(self.element_delete_queue)} remaining)')
 
+    def queue_lod(self,row,levels,keep):
+        aid=row['id']
+        if row['kind']!='usd' or aid in self.lod_pending or aid in self.lod_failed:return
+        self.lod_pending.add(aid);self.lod_queue.append((row,levels,keep))
+        QtCore.QTimer.singleShot(0,self.next_lod)
+
+    def next_lod(self):
+        if self.lod_job is not None or not self.lod_queue:return
+        row,levels,keep=self.lod_queue.popleft()
+        source=Path(row['root_path'])/row['relpath']
+        self.lod_job=LodJob(row['id'],source,self.data_dir/'backups'/'lod',levels,keep)
+        self.lod_job.done.connect(self.lod_done)
+        self.lod_job.finished.connect(self.lod_finished)
+        _keep_job(self.lod_job)
+
+    def lod_finished(self):
+        self.lod_job=None;self.next_lod()
+
+    def lod_done(self,aid,message,error):
+        self.lod_pending.discard(aid)
+        if error:
+            self.lod_failed.add(aid);self.status.setText('LOD generation failed: '+error)
+        else:
+            if message and message.startswith('LODs added'):self.set_tag(aid,'lod',True)
+            self.status.setText((message or 'Already has LODs')+f' ({len(self.lod_queue)} remaining)')
+
+    def queue_lod_delete(self,row):
+        aid=row['id']
+        if row['kind']!='usd' or aid in self.lod_delete_pending or aid in self.lod_delete_failed:return
+        self.lod_delete_pending.add(aid);self.lod_delete_queue.append(row)
+        QtCore.QTimer.singleShot(0,self.next_lod_delete)
+
+    def next_lod_delete(self):
+        if self.lod_delete_job is not None or not self.lod_delete_queue:return
+        row=self.lod_delete_queue.popleft()
+        source=Path(row['root_path'])/row['relpath']
+        self.lod_delete_job=LodDeleteJob(row['id'],source,self.data_dir/'backups'/'lod')
+        self.lod_delete_job.done.connect(self.lod_delete_done)
+        self.lod_delete_job.finished.connect(self.lod_delete_finished)
+        _keep_job(self.lod_delete_job)
+
+    def lod_delete_finished(self):
+        self.lod_delete_job=None;self.next_lod_delete()
+
+    def lod_delete_done(self,aid,message,error):
+        self.lod_delete_pending.discard(aid)
+        if error:
+            self.lod_delete_failed.add(aid);self.status.setText('LOD removal failed: '+error)
+        else:
+            if message and message.startswith('LODs removed'):self.set_tag(aid,'lod',False)
+            self.status.setText((message or 'No LODs to remove')+f' ({len(self.lod_delete_queue)} remaining)')
+
     def set_variant_tag(self,aid,present):
-        """Keep the auto "variant" tag (and the thumbnail badge it drives) in sync with whether
-        this asset currently has an element switch, without opening the file again - the caller
-        already knows, since it just added or removed one."""
+        self.set_tag(aid,'variant',present)
+
+    def set_tag(self,aid,tag,present):
+        """Keep an automatic tag ("variant" for an element switch, "lod" for LODs) and the thumbnail
+        badge it drives in sync with what a job just added or removed, without opening the file
+        again. Assets not loaded in the list (a bulk queue) are updated in the index directly."""
         row=self.row_index.get(aid)
-        if row is None:return
+        if row is None:
+            found=self.library.assets_by_ids([aid])
+            if not found:return
+            row=found[0]
         words=row['tags'].split()
         if present:
-            if 'variant' in words:return
-            words.append('variant')
+            if tag in words:return
+            words.append(tag)
         else:
-            if 'variant' not in words:return
-            words=[w for w in words if w!='variant']
+            if tag not in words:return
+            words=[w for w in words if w!=tag]
         tags=' '.join(words)
-        self.library.update(aid,tags=tags);self.update_metadata_rows(aid,tags=tags)
+        self.library.update(aid,tags=tags)
+        if aid in self.row_index:self.update_metadata_rows(aid,tags=tags)
         index=self.item_index.get(aid)
         if index is not None:self.icons_loaded.discard(index);self.icon_todo.appendleft(index);self.icon_timer.start(0)
         current=self.items.currentItem()
@@ -1267,6 +1365,8 @@ class LibraryWidget(QtWidgets.QWidget):
             action('Generate Selected Proxies...',self.generate_proxy,'Adds a decimated purpose=proxy copy of each mesh.')
             action('Generate Selected Element Switch...',self.generate_element,'Only for packs of alternate objects: adds an "element" variant set.')
             action('Delete Element Switch',self.generate_element_delete,'Undo the element switch (assets without one are skipped).')
+            action('Generate Selected LODs...',self.generate_lods,'Adds a "LOD" variant set (LOD_1 = as is, then reduced copies) for Auto Select LOD, Stage Manager and Set Variant.')
+            action('Delete LODs',self.generate_lod_delete,'Undo the LODs, restoring the file as it was (assets without LODs are skipped).')
         if len(rows)==1:
             menu.addSeparator()
             action('Publish Static USD...',self.publish_asset)
@@ -1328,18 +1428,21 @@ class LibraryWidget(QtWidgets.QWidget):
         return [('Thumbnails',count(self.thumb_queue,self.thumb_job),self.cancel_thumbnails),
                 ('Proxies',count(self.proxy_queue,self.proxy_job),self.cancel_proxies),
                 ('Element switches',count(self.element_queue,self.element_job),self.cancel_elements),
-                ('Element switch removals',count(self.element_delete_queue,self.element_delete_job),self.cancel_element_deletes)]
+                ('Element switch removals',count(self.element_delete_queue,self.element_delete_job),self.cancel_element_deletes),
+                ('LODs',count(self.lod_queue,self.lod_job),self.cancel_lods),
+                ('LOD removals',count(self.lod_delete_queue,self.lod_delete_job),self.cancel_lod_deletes)]
 
     def update_jobs_bar(self):
         parts=[f'{label} {n}' for label,n,_ in self.job_counts() if n]
         if self.missing_scan is not None:parts.append('checking thumbnails')
         if self.missing_proxy_scan is not None:parts.append('checking USD for proxies')
+        if self.missing_lod_scan is not None:parts.append('checking USD for LODs')
         if parts:self.jobs_label.setText('Background: '+'  ·  '.join(parts)+' remaining')
         self.jobs_bar.setVisible(bool(parts))
 
     def cancel_all_jobs(self):
         for _,n,cancel in self.job_counts():cancel()
-        self.missing_scan=None;self.missing_proxy_scan=None
+        self.missing_scan=None;self.missing_proxy_scan=None;self.missing_lod_scan=None
         self.update_jobs_bar()
         self.status.setText('Cancelled every queued background job. Jobs already running finish first.')
 
@@ -1361,12 +1464,14 @@ class LibraryWidget(QtWidgets.QWidget):
         menu.addSection('Generate (search and folder filters apply)')
         action('Generate Missing Thumbnails',self.generate_missing_thumbnails,self.missing_scan is None)
         action('Generate Missing Proxies...',self.generate_missing_proxies,self.missing_proxy_scan is None)
+        action('Generate Missing LODs...',self.generate_missing_lods,self.missing_lod_scan is None,
+               tip='LOD variant set on every matching USD that has none yet (for Auto Select LOD / Stage Manager).')
         menu.addSection('Cancel Background Jobs')
         counts=self.job_counts()
-        for (label,n,cancel),name in zip(counts,('Cancel Thumbnails','Cancel Proxies','Cancel Element Switches','Cancel Element Switch Removals')):
-            action(name+(f' ({n})' if n else ''),cancel,bool(n) or (name=='Cancel Thumbnails' and self.missing_scan is not None)
-                   or (name=='Cancel Proxies' and self.missing_proxy_scan is not None))
-        action('Cancel All',self.cancel_all_jobs,any(n for _,n,_ in counts) or self.missing_scan is not None or self.missing_proxy_scan is not None)
+        scanning={'Cancel Thumbnails':self.missing_scan,'Cancel Proxies':self.missing_proxy_scan,'Cancel LODs':self.missing_lod_scan}
+        for (label,n,cancel),name in zip(counts,('Cancel Thumbnails','Cancel Proxies','Cancel Element Switches','Cancel Element Switch Removals','Cancel LODs','Cancel LOD Removals')):
+            action(name+(f' ({n})' if n else ''),cancel,bool(n) or scanning.get(name) is not None)
+        action('Cancel All',self.cancel_all_jobs,any(n for _,n,_ in counts) or any(s is not None for s in scanning.values()))
         menu.addSection('Catalog')
         action('Open Catalog',self.open_catalog)
         action('Select Catalog...',self.select_catalog)
@@ -1516,6 +1621,83 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.element_delete_job:self.element_delete_job.requestInterruption()
         self.status.setText('Cancelled. An active element switch removal will finish first.')
 
+    def ask_lod_settings(self):
+        """(levels, keep percent) from a small dialog that remembers the last values, or None."""
+        dialog=QtWidgets.QDialog(self);dialog.setWindowTitle('Generate LODs')
+        form=QtWidgets.QFormLayout(dialog)
+        levels=QtWidgets.QSpinBox();levels.setRange(2,lod_gen.MAX_LEVELS);levels.setValue(int(self.settings.get('lod_levels',lod_gen.DEFAULT_LEVELS)))
+        levels.setToolTip('Variants LOD_1 (the asset as it is) .. LOD_N in the "LOD" variant set.')
+        keep=QtWidgets.QDoubleSpinBox();keep.setRange(1.0,99.0);keep.setDecimals(1);keep.setSuffix(' %')
+        keep.setValue(float(self.settings.get('lod_keep',lod_gen.DEFAULT_KEEP)))
+        keep.setToolTip('Triangles kept at each step: 50 % gives LOD_2 = 1/2, LOD_3 = 1/4, LOD_4 = 1/8 of the original.')
+        form.addRow('Levels',levels);form.addRow('Keep per level',keep)
+        form.addRow(QtWidgets.QLabel('Works with Auto Select LOD (Variant Set "LOD"), Stage Manager\'s Inspector and Set Variant.'))
+        buttons=QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok|QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);form.addRow(buttons)
+        if dialog.exec()!=QtWidgets.QDialog.DialogCode.Accepted:return None
+        self.settings['lod_levels']=levels.value();self.settings['lod_keep']=keep.value();self.save_settings()
+        return levels.value(),keep.value()
+
+    def generate_lods(self):
+        rows=[r for r in self.selected_rows() if r['kind']=='usd']
+        if not rows:raise ValueError('Select one or more USD assets.')
+        settings=self.ask_lod_settings()
+        if settings is None:return
+        for row in rows:
+            self.library.resolve(row)
+            self.lod_failed.discard(row['id'])
+            self.queue_lod(row,*settings)
+        self.status.setText(f'Queued {len(rows)} LOD job(s) ({settings[0]} levels, keep {settings[1]:g} % per level). Each USD file is overwritten in place (a backup is kept in data/backups/lod).')
+
+    def generate_missing_lods(self):
+        if self.missing_lod_scan is not None:return
+        settings=self.ask_lod_settings()
+        if settings is None:return
+        # Like proxies: whether a USD already has LODs is only known by opening it, so each job checks its own file.
+        filters=dict(self.filters());filters['kind']='usd'
+        self.missing_lod_scan={'batches':self.library.iter_rows(**filters),'batch':[],'index':0,'count':0,'seen':0,'settings':settings}
+        QtCore.QTimer.singleShot(0,self.missing_lod_step)
+
+    def missing_lod_step(self):
+        scan=self.missing_lod_scan
+        if scan is None:return
+        deadline=time.monotonic()+0.015
+        while time.monotonic()<deadline:
+            if scan['index']>=len(scan['batch']):
+                scan['batch']=next(scan['batches'],None)
+                if scan['batch'] is None:
+                    self.missing_lod_scan=None
+                    self.status.setText(f"Queued {scan['count']} LOD jobs. Everything matching the search and folder filters is included; assets that already have LODs are skipped.")
+                    return
+                scan['index']=0
+            row=scan['batch'][scan['index']];scan['index']+=1;scan['seen']+=1
+            if row['id'] not in self.lod_pending and 'lod' not in row['tags'].split():
+                self.lod_failed.discard(row['id']);self.queue_lod(row,*scan['settings']);scan['count']+=1
+        self.status.setText(f"Checking USD assets... {scan['seen']} / {self.total}")
+        QtCore.QTimer.singleShot(0,self.missing_lod_step)
+
+    def cancel_lods(self):
+        self.missing_lod_scan=None
+        for row,_,_ in self.lod_queue:self.lod_pending.discard(row['id'])
+        self.lod_queue.clear()
+        if self.lod_job:self.lod_job.requestInterruption()
+        self.status.setText('Cancelled. An active LOD generation will finish first.')
+
+    def generate_lod_delete(self):
+        rows=[r for r in self.selected_rows() if r['kind']=='usd']
+        if not rows:raise ValueError('Select one or more USD assets.')
+        for row in rows:
+            self.library.resolve(row)
+            self.lod_delete_failed.discard(row['id'])
+            self.queue_lod_delete(row)
+        self.status.setText(f'Queued {len(rows)} LOD removal job(s). Assets without LODs are skipped untouched. Each USD file is overwritten in place (a backup is kept in data/backups/lod).')
+
+    def cancel_lod_deletes(self):
+        for row in self.lod_delete_queue:self.lod_delete_pending.discard(row['id'])
+        self.lod_delete_queue.clear()
+        if self.lod_delete_job:self.lod_delete_job.requestInterruption()
+        self.status.setText('Cancelled. An active LOD removal will finish first.')
+
     def generate_missing_thumbnails(self):
         if self.missing_scan is not None:return
         # Checking every asset touches the disk; read the index and check the files in slices so the
@@ -1585,7 +1767,7 @@ class LibraryWidget(QtWidgets.QWidget):
             nodes=[n for n in hou.selectedNodes() if n.parent().path()==self.target.text() and n.type().category()==hou.lopNodeTypeCategory()]
             if len(nodes)>1:raise ValueError('Select only one upstream LOP.')
             if nodes:upstream=nodes[0]
-        node=ops.import_asset(source,row['effective_kind'],row['label'],self.target.text(),upstream,'sublayer' if self.usdmode.currentIndex() else 'reference',self.assign.text(),add_variant_switch='variant' in row['tags'].split())
+        node=ops.import_asset(source,row['effective_kind'],row['label'],self.target.text(),upstream,'sublayer' if self.usdmode.currentIndex() else 'reference',self.assign.text(),add_variant_switch='variant' in row['tags'].split(),add_lod_select='lod' in row['tags'].split())
         node.setSelected(True,clear_all_selected=True); node.setDisplayFlag(True)
         self.status.setText('Imported: '+node.path()+(' (FBX/glTF source materials are not rebuilt automatically)' if source.suffix.lower() in {'.fbx','.gltf','.glb'} else ''))
         return node

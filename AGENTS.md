@@ -99,16 +99,24 @@
 - ui.pyの`ProxyJob`が結果を検証してから、data/backups/proxy/へ元ファイルをバックアップし、os.replaceで置き換える。失敗・スキップ時は元ファイルを一切変更しない（生成スクリプト単体はSave()せずExport/CreateNewUsdzPackageで新規ファイルに書き出すだけ）。
 - **一時出力ファイルは元ファイルと同じフォルダーに書く**（tempfile.TemporaryDirectory()配下ではない）。os.replaceはWindowsで別ドライブ間の置き換えができない（WinError 17）。素材ライブラリーとシステムTEMPが別ドライブの構成で実際に踏んだ既知の不具合（バックアップだけ作られ元ファイルは変更されないまま失敗する）。
 - 実行時にダイアログでtarget trianglesを聞く。値はsettings.jsonに保存し次回の初期値にする。ダイアログをテストする時はQtWidgets.QInputDialog.getIntをpatchする。
-- LOD（複数段階の詳細度、USDのvariant set）は一度実装したが、2026-09-22にユーザーの指示で機能ごと削除した（UI・lod_gen.py・関連テスト・ドキュメントを撤去）。再実装する場合は過去のgitコミット（"Add LOD generation..." 以降、"lodの仕組みは削除します"より前）を参照する。
-- ui.pyの`_MeshGenerateJob`（`ProxyJob`/`ElementJob`の共通基底、旧`LodJob`と同じ形）が共有の subprocess/backup/os.replace ロジックを持つ。サブクラスが1つだけの時期があり（LOD削除直後）、その時は一旦`ProxyJob`へ展開していたが、element switch追加で再び共通基底に戻した。3つ目のジェネレーターを追加する時もこのクラスを再利用する。
+- ui.pyの`_MeshGenerateJob`（`ProxyJob`/`ElementJob`/`LodJob`などの共通基底）が共有の subprocess/backup/os.replace ロジックを持つ。新しいジェネレーターもこのクラスを再利用する。
+
+## LOD
+
+- 旧LOD（0.12.0、メッシュごとの`lod` variant set、points等だけ差し替えでUV・法線が崩れた）は、使い方が分からないという理由で2026-09-22に削除した。2026-09-23に「Auto Select LODやStage Managerなど既存ノードで機能する」ことを条件に作り直した（0.20.0、lod_gen.py）。旧方式（メッシュごとのvariant set・ローカル値のClear）へ戻さない。
+- variant setは`LOD`、名前は`LOD_1`（元のまま）〜`LOD_N`（N≦9）、置き場所は資産の一番上のプリム（element_gen.anchor）。Auto Select LODはPrimitivesのプリム自身のvariant setを名前順に閾値と対応させ、Stage Managerは配置プリム自身のvariantしか扱わない（どちらもhythonで確認済み）。名前・置き場所を変えるとこの2つが使えなくなる。
+- 元のメッシュは編集しない。LOD_kの中だけで縮小メッシュ（兄弟`<名前>_LOD_k`）を定義し元を非表示にする。削除は`element_gen.remove_variant_set`で、生成前と同じ内容に戻ること（tests/test_lod.pyの復元テスト）。
+- 縮小はUV・法線をface corner属性で運んでからfuse→divide→polyreduce（fuseしないとUVの島ごとに縮む）。出力は値の異なる角だけ点を分けたvertex補間（容量のため）。法線はNormal SOP（60度）で計算し直し、rightHandedでは`reverse`（逆にすると法線が内向きになる。tests/test_lod.pyの+Y確認）。縮小の見た目はKarmaでLOD_1〜4を並べて確認した（UV・材質が正しく、法線再計算前に出た暗いムラが消えること）。
+- メッシュに既に`visibility`がある資産、扱えないprimvarがある資産はスキップ（壊れたLODを書かない）。GeomSubset（面ごとの材質）は現在の素材（1218メッシュ）に無いため未対応。対応する場合は縮小前後で面→subsetを対応づける。
+- proxy_gen.generate_plainは、同じプロセス内で後から開く処理のため、編集したソースレイヤーをReload()で保存時の状態へ戻す（レイヤーレジストリが編集済みのレイヤーを返し、テストで削除結果が狂った）。
 
 ## 複数オブジェクトパックの切り替え
 
 - element_gen.pyが別プロセス（hython）で`element` variant setを追加する。対象資産自身の入口ファイルだけを編集する。
 - 分岐点の検出（`_find_pack_root`）はステージのpseudo-rootからの**幅優先探索**で、子を2つ以上（`purpose=proxy`のメッシュ自身を除く）持つ最も浅いプリムを返す。`Usd.PrimRange`で深さ優先に全プリムを見るのではなく、必ずBFSで「最初に見つかった浅い分岐点」を使うこと（深い場所にある偶然の分岐、例えばマテリアル分割で複数メッシュに割れた1つのオブジェクトを誤検出しないため）。
 - **既知の限界（意図的に対処しない）**: モジュール式キット（例: 手すりの部品集合）と複数の代替オブジェクトのパック（例: きのこの品種違い数体）はファイルの形が同じで区別できない。そのためLibraries...への一括生成は追加しない。ui.pyの「Generate Selected Element Switch...」による資産ごとの手動生成のみ。ユーザーがその資産を実際に見て判断する前提。
-- 各バリアントでは、選ばれた子だけ`visibility=inherited`、他は`visibility=invisible`を明示的に設定する。ジオメトリ自体（points等）は一切変更しないので、LODの時のような「先にローカル値をClear()する」必要は無い（分岐点プリム自体にvisibilityのローカル値は元々存在しない）。
-- variant set自体は分岐点ではなく一番上のプリム（element_gen._anchor、通常default prim）に置く。Stage Managerは配置したプリム自身のvariantしか扱えないため（奥のプリムへの指定は無視される。検証済み）。旧形式（分岐点に置いたもの）は再生成で移し、削除はどちらの位置でも生成前と同じ内容へ戻すこと（tests/test_element.pyの復元テストを壊さない）。
+- 各バリアントでは、選ばれた子だけ`visibility=inherited`、他は`visibility=invisible`を明示的に設定する。ジオメトリ自体（points等）は一切変更しないので、旧LODの時のような「先にローカル値をClear()する」必要は無い（分岐点プリム自体にvisibilityのローカル値は元々存在しない）。
+- variant set自体は分岐点ではなく一番上のプリム（element_gen.anchor、通常default prim）に置く。Stage Managerは配置したプリム自身のvariantしか扱えないため（奥のプリムへの指定は無視される。検証済み）。旧形式（分岐点に置いたもの）は再生成で移し、削除はどちらの位置でも生成前と同じ内容へ戻すこと（tests/test_element.pyの復元テストを壊さない）。
 - 選択は`Element0`に設定して書き出す。何も選択しないと全オブジェクトが重なって見える既存の問題を、生成直後から解消するため。
 - ui.pyの`ElementJob`が結果を検証してから、data/backups/element/へ元ファイルをバックアップし、os.replaceで置き換える。ダイアログでの値入力は無い（設定不要な機能）。
 - 取り消し用に`ElementDeleteJob`（`_MeshGenerateJob`、extra_args=('remove',)）と「Delete Element Switch」メニューがある。`UsdVariantSets`にこのUSDバージョンでは`RemoveVariantSet`が無いため、element_gen.pyの`_remove_element_switch`は`Sdf.PrimSpec`（`spec.variantSets`/`variantSelections`/`variantSetNameList`）を直接編集して消す。新しいUSDバージョンで`RemoveVariantSet`相当が使えるようになっても、Sdf直接編集の方が「バリアント内に書いた可視性の上書きも含めて丸ごと消える」ことが検証済みなので、無理に置き換えなくてよい。

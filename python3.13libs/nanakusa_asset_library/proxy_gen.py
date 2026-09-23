@@ -253,14 +253,22 @@ def generate_plain(source, destination, add_fn):
     stage = Usd.Stage.Open(str(source))
     if not stage:
         raise ValueError('USD file could not be opened')
-    result = add_fn(stage)
-    if 'skipped' in result:
+    layer = stage.GetRootLayer()
+    was_dirty = layer.dirty
+    try:
+        result = add_fn(stage)
+        if 'skipped' in result:
+            return result
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not layer.Export(str(destination)):
+            raise RuntimeError('Could not write the layer')
         return result
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if not stage.GetRootLayer().Export(str(destination)):
-        raise RuntimeError('Could not write the layer')
-    return result
+    finally:
+        # The edits were for the new file only: leave the source layer as saved for anything else
+        # in this process that opens it (the layer registry would otherwise hand out the edited copy).
+        if not was_dirty and layer.dirty:
+            layer.Reload()
 
 
 def generate_usdz(source, destination, add_fn):

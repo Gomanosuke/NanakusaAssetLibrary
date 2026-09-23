@@ -311,7 +311,29 @@ Sketchfab等のパックは、同じ原点付近に複数の独立したトッ�
 - `ui.py`の`ElementDeleteJob`（`_MeshGenerateJob`を継承、`extra_args=('remove',)`でelement_gen.pyへ渡す）が右クリックの「Delete Element Switch」から呼ばれる。`data/backups/element/`へバックアップしてから置き換える点はElementJobと同じ。「Libraries... → Cancel Element Switch Removals」で待機分を解除できる。
 - **`variant`タグの自動付与・削除**: `ElementJob`が成功しresultメッセージが`'Element switch added'`で始まる時、`LibraryWidget.set_variant_tag(aid, True)`が対象資産の`tags`（スペース区切り文字列）へ`variant`を追加し、`library.update`でDBへ保存する。`ElementDeleteJob`が成功し`'Element switch removed'`で始まる時は同じ仕組みで`variant`を取り除く（`set_variant_tag(aid, False)`）。スキップ（既にある/対象なし）の時は触らない。ジェネレーター側は一切タグを知らず、ui.py側の完了ハンドラーだけがタグを管理する。
 - **サムネイルバッジ**: `load_icons()`が、PBRスタックでない各アイテムについて`entry['rep']['tags']`に`variant`が含まれるかを見て、含まれていれば`variant_badge()`（`stacked_icon`と同じ256論理座標のcompositing手法で、左上に「VARIANT」の角丸ラベルを重ねる）でアイコンを差し替える。ファイルを開いて`HasVariantSet`を確認する必要はなく、DBの`tags`列を見るだけなので、一覧に並ぶ全アイテムに対して安価に行える。
+- タグの付け外しは`set_tag(aid, tag, present)`（`set_variant_tag`はその別名）。一覧に読み込まれていない資産（一括キュー）は`assets_by_ids`で索引から読んで更新する。バッジは`variant`→「VARIANT」（青）、`lod`→「LOD」（橙）を左上へ横に並べる。
 - `set_variant_tag`はタグ変更後、`item_index`から対象アイテムのインデックスを引き、`icons_loaded`から外して`icon_todo`の先頭へ積み直す（`thumbnail_done`と同じ手法）ことで、次の`load_icons`スライスで確実にバッジ付きへ再描画させる。選択中の資産であれば`selection_changed()`も呼び、右側のTagsフィールドにも反映する。
+
+## LOD
+
+`lod_gen.py`（別プロセスのhython）がUSD資産に`LOD` variant setを追加する。Houdiniの標準ノードがそのまま使える形にする:
+- Create LOD LOPの作る形（配置・計測されるプリム自身のvariant set、詳細な順に名前が並ぶvariant）に合わせ、variant setは資産の一番上のプリム（`element_gen.anchor`）に置き、名前は`LOD_1`〜`LOD_N`（N≦9。Auto Select LODはvariant名の順に閾値を当てるため、10以上だと並びが崩れる）。
+- **Auto Select LOD LOP**（`autoselectlod`、HDA）: 内部のwrangleが、Primitivesの各プリムについてカメラ位置とプリムのワールド原点の距離を求め、variant名の順に`thresh_dist#`を超えた最後のものを選ぶ。Number of LODsは段数以上にする。Primitivesのプリム自身にvariant setが必要（22.0.447、hythonで確認: 2つの配置で距離0→LOD_1、5000→LOD_4）。
+- **Stage Manager**: 配置したプリムのInspector「Variant Sets」に`LOD`が出て、選択はStage Managerの変更として書かれる（hythonでchangeの`variantset#_#`を指定して確認）。
+
+生成（`_add_lods`）:
+- 対象は`purpose=proxy`以外の全Mesh。まず全メッシュを縮小し、1つでも扱えなければ何も書かずにスキップする。
+- `LOD_1`は何も変えない（元のまま）。`LOD_k`（k≧2）の中でだけ、各メッシュの縮小版を兄弟プリム`<名前>_LOD_k`として定義し、元のメッシュに`visibility=invisible`を書く。元データに触れないため、削除（`remove_variant_set`）で生成前と同じ内容に戻る（テストと実資産で、ルートレイヤーの文字列一致を確認）。
+- 縮小: SOP verb（ノードを作らない）で、UV・法線などのfloatのprimvarを頂点（face corner）属性として運び、座標の一致する点をfuse（UVの継ぎ目で分かれた点を結合。しないとUVの島ごとに縮小されて形が崩れる）→三角形化→polyreduce（`percentage`、属性の継ぎ目は保持）。1段ごとの割合は元の三角形数に対して`keep^(k-1)`。
+- 結果は、値の異なる角でだけ点を分けて頂点（vertex補間）データに戻す（faceVaryingのままだと容量が約3倍。60万三角形の資産で29.7→65.8MBが45.9MBになった）。法線は縮小後の面でNormal SOP（角度重み、60度で分割）を使って計算し直す（元の法線を補間すると大きな三角形に暗いムラが出た）。Houdiniは逆向きの巻きを表とみなすため、rightHandedのメッシュでは`reverse`で戻す。
+- マテリアルの割り当て（`material:binding*`）、subdivisionScheme・orientation・doubleSided・purpose・xformOpを複製する。GeomSubsetは現在の素材に無いため未対応。
+- スキップ: 既に`LOD`がある／メッシュが無い／メッシュが複数の最上位プリムに分かれている／メッシュに既に`visibility`がある（variantの意見が負けるため）／扱えないprimvar（float以外の非constant、elementSize>1など）。段数2〜9・割合1〜99%以外はエラー。
+- Element Switchとの共存: 素材のElement Switchの候補は全てXform（実資産302件で確認）なので、縮小メッシュは候補の中にでき、Element Switchの非表示が及ぶ。LODとElement Switchはそれぞれ単独で削除できる。
+
+UI:
+- 右クリックの「Generate Selected LODs...」（段数・割合のダイアログ、`settings.json`の`lod_levels`/`lod_keep`に保存）、「Delete LODs」。「Libraries... → Generate Missing LODs...」は条件に合うUSDのうち`lod`タグが無いものをキューへ入れる（各ジョブが自分のファイルを見てスキップもする）。キャンセル・Backgroundバー・移動の禁止は他のジョブと同じ。バックアップは`data/backups/lod/`。
+- 成功で`lod`タグとバッジ、削除で外す。素材情報にはUSDの一番上のプリムのvariant set（例: `LOD (4), element (5)`）を表示する。
+- D&D / Import Selected: `lod`タグがあれば`houdini_ops._add_lod_select`がAuto Select LODを追加する（Primitives=配置プリム、Variant Set=`LOD`、段数、距離=対角線×4×2^(k-2)、カメラ=上流の最初のカメラ、無ければ`/cameras/camera1`）。
 
 ## USD / Asset Catalog
 
@@ -375,6 +397,7 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・上方向軸・マテリアル数・サイズも） |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
 | `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ |
-| `element_gen.py` | 別プロセスでの複数オブジェクトパックの切り替え（`element` variant set）。proxy_gen.pyのファイル入出力を再利用 |
+| `element_gen.py` | 別プロセスでの複数オブジェクトパックの切り替え（`element` variant set）。proxy_gen.pyのファイル入出力を再利用。`anchor`・`remove_variant_set`はlod_gen.pyと共用 |
+| `lod_gen.py` | 別プロセスでのLOD生成・削除（`LOD` variant set、Auto Select LOD / Stage Manager対応） |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。

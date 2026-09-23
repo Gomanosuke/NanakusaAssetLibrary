@@ -131,7 +131,7 @@ def texture_material(parent, maps, label, origin=None):
     _layout_material(builder,[] if builder_parent else existing,None if builder_parent else origin,shader,uv,images,processors,extras,outputs)
     return result
 
-def import_into_context(path, kind, label, parent, add_variant_switch=False):
+def import_into_context(path, kind, label, parent, add_variant_switch=False, add_lod_select=False):
     import hou
     if not Path(path).is_file():raise FileNotFoundError(str(path))
     before=set(parent.children())
@@ -140,7 +140,7 @@ def import_into_context(path, kind, label, parent, add_variant_switch=False):
             return _texture_material(parent,path,label)
         category=parent.childTypeCategory()
         if category==hou.lopNodeTypeCategory():
-            return import_asset(path,kind,label,parent.path(),add_variant_switch=add_variant_switch)
+            return import_asset(path,kind,label,parent.path(),add_variant_switch=add_variant_switch,add_lod_select=add_lod_select)
         if category==hou.objNodeTypeCategory():
             geo=parent.createNode('geo',safe_name(label))
             _read_geometry(geo,path,kind)
@@ -238,7 +238,36 @@ def _add_variant_switch(parent, node):
     switch.parm('variantnameindex1').set(0)
     return switch
 
-def import_asset(path, kind, label, target='/stage', upstream=None, usd_mode='reference', assign_pattern='', add_variant_switch=False):
+LOD_VARIANT_SET = 'LOD'   # lod_gen.VARIANT_SET (not imported here: this module runs inside Houdini's session)
+LOD_DISTANCE_FACTOR = 4.0   # LOD_2 from 4x the asset's diagonal away, then twice as far for each further level
+DEFAULT_CAMERA = '/cameras/camera1'   # where a Camera LOP puts its first camera
+
+def _add_lod_select(parent, node):
+    """Append an Auto Select LOD LOP set up for the asset's "LOD" variant set (lod_gen.py): the
+    placed prim, one entry per level, and thresholds scaled from the asset's size, so it picks a
+    level by camera distance out of the box. A no-op if the asset has no LODs."""
+    import hou
+    from pxr import Usd, UsdGeom
+    node.cook(force=True)
+    stage = node.stage()
+    prim = next((p for p in stage.Traverse() if p.GetVariantSets().HasVariantSet(LOD_VARIANT_SET)), None) if stage else None
+    if prim is None:
+        return node
+    names = prim.GetVariantSet(LOD_VARIANT_SET).GetVariantNames()
+    select = parent.createNode('autoselectlod', node.name() + '_lod')
+    select.setInput(0, node)
+    select.parm('primpattern').set(str(prim.GetPath()))
+    select.parm('variantset1').set(LOD_VARIANT_SET)
+    select.parm('numoflods').set(len(names))
+    bound = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ['default', 'render']).ComputeWorldBound(prim).ComputeAlignedRange()
+    size = bound.GetSize().GetLength() if not bound.IsEmpty() else 1.0
+    for i in range(len(names)):
+        select.parm('thresh_dist%d' % (i + 1)).set(0.0 if i == 0 else size * LOD_DISTANCE_FACTOR * 2 ** (i - 1))
+    camera = next((str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdGeom.Camera)), DEFAULT_CAMERA)
+    select.parm('camera').set(camera)
+    return select
+
+def import_asset(path, kind, label, target='/stage', upstream=None, usd_mode='reference', assign_pattern='', add_variant_switch=False, add_lod_select=False):
     import hou
     p = Path(path)
     if not p.is_file():
@@ -271,6 +300,8 @@ def import_asset(path, kind, label, target='/stage', upstream=None, usd_mode='re
                     node.setInput(0, upstream)
                 if kind == 'usd' and add_variant_switch:
                     node = _add_variant_switch(parent, node)
+                if kind == 'usd' and add_lod_select:
+                    node = _add_lod_select(parent, node)
                 if kind == 'material' and assign_pattern:
                     from pxr import UsdShade
                     material_stage = node.stage()

@@ -81,6 +81,14 @@ def inspect(source, kind, plain=False):
             result['Up axis'] = UsdGeom.GetStageUpAxis(stage)
             if materials:
                 result['Materials'] = materials
+            # Variant sets a placement can switch (on the prim a Reference / Stage Manager places):
+            # "LOD" from lod_gen.py, "element" from element_gen.py, or the asset's own.
+            top = stage.GetDefaultPrim() or next(iter(stage.GetPseudoRoot().GetChildren()), None)
+            if top:
+                sets = top.GetVariantSets()
+                names = ['%s (%d)' % (n, len(sets.GetVariantSet(n).GetVariantNames())) for n in sets.GetNames()]
+                if names:
+                    result['Variant sets'] = ', '.join(names)
             bounds = UsdGeom.BBoxCache(time, ['default', 'render'], useExtentsHint=True)
             box = bounds.ComputeWorldBound(stage.GetPseudoRoot()).ComputeAlignedRange()
             if not box.IsEmpty():

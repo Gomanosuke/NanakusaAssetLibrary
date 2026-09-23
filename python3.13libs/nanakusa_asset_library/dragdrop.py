@@ -87,7 +87,9 @@ def import_payloads(payloads, parent, position=None):
             if groups is not None:
                 for i,group in enumerate(groups):nodes.append(ops.texture_material(parent,group['maps'],group['label'],position if i==0 else None))
             else:
-                for p in payloads:nodes.append(ops.import_into_context(p['path'],p['kind'],p['label'],parent,'variant' in p.get('tags','').split()))
+                for p in payloads:
+                    tags=p.get('tags','').split()
+                    nodes.append(ops.import_into_context(p['path'],p['kind'],p['label'],parent,'variant' in tags,'lod' in tags))
             origin=position if position is not None else hou.Vector2(0,0)
             # Each import is a short chain (Reference -> Set Variant ...): its first node goes at the
             # drop point / grid cell and the rest straight below it, so rows are as tall as the longest chain.

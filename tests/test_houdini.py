@@ -129,6 +129,28 @@ class HoudiniTests(unittest.TestCase):
         shown=[n for n in ('a','b','c') if UsdGeom.Imageable(manager.stage().GetPrimAtPath(f'/placed/Root/{n}')).ComputeVisibility()!='invisible']
         self.assertEqual(shown,['c'])
 
+    def test_an_asset_with_lods_gets_an_auto_select_lod_that_switches_by_camera_distance(self):
+        from nanakusa_asset_library import lod_gen
+        src=self._variant_pack_without_switch();lods=self.root/'lods.usda';lod_gen.generate(src,lods,3,50)
+        camera=self.net.createNode('camera');camera.parm('primpath').set('/cameras/cam')
+        node=ops.import_asset(lods,'usd','test_asset',self.net.path(),upstream=camera,add_lod_select=True)
+        self.assertEqual(node.type().name(),'autoselectlod')
+        self.assertEqual(node.parm('primpattern').eval(),'/assets/test_asset')
+        self.assertEqual(node.parm('variantset1').eval(),'LOD');self.assertEqual(node.parm('numoflods').eval(),3)
+        self.assertEqual(node.parm('camera').eval(),'/cameras/cam')   # the camera found upstream
+        distances=[node.parm(f'thresh_dist{i}').eval() for i in (1,2,3)]
+        self.assertEqual(distances[0],0.0);self.assertLess(distances[1],distances[2])
+        self.assertEqual(node.inputs()[0].type().name(),'reference::2.0')
+        self.assertAlmostEqual(node.position()[1],node.inputs()[0].position()[1]-ops.CHAIN_STEP)   # straight below
+        def picked(z):
+            camera.parm('tz').set(z)
+            return node.stage().GetPrimAtPath('/assets/test_asset').GetVariantSet('LOD').GetVariantSelection()
+        self.assertEqual(picked(0.0),'LOD_1')
+        self.assertEqual(picked((distances[1]+distances[2])/2),'LOD_2')
+        self.assertEqual(picked(distances[2]*2),'LOD_3')
+        # without the flag (no "lod" tag) nothing is added
+        self.assertEqual(ops.import_asset(lods,'usd','plain',self.net.path()).type().name(),'reference::2.0')
+
     def _variant_pack_without_switch(self):
         p=self.root/'plain_pack.usda';stage=Usd.Stage.CreateNew(str(p))
         top=UsdGeom.Xform.Define(stage,'/Top');UsdGeom.Xform.Define(stage,'/Top/Root')
