@@ -13,6 +13,7 @@ import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
 from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen, element_gen
+from . import reveal as file_browser
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STACK_ROLE = dragdrop.STACK_ROLE   # ids of the assets a list item stands for
@@ -1403,12 +1404,17 @@ class LibraryWidget(QtWidgets.QWidget):
             self.library.backup_index(); self.library.remove_root(folder[0]); self.rebuild_tree(); self.refresh()
 
     def reveal(self):
-        if self.items.selectedItems():paths=list(dict.fromkeys(self.library.resolve(row).parent for row in self.selected_rows()))
-        else:
-            folder=self.current_folder()
-            if not folder:raise ValueError('Select a folder.')
-            paths=[core.inside(folder[2],folder[1])]
-        for path in paths:QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+        open_folder=lambda path:QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+        if self.items.selectedItems():
+            # The assets' own files, selected in their folder (one window per folder), so a folder
+            # holding hundreds of assets does not have to be searched again.
+            files=[self.library.resolve(row) for row in self.selected_rows()]
+            file_browser.select_in_file_browser(files,open_folder)
+            self.status.setText(f'Shown in Explorer: {len(files)} file(s)')
+            return
+        folder=self.current_folder()
+        if not folder:raise ValueError('Select a folder.')
+        open_folder(core.inside(folder[2],folder[1]))
 
     def choose_thumbnail(self):
         row=self.selected(); path,_=QtWidgets.QFileDialog.getOpenFileName(self,'Thumbnail Image',str(self.library.resolve(row).parent),'Images (*.png *.jpg *.jpeg)')

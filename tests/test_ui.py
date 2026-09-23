@@ -715,6 +715,23 @@ class LibraryUiTests(unittest.TestCase):
         env=ui.plain_python_env('C:/HFS')
         self.assertNotIn('PXR_PLUGINPATH_NAME',env);self.assertTrue(env['PATH'].startswith(str(Path('C:/HFS')/'bin')))
 
+    def test_show_in_explorer_selects_the_asset_files_themselves(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for rel in ('USD/Props/a.usdz','USD/Props/b.usdz','USD/tree/tree.usd'):
+                p=root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('x')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh();widget.items.selectAll()
+            with patch.object(ui.file_browser,'select_in_file_browser') as select:
+                widget.reveal()
+            files=sorted(Path(p).resolve() for p in select.call_args.args[0])
+            self.assertEqual(files,sorted((root/r).resolve() for r in ('USD/Props/a.usdz','USD/Props/b.usdz','USD/tree/tree.usd')))
+            widget.items.clearSelection();widget.tree.setCurrentItem(widget.tree.topLevelItem(1))   # the library root
+            with patch.object(ui.file_browser,'select_in_file_browser') as select,patch.object(ui.QtGui.QDesktopServices,'openUrl') as open_url:
+                widget.reveal()   # no asset selected: the current folder is opened as before
+            select.assert_not_called();open_url.assert_called_once()
+            widget.close();widget.deleteLater()
+
     def test_background_jobs_bar_counts_queues_and_cancel_all_empties_them(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'):
             base=Path(folder);root=base/'asset';root.mkdir()

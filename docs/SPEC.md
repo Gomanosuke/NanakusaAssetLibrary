@@ -161,6 +161,7 @@ GUIは英語です。右側には大きな正方形プレビューと素材情�
 テクスチャはResolution・Channels・Pixel type。3DModel・USDはPolygons・Points・Meshes（Volumeがあれば数も）。
 USDはさらにUSD prims・**Proxy（Yes/No、`purpose=proxy`の有無）**・Up axis（Y/Z）・Materials（`UsdShade.Material`の数、あれば）・Size（バウンディングボックス、幅x奥行x高さ、空なら省略）を表示する。
 素材の右クリックメニューに「Import Selected」「Copy Paths」「Show in Explorer」、USD選択時のみ「Add Catalog」を表示します。
+「Show in Explorer」は素材ファイル自体を選択した状態で開く（`reveal.py`: フォルダーごとに`SHOpenFolderAndSelectItems`で全ファイルを選択。失敗時は`explorer /select,"<file>"`で1件、それも失敗またはWindows以外ならフォルダーを開くだけ）。素材を選んでいない時（Libraries...メニュー）は従来どおり現在のフォルダーを開く。
 ライブラリーの追加・再リンクは「Libraries...」、読み込み設定は「Options」から開きます。
 上部は1行のツールバー（検索・種類・Stack PBR Sets・Favorites・Options・Rescan）。パネルにフォーカスがある時の`Ctrl+F`は検索欄へ移動します（QShortcutではなくkeyPressEventで処理し、Houdini全体のホットキーを奪わない）。
 「Libraries...」メニューはLibrary / Generate / Cancel Background Jobs / Catalogのセクションに分け、Cancel項目は対象の待機・実行中件数を表示し、何もない時は無効にする。
@@ -368,6 +369,7 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `dragdrop.py` | 複数D&D、Pパラメーター領域とグラフの判定、フォルダーツリー |
 | `pbr.py` | ファイル名によるPBR用途・セットの判定、スタック表示用のグループ化 |
 | `houdini_ops.py` | ノード生成、USD書き出し、Catalog |
+| `reveal.py` | Show in Explorerで素材ファイルを選択状態にする（Windowsシェル、Houdini非依存） |
 | `asset_info.py` | 別プロセスの画像・形状情報取得（USDはProxy有無・上方向軸・マテリアル数・サイズも） |
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
 | `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ |
