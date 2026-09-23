@@ -99,7 +99,7 @@ package JSONの`path`が本体、`env`の`NAL_DATA_DIR`がdataの指定です。
   同名の入口がなく、直下に`.usd`/`.usdc`/`.usda`があるフォルダー（USD直下を除く。例: `…_Big_OL.usd`と`…_Small_OL.usd`が`textures/`を共有）は、
   各レイヤーをファイル名（拡張子なし）の素材としてそのフォルダー内に表示し、サブフォルダーはパッケージと同様に走査・表示しない（`core.package_entries`）。
   パッケージ判定（`is_usd_package`）は「フォルダーと同名の入口」だけで、これらは`is_shared_usd_layer`。サムネイルは`<名前>_thumbnail.png`（USDごと）。
-  フォルダー内のファイルを参照しているため単独の移動は拒否し（フォルダーごとの移動は可）、そのサブフォルダーを移動先・New Folderの対象にしない。
+  フォルダー内のファイルを参照しているため、素材としてドラッグしてもフォルダーごと移動する（`organize.move_assets`: 中の全素材のrelpathとfoldersを更新し、選んでいない素材を`companions`として返す。UIはステータス欄に「Moved together (same folder …): …」と表示）。同じフォルダーの複数を選んでも移動は1回。そのサブフォルダーは移動先・New Folderの対象にしない。
   生成ジョブの一時出力（`*.nanakusa_generate_tmp.*`、`core.GENERATE_TMP`）はスキャンで除外する。
 - **3DModel**: `.obj`, `.fbx`, `.vdb`, `.bgeo`, `.bgeo.sc`, `.geo`, `.geo.sc`, `.abc`, `.glb`, `.stl`, `.ply`。
   形状を単一ファイルから読める形式が対象です。FBXの外部画像や元の材質は再構築しません。

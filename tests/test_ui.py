@@ -778,6 +778,22 @@ class LibraryUiTests(unittest.TestCase):
             self.assertEqual(tags,{'a':'proxy','b':'proxy','c':''})
             widget.close();widget.deleteLater()
 
+    def test_dropping_a_usd_that_shares_its_folder_says_what_moved_with_it(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset'
+            for rel in ('USD/Plants/Acer_OL/Acer_Leaves_OL.usd','USD/Plants/Acer_OL/Acer_Seeds_OL.usd','USD/Plants/Acer_OL/textures/a.png'):
+                p=root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('x')
+            (root/'USD'/'Trees').mkdir()
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            rid=widget.library.roots()[0]['id'];widget.library.scan(rid);widget.rebuild_tree();widget.refresh()
+            leaves=next(r for r in widget.rows if r['label']=='Acer_Leaves_OL')
+            target=(rid,'USD/Trees',str(root))
+            self.assertTrue(widget.can_drop({'assets':[leaves['id']]},target))   # the drag is accepted
+            widget.organize_drop({'assets':[leaves['id']]},target)
+            self.assertIn('Moved together (same folder Acer_OL): Acer_Seeds_OL',widget.status.text())
+            self.assertTrue((root/'USD/Trees/Acer_OL/textures/a.png').is_file())
+            widget.close();widget.deleteLater()
+
     def test_the_first_panel_of_a_houdini_session_rescans(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),\
              patch.object(ui.LibraryWidget,'AUTO_SCAN',True),patch.object(ui,'_session_scanned',False),\

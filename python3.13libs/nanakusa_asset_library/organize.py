@@ -115,9 +115,10 @@ def check_assets_target(rows, root_id, dest_rel):
         if GENRE_OF_KIND.get(row['kind']) != genre:
             raise MoveError('%s assets can only be moved under %s.' % (row['kind'], GENRE_OF_KIND.get(row['kind'], '?')))
         if core.is_shared_usd_layer(row):
-            folder = Path(row['relpath']).parent
-            raise MoveError('"%s" uses files in its folder (textures...) together with the other USD files there. '
-                            'Move the folder "%s" instead.' % (Path(row['relpath']).name, folder.name))
+            # It moves with its whole folder (see move_assets): never into that folder's own subfolders.
+            folder = Path(row['relpath']).parent.as_posix().lower()
+            if dest_rel.lower().startswith(folder + '/'):
+                raise MoveError('A folder cannot be moved into itself.')
     return dest
 
 
@@ -168,14 +169,41 @@ def move_assets(library, rows, dest_rel, data_dir):
         for sidecar in _sidecars(r, data_dir, indexed):
             owners.setdefault(_key(sidecar), set()).add(r['id'])
     ops, changes, catalog, claimed, folder_moves = [], [], [], set(), []
+    shared_done, companions = set(), []
 
     def claim(dst):
         if dst.exists() or _key(dst) in claimed:
             raise MoveError('"%s" already exists in %s.' % (dst.name, dest_rel))
         claimed.add(_key(dst))
 
+    moved_folders = {Path(r['relpath']).parent.as_posix().lower() + '/' for r in rows if core.is_shared_usd_layer(r)}
     for row in rows:
         source = Path(root_path) / row['relpath']
+        if not core.is_shared_usd_layer(row) and any(row['relpath'].lower().startswith(f) for f in moved_folders):
+            continue   # travels inside a folder moved below
+        if core.is_shared_usd_layer(row):
+            # USD files sharing a folder's textures (e.g. AcerPseudoplatanus_82f5g_OL: Leaves and
+            # Seeds) only work next to those files: the whole folder moves, with every asset in it.
+            folder_rel = Path(row['relpath']).parent.as_posix()
+            if folder_rel.lower() in shared_done or dest_rel.lower() in (folder_rel.lower(), Path(folder_rel).parent.as_posix().lower()):
+                continue   # handled with another selected file, or already where it was dropped
+            shared_done.add(folder_rel.lower())
+            folder, new_folder = source.parent, dest / source.parent.name
+            claim(new_folder)
+            ops.append({'src': folder, 'dst': new_folder, 'mode': 'move'})
+            new_folder_rel = dest_rel + '/' + folder.name
+            folder_moves.append((folder_rel, new_folder_rel))
+            for member in library.assets(root_id=root_id, missing=True, folder=folder_rel):
+                if not member['relpath'].startswith(folder_rel + '/'):
+                    continue
+                tail = member['relpath'][len(folder_rel) + 1:]
+                changes.append({'id': member['id'], 'relpath': new_folder_rel + '/' + tail,
+                                'thumbnail': _remap(member['thumbnail'], [(folder, new_folder)])})
+                if member['kind'] == 'usd':
+                    catalog.append((Path(root_path) / member['relpath'], new_folder / tail))
+                if member['id'] not in moving_ids and member['present']:
+                    companions.append(member['label'])
+            continue
         package = core.is_usd_package(row)
         current = Path(row['relpath']).parent.parent if package else Path(row['relpath']).parent
         if current.as_posix().lower() == dest_rel.lower():
@@ -208,7 +236,8 @@ def move_assets(library, rows, dest_rel, data_dir):
         raise MoveError('The assets are already in that folder.')
     backup = library.backup_index()
     _apply(library, root_id, ops, changes, folder_moves)
-    return {'moved': len(changes), 'backup': backup, 'catalog': catalog}
+    return {'moved': len(changes), 'backup': backup, 'catalog': catalog, 'companions': sorted(companions),
+            'folders': [m[1] for m in folder_moves if m[0].lower() in shared_done]}
 
 
 def move_folders(library, root_id, src_rels, dest_rel, data_dir):

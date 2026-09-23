@@ -35,21 +35,33 @@ class OrganizeTests(unittest.TestCase):
         self.scan()   # a rescan must keep the same asset instead of creating a new one
         rows=self.lib.assets(missing=True);self.assertEqual(len(rows),1);self.assertEqual(rows[0]['id'],old['id']);self.assertEqual(rows[0]['tags'],'wood red')
 
-    def test_usd_files_sharing_a_folder_move_only_with_the_folder(self):
-        for rel in ('USD/Misc/Plant_OL/Plant_Big.usd','USD/Misc/Plant_OL/Plant_Small.usd','USD/Misc/Plant_OL/textures/a.png'):self.write(rel)
+    def test_dragging_a_usd_that_shares_its_folder_moves_the_whole_folder_and_names_the_others(self):
+        # e.g. AcerPseudoplatanus_82f5g_OL: Leaves and Seeds USDs, their thumbnails and one textures folder
+        for rel in ('USD/Misc/Plant_OL/Plant_Big.usd','USD/Misc/Plant_OL/Plant_Small.usd','USD/Misc/Plant_OL/extra.usdz',
+                    'USD/Misc/Plant_OL/Plant_Big_thumbnail.png','USD/Misc/Plant_OL/textures/a.png'):self.write(rel)
         (self.root/'USD/Props').mkdir();self.scan()
         big=self.row('USD/Misc/Plant_OL/Plant_Big.usd');self.lib.update(big['id'],tags='plant')
-        with self.assertRaises(MoveError) as caught:self.move(['USD/Misc/Plant_OL/Plant_Big.usd'],'USD/Props')
-        self.assertIn('Move the folder "Plant_OL" instead',str(caught.exception))
-        self.assertTrue((self.root/'USD/Misc/Plant_OL/Plant_Big.usd').is_file())   # nothing moved
-        # its hidden subfolders are not a place to put assets either
-        self.write('USD/Misc/loose.usdz');self.scan()
-        with self.assertRaises(MoveError):self.move(['USD/Misc/loose.usdz'],'USD/Misc/Plant_OL/textures')
-        self.move(['USD/Misc/loose.usdz'],'USD/Misc/Plant_OL')   # the folder itself is fine
-        # the folder moves with all of its files and both assets keep their ids and tags
-        organize.move_folders(self.lib,self.rid,['USD/Misc/Plant_OL'],'USD/Props',self.data)
-        self.assertTrue((self.root/'USD/Props/Plant_OL/textures/a.png').is_file())
+        small=self.row('USD/Misc/Plant_OL/Plant_Small.usd')
+        result=self.move(['USD/Misc/Plant_OL/Plant_Big.usd'],'USD/Props')
+        self.assertEqual(result['companions'],['Plant_Small','extra'])   # shown to the user: moved along
+        self.assertEqual(result['folders'],['USD/Props/Plant_OL']);self.assertEqual(result['moved'],3)
+        for rel in ('Plant_Big.usd','Plant_Small.usd','extra.usdz','Plant_Big_thumbnail.png','textures/a.png'):
+            self.assertTrue((self.root/'USD/Props/Plant_OL'/rel).is_file(),rel)
+        self.assertFalse((self.root/'USD/Misc/Plant_OL').exists())
         moved=self.row('USD/Props/Plant_OL/Plant_Big.usd');self.assertEqual((moved['id'],moved['tags']),(big['id'],'plant'))
+        self.assertEqual(self.row('USD/Props/Plant_OL/Plant_Small.usd')['id'],small['id'])
+        self.assertIn('USD/Props/Plant_OL',self.lib.folders(self.rid));self.assertNotIn('USD/Misc/Plant_OL',self.lib.folders(self.rid))
+        # both selected (plus a file inside): still one folder move, nothing moved twice
+        result=self.move(['USD/Props/Plant_OL/Plant_Big.usd','USD/Props/Plant_OL/Plant_Small.usd','USD/Props/Plant_OL/extra.usdz'],'USD/Misc')
+        self.assertEqual((result['moved'],result['companions']),(3,[]))
+        self.assertTrue((self.root/'USD/Misc/Plant_OL/textures/a.png').is_file())
+        # dropped on its own folder or its parent: already there; into its own subfolder: refused
+        with self.assertRaises(MoveError):self.move(['USD/Misc/Plant_OL/Plant_Big.usd'],'USD/Misc')
+        with self.assertRaises(MoveError):self.move(['USD/Misc/Plant_OL/Plant_Big.usd'],'USD/Misc/Plant_OL/textures')
+        # a loose .usdz can still be put into such a folder
+        self.write('USD/Misc/loose.usdz');self.scan()
+        self.move(['USD/Misc/loose.usdz'],'USD/Misc/Plant_OL')
+        self.assertTrue((self.root/'USD/Misc/Plant_OL/loose.usdz').is_file())
 
     def test_usd_package_moves_as_folder_with_thumbnail_and_dependencies(self):
         self.write('USD/Misc/Chair/Chair.usd');self.write('USD/Misc/Chair/thumbnail.png');self.write('USD/Misc/Chair/textures/a.png')

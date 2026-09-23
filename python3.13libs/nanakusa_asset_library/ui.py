@@ -812,6 +812,10 @@ class LibraryWidget(QtWidgets.QWidget):
         if 'assets' in payload:
             result=organize.move_assets(self.library,self.dragged_rows(payload['assets']),dest_rel,self.data_dir)
             message=f"Moved {result['moved']} asset(s) to {dest_rel}"
+            if result.get('companions'):
+                # USD files that share their folder's textures move as that whole folder.
+                folders=', '.join(Path(f).name for f in result['folders'])
+                message+=f" / Moved together (same folder {folders}): {', '.join(result['companions'])}"
         else:
             result=organize.move_folders(self.library,root_id,[f['rel'] for f in payload['folders']],dest_rel,self.data_dir)
             message=f"Moved {result['folders']} folder(s) ({result['moved']} assets) to {dest_rel}";select=(root_id,result['new_rel'],target[2])
