@@ -83,7 +83,7 @@ asset/
 
 - **USD**: フォルダーと同じ名前の `.usd / .usdc / .usda / .usdz` を入口として、フォルダー全体を1つの素材として表示します。単体の `.usdz` も表示されます。
 - **3DModel**: `.obj .fbx .abc .glb .stl .ply .vdb .bgeo(.sc) .geo(.sc)` など、1つのファイルで形状を読める形式です。FBXの外部画像や元の材質は再構築しません。
-- **Texture**: PNG・JPEG・TIFF・HDR・EXRなどの画像です。
+- **Texture**: PNG・JPEG・TIFF・HDR・EXRなどの画像です。Houdiniが元画像の隣に作る変換キャッシュ（`sky_8k.hdr.rat`、`wood.png.tx` のように拡張子が2つ重なるもの）は表示しません。自分で保存した `.rat` / `.tx`（拡張子1つ）は表示します。
 
 素材を追加したら、上部ツールバー右端の **Rescan** を押してください。スキャンは読み取りだけで、素材ファイルを変更しません。
 

@@ -68,7 +68,7 @@
 - UIスレッドで、素材数に比例する処理・ディスクの走査・画像の一括デコードをしない。目安: 2.8万ファイルの合成ライブラリー（tests外のベンチ）でfolder切替が20ms台、初期表示が0.5秒以内。
 - フォルダー一覧は索引のfoldersテーブルから読む（Library.folders）。スキャンが更新し、パネルでの作成・移動はadd_folder / relocate(folder_moves)で反映する。旧版の索引でテーブルが空の時だけ、一度ディスクをたどって保存する。
 - 一覧はLibrary.stream（EntryStream）で、ラベル順の索引（asset_order）から必要な件数だけ読む。直前のキー（label, relpath, root_id）より後ろを短い接続で読むため、DB接続や読み取りトランザクションを開いたままにしない（開いたままだとWALが縮まず、閉じる時にUIが数秒止まる。Windowsではファイルも掴む）。ページ分けはせず、スクロールでappend_itemsが続きを足す（CHUNK件ずつ）。全件を読んでPythonで絞らない・数えない（総数はLibrary.count）。フォルダー指定はrelpathの前方一致（'/'の次の'0'が上限）か、非再帰はfolder/pkg列。移動処理も対象フォルダー分だけを索引から読む（assets_by_ids、assets(folder=)）。
-- 列・索引の追加はLibrary._migrate（PRAGMA user_version）で行い、旧索引を一度だけ変換する。
+- 列・索引の追加はLibrary._migrate（PRAGMA user_version）で行い、旧索引を一度だけ変換する。行を消す変換は、先にdata/backupsへ索引を複製する（v5: Houdiniのテクスチャキャッシュ `*.<画像拡張子>.rat/.tx` の行とinfoを削除し、PBRスタックの派生列を再計算。判定はcore.is_texture_cache、スキャン・classify・suggest_mapsでも同じ関数で除外）。
 - 画像は表示位置の前後1画面分だけ持ち（schedule_icons）、3画面より遠いものは捨てる。アイテムにはrowを持たせずid（ROLE）だけにする。
 - フォルダーツリーは開いた階層だけアイテムを作る（populate / ensure_item。閉じたフォルダーはplaceholderの子を持つ）。
 - スキャンは別プロセス（scan_worker.py、Houdini同梱のPython）。QThreadの中ではhouを呼ばない（ジョブのコンストラクターで必要な値を取っておく）。補助プロセスはui.background()で低優先度にする。素材情報はinfoテーブルにも保存し、同じ素材ではhythonを再起動しない。

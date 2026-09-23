@@ -34,6 +34,36 @@ class LibraryTests(unittest.TestCase):
         self.lib.scan(self.rid)
         self.assertEqual(len(self.lib.assets()),5);self.assertEqual(len(self.lib.assets(kind='texture')),2)
         self.assertNotIn('Other',visible_folders(self.root))
+    def test_houdini_texture_caches_are_not_assets(self):
+        # photo.hdr.rat / photo.exr.tx are converted copies Houdini writes next to the source image;
+        # a .rat or .tx saved on purpose (one extension) is still an asset.
+        for path in ('Texture/HDR/sky_8k.hdr','Texture/HDR/sky_8k.hdr.rat','Texture/HDR/meadow.exr.rat',
+                     'Texture/wood.png.tx','Texture/own.rat','Texture/own.tx','Texture/wood.v2.rat'):self.write(path)
+        self.lib.scan(self.rid)
+        self.assertEqual(sorted(r['relpath'] for r in self.lib.assets()),
+                         ['Texture/HDR/sky_8k.hdr','Texture/own.rat','Texture/own.tx','Texture/wood.v2.rat'])
+        from nanakusa_asset_library import core
+        self.assertIsNone(core.classify('a/sky.HDR.RAT'));self.assertEqual(core.classify('a/own.rat'),'texture')
+
+    def test_index_upgrade_drops_indexed_texture_caches_after_a_backup(self):
+        import sqlite3
+        self.write('Texture/HDR/sky.hdr');self.write('Texture/HDR/sky.hdr.rat')
+        with self.lib.connect() as db:
+            db.execute("INSERT INTO assets (id,root_id,relpath,label,kind) VALUES ('cache',?,'Texture/HDR/sky.hdr.rat','sky.hdr','texture')",(self.rid,))
+            db.execute("INSERT INTO info VALUES ('cache','s','{}')")
+            db.execute('PRAGMA user_version=4')   # an index written before 0.18.1
+        again=Library(self.base/'index')
+        self.assertEqual([r['id'] for r in again.assets()],[])
+        with again.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM info WHERE id='cache'").fetchone()[0],0)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],Library.VERSION)
+        backups=list((self.base/'index'/'backups').glob('*_before_v5.sqlite3'));self.assertEqual(len(backups),1)
+        saved=sqlite3.connect(str(backups[0]))
+        try:self.assertEqual(saved.execute("SELECT relpath FROM assets WHERE id='cache'").fetchone()[0],'Texture/HDR/sky.hdr.rat')
+        finally:saved.close()
+        self.assertEqual(Library(self.base/'index').assets(),[])   # already upgraded: no second backup
+        self.assertEqual(len(list((self.base/'index'/'backups').glob('*_before_v5.sqlite3'))),1)
+
     def test_rescan_preserves_metadata(self):
         self.write('3DModel/chair.obj');self.lib.scan(self.rid)
         row=self.lib.assets()[0];self.lib.update(row['id'],tags='wood outdoor',favorite=1,label='Chair')

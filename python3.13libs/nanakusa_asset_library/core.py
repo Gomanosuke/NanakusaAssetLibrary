@@ -53,9 +53,18 @@ def visible_folders(base, cancel=lambda: False):
                 dirs[:] = []
     return result
 
+def is_texture_cache(name):
+    """A texture Houdini converted from a source image and saved beside it (photo.hdr.rat,
+    photo.exr.tx: two image extensions). Not an asset of its own; a .rat / .tx saved on purpose
+    has a single extension and is kept."""
+    stem, ext = os.path.splitext(name.lower())
+    return ext in ('.rat', '.tx') and os.path.splitext(stem)[1] in IMAGES
+
 def classify(path):
     p = Path(path)
     name = p.name.lower()
+    if is_texture_cache(name):
+        return None
     if name.endswith(".pbr.json"):
         return "pbr"
     if name.endswith(".decal.json"):
@@ -118,12 +127,37 @@ class Library:
     # folder = the folder that lists the asset (a USD package is listed by its parent folder),
     # pkg = the package folder of a USD package, stack / channel = PBR set key and channel of an
     # image that has partners in its folder, gkey = one stack's identity (root, folder, key).
-    VERSION = 4
+    VERSION = 5
 
     def _migrate(self, db):
         version = db.execute('PRAGMA user_version').fetchone()[0]
         if version >= self.VERSION:
             return
+        if version < 5:
+            # Houdini's texture caches (photo.hdr.rat ...) were indexed as textures before 0.18.1.
+            # Back the index up first (before any other change here), then drop them and their info.
+            caches = [r[0] for r in db.execute(
+                "SELECT id, relpath FROM assets WHERE lower(relpath) LIKE '%.rat' OR lower(relpath) LIKE '%.tx'")
+                if is_texture_cache(r[1].rpartition('/')[2])]
+            if caches:
+                from datetime import datetime
+                folder = self.data_dir / 'backups'
+                folder.mkdir(parents=True, exist_ok=True)
+                target = sqlite3.connect(str(folder / ('index_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_before_v5.sqlite3')))
+                try:
+                    db.backup(target)
+                finally:
+                    target.close()
+                for start in range(0, len(caches), 500):
+                    chunk = caches[start:start + 500]
+                    marks = ','.join('?' * len(chunk))
+                    db.execute('DELETE FROM assets WHERE id IN (%s)' % marks, chunk)
+                    db.execute('DELETE FROM info WHERE id IN (%s)' % marks, chunk)
+                if version >= 3:   # PBR stacks may have counted a cache as a member: derive them again
+                    rows = db.execute('SELECT id, root_id, relpath, kind FROM assets').fetchall()
+                    derived = self.derive([(r['root_id'], r['relpath'], r['kind']) for r in rows])
+                    db.executemany('UPDATE assets SET folder=?, pkg=?, stack=?, channel=?, gkey=? WHERE id=?',
+                                   [d + (r['id'],) for d, r in zip(derived, rows)])
         if version < 3:
             have = {r[1] for r in db.execute('PRAGMA table_info(assets)')}
             for name in ('folder', 'pkg', 'stack', 'channel', 'gkey'):
@@ -254,7 +288,7 @@ class Library:
                 lowered = name.lower()
                 ext = os.path.splitext(lowered)[1]
                 kind = ('usd' if genre == 'USD' else
-                        'texture' if genre == 'Texture' and ext in IMAGES else
+                        'texture' if genre == 'Texture' and ext in IMAGES and not is_texture_cache(lowered) else
                         'model' if genre == '3DModel' and (ext in MODELS or lowered.endswith(('.bgeo.sc', '.geo.sc'))) else None)
                 if not kind:
                     continue
@@ -448,7 +482,7 @@ def suggest_maps(folder):
     """Suggestions only: ambiguous sets must be reviewed in the authoring dialog."""
     result = {}
     for p in sorted(Path(folder).iterdir()):
-        if p.is_file() and p.suffix.lower() in IMAGES:
+        if p.is_file() and p.suffix.lower() in IMAGES and not is_texture_cache(p.name):
             name = p.stem.lower()
             for channel, aliases in MAP_ALIASES.items():
                 if channel not in result and any(re.search(r'(^|[_\-. ])'+re.escape(a)+r'($|[_\-. \d])',name) for a in aliases):
