@@ -294,14 +294,16 @@ Sketchfab等のパックは、同じ原点付近に複数の独立したトッ�
 - 対象の検出（`_find_pack_root`）: ステージのpseudo-rootから幅優先探索し、**子を2つ以上持ち、かつそのうち2つ以上の子孫にメッシュを含む、最も浅いプリム**を「パックの分岐点」とする。見つからなければ`{'skipped': 'no multi-object pack found (need 2+ sibling objects with geometry)'}`。
   - `purpose=proxy`を持つメッシュ自身は候補から除外する（`_is_proxy_mesh`）。除外しないと、proxy生成済みの単一オブジェクト資産（レンダーメッシュとその`_proxy`兄弟）が「2要素のパック」に誤検出され、どちらか一方しか表示されなくなる回帰があった。
   - **この検出はヒューリスティックであり、「複数の独立した代替オブジェクトを束ねたパック」と「複数パーツが揃って初めて1つの物になるモジュール式キット」を区別できない**（両者ともファイルの形は同じ：トップレベルに複数のメッシュ持ちグループが並ぶ）。誤ってキットに使うと大半のパーツが非表示になる。そのためLibraries...の一括生成（Generate Missing...相当）は用意せず、ui.pyの「Generate Selected Element Switch...」による資産ごとの手動生成のみとする。
-- 既に`element` variant setを持つ資産は`{'skipped': 'already has an element switch'}`。
-- 分岐点プリムに`element` variant setを作り、検出した各子に`Element0`, `Element1`, ... という名前のバリアントを割り当てる。各バリアントの中で、選ばれた子には`visibility=inherited`、それ以外の子には`visibility=invisible`を明示的に設定する（ジオメトリ自体は変更しない。分岐点プリムに元々ローカルなvisibility値は無いため、LODのようなClear()は不要）。選択は`Element0`に設定して終える（何もしなければ全オブジェクトが重なって見える現状を、生成直後から解消するため）。
+- 既に`element` variant setを一番上のプリムに持つ資産は`{'skipped': 'already has an element switch'}`。0.19.0より前の形式（分岐点プリムに付いている）なら、まず`_remove_element_switch`で生成前の状態へ戻してから下記の手順で作り直し、結果に`moved_from`を付ける（UIの表示は「…, moved to the top prim」）。
+- variant setは**一番上のプリム**（`_anchor`: 分岐点がdefault primの下ならdefault prim、そうでなければ分岐点の最上位の祖先）に作る。Reference / Stage Managerはこのプリムを配置したプリムへ対応づけるため、配置したプリム自身がvariant setを持つ。Stage ManagerはInspectorの「Variant Sets」も、書き込むvariant選択（changeの`variantset#_#`）も配置したプリム自身の分だけを扱い、子孫プリム（`…/RootNode`）への指定は無視する（22.0.447、hythonで確認。Scene Graph Treeの右クリックのSet VariantもStage Managerの変更として書くため効かない）。
+- `element` variant setを作り、検出した各子に`Element0`, `Element1`, ... という名前のバリアントを割り当てる。各バリアントの中で、選ばれた子には`visibility=inherited`、それ以外の子には`visibility=invisible`を明示的に設定する（ジオメトリ自体は変更しない。分岐点プリムに元々ローカルなvisibility値は無いため、LODのようなClear()は不要）。選択は`Element0`に設定して終える（何もしなければ全オブジェクトが重なって見える現状を、生成直後から解消するため）。
 - proxy_gen.pyと同じファイル入出力（`generate_plain`/`generate_usdz`）を再利用する。`.usdz`は展開・編集・再パッケージ、プレーンUSDは`Export()`のみ。
 
 `ui.py`の`ElementJob`（`ProxyJob`と`_MeshGenerateJob`を共通基底とする）が`hython element_gen.py <元ファイル> <一時出力> <結果JSON>`を実行し、成功時のみ`data/backups/element/`へバックアップしてから`os.replace`で置き換える。失敗・スキップ時は元ファイルを一切変更しない。
 右クリックの「Generate Selected Element Switch...」は選択したUSD資産に生成する（ダイアログでの値入力は無い）。「Libraries... → Cancel Element Switches」で待機分を解除できる。フォルダー移動・素材移動は、待機中のelement switch生成がある間はできない。
 
-配置後にどのオブジェクトを表示するか切り替えるには、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに分岐点プリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。`variant`タグの付いた資産をD&D/Import Selectedで配置した場合、このノードは`houdini_ops._add_variant_switch`が既に自動で挿入している（[D&D](#dd)を参照）。配置は、1回の取り込みで作ったノードの連なり（`import_chain`: Reference → Set Variant / Assign Material）の先頭をドロップ位置・格子のセルに置き、続くノードを`CHAIN_STEP`（1.0）ずつ真下に並べる（`place_chain`）。複数ドロップの行間とMergeの位置は最長の連なりに合わせる。
+削除（`_remove_element_switch`）は入口レイヤーに書かれた`element` variant setを位置に関係なく消し、variant setを置くためだけに作った空の`over`も消す。生成→削除でルートレイヤーの内容は生成前と一致する（実資産58件で確認: 旧形式を削除した結果と一致し、パッケージ内の他ファイルも不変）。
+配置後にどのオブジェクトを表示するか切り替えるには、Stage ManagerのInspector（Variant Sets）か、LOPネットワークの**Set Variant**ノード（`setvariant`）でPrimitivesに配置したプリム、Variant Setに`element`、Variant Nameに`Element0`〜`ElementN-1`のいずれかを指定する。Scene Graph TreeのVariantsタブから直接切り替えることもできる。`variant`タグの付いた資産をD&D/Import Selectedで配置した場合、このノードは`houdini_ops._add_variant_switch`が既に自動で挿入している（[D&D](#dd)を参照）。配置は、1回の取り込みで作ったノードの連なり（`import_chain`: Reference → Set Variant / Assign Material）の先頭をドロップ位置・格子のセルに置き、続くノードを`CHAIN_STEP`（1.0）ずつ真下に並べる（`place_chain`）。複数ドロップの行間とMergeの位置は最長の連なりに合わせる。
 
 ### 削除・自動タグ・サムネイルバッジ
 

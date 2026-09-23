@@ -14,6 +14,11 @@ def triangle(stage, path):
     return mesh
 
 
+def layer_text(path):
+    stage=Usd.Stage.Open(str(path))   # keep the stage alive while its layer is read
+    return stage.GetRootLayer().ExportToString()
+
+
 class ElementGenTests(unittest.TestCase):
     def test_a_pack_of_alternate_objects_gets_an_element_switch_showing_only_the_first(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -83,7 +88,76 @@ class ElementGenTests(unittest.TestCase):
                 triangle(stage,f'/Wrapper/Branch/{name}')
             stage.SetDefaultPrim(wrapper.GetPrim());stage.GetRootLayer().Save()
             result=generate(src,Path(folder)/'out.usda')
-            self.assertEqual(result['element_switch']['prim'],'/Wrapper/Branch')
+            self.assertEqual(result['element_switch']['branch'],'/Wrapper/Branch')
+            # the variant set sits on the top (default) prim, so a placement of the asset (Reference,
+            # Stage Manager) carries it on the placed prim itself; it still switches the branch's children
+            self.assertEqual(result['element_switch']['prim'],'/Wrapper')
+            out=Usd.Stage.Open(str(Path(folder)/'out.usda'))
+            self.assertFalse(out.GetPrimAtPath('/Wrapper/Branch').GetVariantSets().HasVariantSet('element'))
+            vs=out.GetPrimAtPath('/Wrapper').GetVariantSet('element')
+            for index,name in enumerate(('a','b')):
+                vs.SetVariantSelection(f'Element{index}')
+                visible=[n for n in ('a','b') if UsdGeom.Imageable(out.GetPrimAtPath(f'/Wrapper/Branch/{n}')).ComputeVisibility()!='invisible']
+                self.assertEqual(visible,[name])
+
+    def _wrapped_pack(self,folder):
+        src=Path(folder)/'pack.usda'
+        stage=Usd.Stage.CreateNew(str(src));top=UsdGeom.Xform.Define(stage,'/Top')
+        UsdGeom.Xform.Define(stage,'/Top/Meshes/Root')
+        for name in ('a','b','c'):triangle(stage,f'/Top/Meshes/Root/{name}')
+        stage.SetDefaultPrim(top.GetPrim());stage.GetRootLayer().Save()
+        return src
+
+    def test_delete_restores_the_original_layer_exactly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=self._wrapped_pack(folder);original=layer_text(str(src))
+            generate(src,Path(folder)/'switched.usda')
+            self.assertEqual(remove(Path(folder)/'switched.usda',Path(folder)/'back.usda'),{'removed_element_switch':['/Top']})
+            self.assertEqual(layer_text(Path(folder)/'back.usda'),original)
+
+    def test_an_old_switch_on_the_branch_prim_is_moved_to_the_top_prim_and_still_deletes_cleanly(self):
+        from pxr import Sdf
+        with tempfile.TemporaryDirectory() as folder:
+            src=self._wrapped_pack(folder);original=layer_text(str(src))
+            # what versions before 0.19.0 wrote: the variant set on the branch prim itself
+            old=Path(folder)/'old.usda';stage=Usd.Stage.Open(str(src))
+            vset=stage.GetPrimAtPath('/Top/Meshes/Root').GetVariantSets().AddVariantSet('element')
+            for i,chosen in enumerate(('a','b','c')):
+                vset.AddVariant(f'Element{i}');vset.SetVariantSelection(f'Element{i}')
+                with vset.GetVariantEditContext():
+                    for other in ('a','b','c'):
+                        UsdGeom.Imageable(stage.GetPrimAtPath(f'/Top/Meshes/Root/{other}')).CreateVisibilityAttr().Set('inherited' if other==chosen else 'invisible')
+            vset.SetVariantSelection('Element0');stage.GetRootLayer().Export(str(old))
+
+            moved=Path(folder)/'moved.usda'
+            result=generate(old,moved)
+            self.assertEqual(result['element_switch']['prim'],'/Top')
+            self.assertEqual(result['element_switch']['moved_from'],['/Top/Meshes/Root'])
+            out=Usd.Stage.Open(str(moved))
+            self.assertEqual([p.GetPath() for p in out.Traverse() if p.GetVariantSets().HasVariantSet('element')],[Sdf.Path('/Top')])
+            self.assertEqual(generate(moved,Path(folder)/'again.usda'),{'skipped':'already has an element switch'})
+            # identical to a switch added to the untouched asset, and Delete returns the original
+            generate(src,Path(folder)/'fresh.usda')
+            self.assertEqual(out.GetRootLayer().ExportToString(),layer_text(Path(folder)/'fresh.usda'))
+            remove(moved,Path(folder)/'back.usda')
+            self.assertEqual(layer_text(Path(folder)/'back.usda'),original)
+            # Delete on the old format still works too
+            remove(old,Path(folder)/'old_back.usda')
+            self.assertEqual(layer_text(Path(folder)/'old_back.usda'),original)
+
+    def test_a_switch_over_a_prim_defined_in_another_layer_leaves_no_empty_over_after_delete(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base=self._wrapped_pack(folder)
+            src=Path(folder)/'wrapper.usda';stage=Usd.Stage.CreateNew(str(src))
+            stage.GetRootLayer().subLayerPaths.append(base.name)
+            stage.SetDefaultPrim(stage.GetPrimAtPath('/Top'));stage.GetRootLayer().Save()
+            original=layer_text(str(src))
+            generate(src,Path(folder)/'switched.usda')
+            switched=Usd.Stage.Open(str(Path(folder)/'switched.usda'))
+            self.assertIsNotNone(switched.GetRootLayer().GetPrimAtPath('/Top'))   # an over held the switch
+            remove(Path(folder)/'switched.usda',Path(folder)/'back.usda')
+            back=Usd.Stage.Open(str(Path(folder)/'back.usda'))
+            self.assertIsNone(back.GetRootLayer().GetPrimAtPath('/Top'));self.assertEqual(back.GetRootLayer().ExportToString(),original)
 
     def test_remove_undoes_the_switch_completely_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as folder:

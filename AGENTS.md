@@ -108,6 +108,7 @@
 - 分岐点の検出（`_find_pack_root`）はステージのpseudo-rootからの**幅優先探索**で、子を2つ以上（`purpose=proxy`のメッシュ自身を除く）持つ最も浅いプリムを返す。`Usd.PrimRange`で深さ優先に全プリムを見るのではなく、必ずBFSで「最初に見つかった浅い分岐点」を使うこと（深い場所にある偶然の分岐、例えばマテリアル分割で複数メッシュに割れた1つのオブジェクトを誤検出しないため）。
 - **既知の限界（意図的に対処しない）**: モジュール式キット（例: 手すりの部品集合）と複数の代替オブジェクトのパック（例: きのこの品種違い数体）はファイルの形が同じで区別できない。そのためLibraries...への一括生成は追加しない。ui.pyの「Generate Selected Element Switch...」による資産ごとの手動生成のみ。ユーザーがその資産を実際に見て判断する前提。
 - 各バリアントでは、選ばれた子だけ`visibility=inherited`、他は`visibility=invisible`を明示的に設定する。ジオメトリ自体（points等）は一切変更しないので、LODの時のような「先にローカル値をClear()する」必要は無い（分岐点プリム自体にvisibilityのローカル値は元々存在しない）。
+- variant set自体は分岐点ではなく一番上のプリム（element_gen._anchor、通常default prim）に置く。Stage Managerは配置したプリム自身のvariantしか扱えないため（奥のプリムへの指定は無視される。検証済み）。旧形式（分岐点に置いたもの）は再生成で移し、削除はどちらの位置でも生成前と同じ内容へ戻すこと（tests/test_element.pyの復元テストを壊さない）。
 - 選択は`Element0`に設定して書き出す。何も選択しないと全オブジェクトが重なって見える既存の問題を、生成直後から解消するため。
 - ui.pyの`ElementJob`が結果を検証してから、data/backups/element/へ元ファイルをバックアップし、os.replaceで置き換える。ダイアログでの値入力は無い（設定不要な機能）。
 - 取り消し用に`ElementDeleteJob`（`_MeshGenerateJob`、extra_args=('remove',)）と「Delete Element Switch」メニューがある。`UsdVariantSets`にこのUSDバージョンでは`RemoveVariantSet`が無いため、element_gen.pyの`_remove_element_switch`は`Sdf.PrimSpec`（`spec.variantSets`/`variantSelections`/`variantSetNameList`）を直接編集して消す。新しいUSDバージョンで`RemoveVariantSet`相当が使えるようになっても、Sdf直接編集の方が「バリアント内に書いた可視性の上書きも含めて丸ごと消える」ことが検証済みなので、無理に置き換えなくてよい。

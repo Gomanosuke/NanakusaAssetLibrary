@@ -363,7 +363,9 @@ class ElementJob(_MeshGenerateJob):
     def __init__(self, asset_id, source, backup_dir):
         super().__init__(asset_id, source, backup_dir)
     def summary(self, result):
-        return f"Element switch added ({len(result['element_switch']['variants'])} elements)"
+        switch = result['element_switch']
+        moved = ', moved to the top prim' if switch.get('moved_from') else ''
+        return f"Element switch added ({len(switch['variants'])} elements{moved})"
 
 
 class ElementDeleteJob(_MeshGenerateJob):

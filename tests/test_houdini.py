@@ -117,6 +117,27 @@ class HoudiniTests(unittest.TestCase):
         self.assertAlmostEqual(node.position()[0],reference.position()[0])
         self.assertAlmostEqual(node.position()[1],reference.position()[1]-ops.CHAIN_STEP)
 
+    def test_a_generated_switch_is_on_the_referenced_prim_so_set_variant_and_stage_manager_target_it(self):
+        from nanakusa_asset_library import element_gen
+        switched=self.root/'switched.usda';element_gen.generate(self._variant_pack_without_switch(),switched)
+        node=self.load(switched,'usd',add_variant_switch=True)
+        self.assertEqual(node.parm('primpattern1').eval(),'/assets/test_asset')   # the Reference's own prim
+        # Stage Manager writes variant selections only on the prims it places: that is now enough.
+        manager=self.net.createNode('stagemanager');manager.parm('num_changes').set(1)
+        manager.parm('change1').set('create');manager.parm('primpath1').set('/placed');manager.parm('reffilepath1').set(str(switched))
+        manager.parm('num_variants1').set(1);manager.parm('variantset1_1').set('element');manager.parm('variantname1_1').set('Element2')
+        shown=[n for n in ('a','b','c') if UsdGeom.Imageable(manager.stage().GetPrimAtPath(f'/placed/Root/{n}')).ComputeVisibility()!='invisible']
+        self.assertEqual(shown,['c'])
+
+    def _variant_pack_without_switch(self):
+        p=self.root/'plain_pack.usda';stage=Usd.Stage.CreateNew(str(p))
+        top=UsdGeom.Xform.Define(stage,'/Top');UsdGeom.Xform.Define(stage,'/Top/Root')
+        for name in ('a','b','c'):
+            mesh=UsdGeom.Mesh.Define(stage,f'/Top/Root/{name}')
+            mesh.CreatePointsAttr([(0,0,0),(1,0,0),(1,1,0)]);mesh.CreateFaceVertexCountsAttr([3]);mesh.CreateFaceVertexIndicesAttr([0,1,2])
+        stage.SetDefaultPrim(top.GetPrim());stage.GetRootLayer().Save()
+        return p
+
     def test_variant_switch_node_is_not_added_without_a_variant_or_without_the_flag(self):
         node=self.load(self.obj,'model')   # unrelated kind: never eligible
         plain=self.root/'plain.usda'; s=Usd.Stage.CreateNew(str(plain)); x=UsdGeom.Xform.Define(s,'/x'); s.SetDefaultPrim(x.GetPrim()); s.GetRootLayer().Save()

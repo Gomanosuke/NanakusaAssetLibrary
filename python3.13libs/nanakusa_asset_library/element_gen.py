@@ -4,7 +4,9 @@ Some source packs (typically Sketchfab downloads) bundle several unrelated top-l
 one file - e.g. a handful of alternate mushroom models, all sharing the same origin - rather than
 one assembled object made of several parts. Placed as-is, every one of them shows at once,
 overlapping. This adds a variant set that isolates exactly one at a time, defaulting to the first,
-so a downstream Set Variant LOP (or the Scene Graph Tree's own Variants tab) can pick another.
+so a downstream Set Variant LOP or Stage Manager's Inspector can pick another. The set lives on the
+asset's top prim (see _anchor), not on the branch prim it switches, so any placement carries it on
+the placed prim itself.
 
 Only run this on an asset you have actually looked at and confirmed is that kind of pack: a
 modular kit (e.g. railing segments meant to all be visible together) matches the same "several
@@ -65,17 +67,43 @@ def _find_pack_root(stage):
     return None, None
 
 
+def _anchor(stage, root):
+    """The prim that carries the variant set: the asset's top prim above the branch point `root`
+    (its default prim when `root` lies under it). A Reference / Stage Manager placement maps that
+    prim onto the placed prim, so the switch shows up on the placed prim itself - Stage Manager's
+    Inspector lists and edits only the placed prim's own variant sets, never deeper ones."""
+    default = stage.GetDefaultPrim()
+    if default and root.GetPath().HasPrefix(default.GetPath()):
+        return default
+    top = root
+    while not top.GetParent().IsPseudoRoot():
+        top = top.GetParent()
+    return top
+
+
 def _add_element_switch(stage):
     from pxr import UsdGeom
 
-    if any(prim.GetVariantSets().HasVariantSet(VARIANT_SET) for prim in stage.Traverse()):
-        return {'skipped': 'already has an element switch'}
-
     root, candidates = _find_pack_root(stage)
+    existing = [prim for prim in stage.Traverse() if prim.GetVariantSets().HasVariantSet(VARIANT_SET)]
+    moved_from = None
+    if existing:
+        if root is not None and all(p.GetPath() == _anchor(stage, root).GetPath() for p in existing):
+            return {'skipped': 'already has an element switch'}
+        # Made by an older version on the branch prim deeper down: move it up to the top prim.
+        # Removing first returns the file to its pre-switch state, so the new switch is built
+        # (and later deleted) exactly like one added to an untouched asset.
+        removed = _remove_element_switch(stage)
+        if 'skipped' in removed:
+            return {'skipped': 'already has an element switch (authored outside this file)'}
+        moved_from = removed['removed_element_switch']
+        root, candidates = _find_pack_root(stage)
+
     if root is None:
         return {'skipped': 'no multi-object pack found (need 2+ sibling objects with geometry)'}
 
-    variant_set = root.GetVariantSets().AddVariantSet(VARIANT_SET)
+    anchor = _anchor(stage, root)
+    variant_set = anchor.GetVariantSets().AddVariantSet(VARIANT_SET)
     names = []
     for index, chosen in enumerate(candidates):
         name = f'Element{index}'
@@ -87,17 +115,22 @@ def _add_element_switch(stage):
                 token = UsdGeom.Tokens.inherited if other == chosen else UsdGeom.Tokens.invisible
                 UsdGeom.Imageable(other).CreateVisibilityAttr().Set(token)
     variant_set.SetVariantSelection(names[0])
-    return {'element_switch': {'prim': str(root.GetPath()), 'variants': names}}
+    result = {'element_switch': {'prim': str(anchor.GetPath()), 'branch': str(root.GetPath()), 'variants': names}}
+    if moved_from:
+        result['element_switch']['moved_from'] = moved_from
+    return result
 
 
 def _remove_element_switch(stage):
     """Undo _add_element_switch: drop the variant set, its selection and its variants entirely,
     leaving the prim exactly as if it had never been added (UsdVariantSets has no RemoveVariantSet
-    in this USD version, so this edits the Sdf spec directly).
+    in this USD version, so this edits the Sdf spec directly). Works for switches on the top prim
+    and for ones an older version put on the branch prim.
     """
+    from pxr import Sdf
     layer = stage.GetRootLayer()
     removed = []
-    for prim in stage.Traverse():
+    for prim in list(stage.Traverse()):
         if not prim.GetVariantSets().HasVariantSet(VARIANT_SET):
             continue
         path = prim.GetPath()
@@ -112,6 +145,16 @@ def _remove_element_switch(stage):
         if VARIANT_SET in spec.variantSetNameList.explicitItems:
             spec.variantSetNameList.explicitItems.remove(VARIANT_SET)
         removed.append(str(path))
+        # If the switch had to create an empty "over" just to hold itself (its prim is defined in
+        # another layer), drop that too, so nothing of the switch is left behind.
+        while spec is not None and spec.specifier == Sdf.SpecifierOver and spec.IsInert() \
+                and spec.path != Sdf.Path.absoluteRootPath:
+            parent = spec.nameParent
+            if parent:
+                del parent.nameChildren[spec.name]
+            else:
+                del layer.rootPrims[spec.name]
+            spec = parent if parent and parent.path != Sdf.Path.absoluteRootPath else None
     if not removed:
         return {'skipped': 'no element switch found in this file'}
     return {'removed_element_switch': removed}
