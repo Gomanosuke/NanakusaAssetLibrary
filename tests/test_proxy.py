@@ -100,6 +100,36 @@ class ProxyGenTests(unittest.TestCase):
             self.assertLessEqual(after,proxy_gen.TARGET_TRIANGLES*1.5)
             self.assertGreater(len(UsdGeom.Mesh(big_p).GetPointsAttr().Get()),0)
 
+    def test_small_pieces_become_one_card_per_seed_head(self):
+        """A stem-like grid plus two 'seed heads' of 60 tiny separate quads each: the heads become
+        two flat cards along the heads, the grid is reduced as before."""
+        n=30
+        points=[(i/n*0.02,j/n,0.0) for j in range(n+1) for i in range(2)]
+        counts,indices=[],[]
+        for j in range(n):
+            a=2*j;counts.append(4);indices+=[a,a+1,a+3,a+2]
+        heads=[]
+        for hx in (0.3,0.6):
+            start=len(points)
+            for k in range(60):
+                x,y,z=hx+0.002*math.sin(k),0.8+k*0.003,0.001*math.cos(k)
+                base=len(points);points+=[(x,y,z),(x+0.003,y,z),(x+0.003,y+0.002,z),(x,y+0.002,z)]
+                counts.append(4);indices+=[base,base+1,base+2,base+3]
+            heads.append((start,len(points)))
+        out_points,out_counts,out_indices,_=proxy_gen._proxy_geometry(points,counts,indices,20)
+        cards=[out_points[out_indices[k]:out_indices[k]+4] for k in range(len(out_indices)-2*4,len(out_indices),4)]
+        self.assertEqual(out_counts[-2:],[4,4])
+        self.assertLessEqual(proxy_gen._triangle_count(out_counts),20*1.5+4)   # 120 small quads are gone
+        for (start,end),card in zip(heads,cards):
+            head=points[start:end]
+            ys=[p[1] for p in card];xs=[p[0] for p in card]
+            self.assertAlmostEqual(min(ys),min(p[1] for p in head),delta=0.01)   # covers the head's length
+            self.assertAlmostEqual(max(ys),max(p[1] for p in head),delta=0.01)
+            self.assertLess(max(xs)-min(xs),0.05)                               # and stays about as narrow
+        # A light mesh is left as it is (no cards): only meshes over the target are simplified.
+        same=proxy_gen._proxy_geometry(points,counts,indices,None)
+        self.assertEqual(same[1],list(counts))
+
     def test_asset_with_an_existing_proxy_is_skipped(self):
         with tempfile.TemporaryDirectory() as folder:
             src=Path(folder)/'asset.usda'

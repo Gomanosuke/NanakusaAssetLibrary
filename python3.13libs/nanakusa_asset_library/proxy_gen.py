@@ -20,6 +20,166 @@ import zipfile
 TARGET_TRIANGLES = 300
 
 
+# Scanned plants carry thousands of tiny separate pieces (florets of a seed head, seeds, specks).
+# polyreduce cannot merge pieces, so each keeps a few triangles and they alone made a grass proxy
+# 16k triangles against a 300 target. Pieces smaller than SMALL_PIECE of the mesh's diagonal are
+# instead gathered into groups (pieces within CARD_GAP of each other: one seed head) and each group
+# becomes one flat card - a quad on the group's best-fitting plane, in the group's average color.
+SMALL_PIECE = 0.03
+CARD_GAP = 0.005
+CARD_MIN_WIDTH = 0.15   # of the card's length: a straight row of florets still reads as a card
+
+
+def _pieces(points, face_vertex_counts, face_vertex_indices):
+    """Connected-piece label per face, after welding points at the same position (a UV or
+    material seam splits one surface into separate points but not into separate pieces)."""
+    import numpy
+    points = numpy.asarray(points, dtype=numpy.float64).reshape(-1, 3)
+    counts = numpy.asarray(face_vertex_counts, dtype=numpy.int64)
+    indices = numpy.asarray(face_vertex_indices, dtype=numpy.int64)
+    diagonal = float(numpy.linalg.norm(points.max(0) - points.min(0))) if len(points) else 0.0
+    tolerance = max(diagonal * 0.0002, 1e-9)
+    _, weld = numpy.unique(numpy.round(points / tolerance).astype(numpy.int64), axis=0, return_inverse=True)
+    weld = weld.ravel()
+    starts = numpy.r_[0, numpy.cumsum(counts)[:-1]]
+    corner = weld[indices]
+    # Every corner joins its face's first corner: union-find by repeated minimum labels.
+    first = numpy.repeat(corner[starts], counts)
+    label = numpy.arange(weld.max() + 1 if len(weld) else 0)
+    while True:
+        low = numpy.minimum(label[corner], label[first])
+        new = label.copy()
+        numpy.minimum.at(new, corner, low)
+        numpy.minimum.at(new, first, low)
+        new = new[new[new]]
+        if numpy.array_equal(new, label):
+            break
+        label = new
+    return numpy.unique(label[corner[starts]], return_inverse=True)[1].ravel()
+
+
+def _split_small_pieces(points, face_vertex_counts, face_vertex_indices, uvs=None):
+    """Split a mesh into its large part and groups of small pieces.
+
+    Returns (large, groups) or None when there is nothing to split off: `large` is (points,
+    counts, indices, uvs) of the faces kept as a mesh (may have no faces), `groups` a list of
+    (points, counts, indices, uvs) sub-meshes, one per future card."""
+    import numpy
+    points = numpy.asarray(points, dtype=numpy.float64).reshape(-1, 3)
+    counts = numpy.asarray(face_vertex_counts, dtype=numpy.int64)
+    indices = numpy.asarray(face_vertex_indices, dtype=numpy.int64)
+    if len(counts) < 2:
+        return None
+    diagonal = float(numpy.linalg.norm(points.max(0) - points.min(0)))
+    piece = _pieces(points, counts, indices)
+    pieces = piece.max() + 1
+    if pieces < 2:
+        return None
+    face = numpy.repeat(numpy.arange(len(counts)), counts)
+    corner_piece = piece[face]
+    low = numpy.full((pieces, 3), numpy.inf)
+    high = numpy.full((pieces, 3), -numpy.inf)
+    numpy.minimum.at(low, corner_piece, points[indices])
+    numpy.maximum.at(high, corner_piece, points[indices])
+    small = numpy.linalg.norm(high - low, axis=1) < SMALL_PIECE * diagonal
+    if small.sum() < 2:
+        return None
+    # Groups: small pieces with corners in the same or neighbouring cells of a CARD_GAP grid.
+    gap = CARD_GAP * diagonal
+    cell = numpy.floor((points[indices] - points.min(0)) / max(gap, 1e-12)).astype(numpy.int64) + 1
+    size = cell.max(0) + 2
+    key = (cell[:, 0] * size[1] + cell[:, 1]) * size[2] + cell[:, 2]
+    in_small = small[corner_piece]
+    pairs = numpy.unique(numpy.stack([key[in_small], corner_piece[in_small]], 1), axis=0)
+    first_in_cell = {}
+    for k, p in pairs.tolist():
+        first_in_cell.setdefault(k, p)
+    group = list(range(pieces))
+
+    def find(p):
+        while group[p] != p:
+            group[p] = group[group[p]]
+            p = group[p]
+        return p
+
+    for k, p in pairs.tolist():
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    q = first_in_cell.get(k + (dx * size[1] + dy) * size[2] + dz)
+                    if q is not None:
+                        a, b = find(p), find(q)
+                        if a != b:
+                            group[max(a, b)] = min(a, b)
+    face_group = numpy.array([find(p) for p in piece.tolist()])
+    face_small = small[piece]
+    starts = numpy.r_[0, numpy.cumsum(counts)[:-1]]
+
+    def sub(face_mask):
+        chosen = numpy.nonzero(face_mask)[0]
+        if not len(chosen):
+            return [], [], [], None
+        corners = numpy.concatenate([numpy.arange(starts[f], starts[f] + counts[f]) for f in chosen])
+        used, local = numpy.unique(indices[corners], return_inverse=True)
+        return (points[used].tolist(), counts[chosen].tolist(), local.ravel().tolist(),
+                [uvs[c] for c in corners.tolist()] if uvs else None)
+
+    large = sub(~face_small)
+    groups = [sub(face_small & (face_group == g)) for g in numpy.unique(face_group[face_small])]
+    return large, groups
+
+
+def _card(points, colors=None):
+    """A quad covering `points` on their best-fitting plane: (4 corners, color or None)."""
+    import numpy
+    points = numpy.asarray(points, dtype=numpy.float64).reshape(-1, 3)
+    centre = points.mean(0)
+    axes = numpy.linalg.svd(points - centre, full_matrices=True)[2] if len(points) > 1 else numpy.eye(3)
+    u, v = axes[0], axes[1]
+    pu, pv = (points - centre) @ u, (points - centre) @ v
+    # Full length (the card must still meet its stem), but 5-95 % across: a few florets sticking
+    # out must not make the card much wider than the head reads.
+    (u0, u1), (v0, v1) = (pu.min(), pu.max()), numpy.percentile(pv, (5, 95))
+    length = max(u1 - u0, 1e-9)
+    if v1 - v0 < CARD_MIN_WIDTH * length:
+        middle = (v0 + v1) / 2
+        v0, v1 = middle - CARD_MIN_WIDTH * length / 2, middle + CARD_MIN_WIDTH * length / 2
+    corners = [centre + a * u + b * v for a, b in ((u0, v0), (u1, v0), (u1, v1), (u0, v1))]
+    color = numpy.asarray(colors, dtype=numpy.float64).reshape(-1, 3).mean(0).tolist() if colors else None
+    return [c.tolist() for c in corners], color
+
+
+def _proxy_geometry(points, counts, indices, target, texture=None, uvs=None):
+    """(points, counts, indices, colors or None) of a proxy. A mesh over the target has its small
+    pieces made into cards and the rest reduced to about `target` triangles; a lighter one is kept
+    as it is. Colors are baked from `texture` when given."""
+    split = _split_small_pieces(points, counts, indices, uvs) if target is not None else None
+    if split is None:
+        if target is not None or texture:
+            return _decimate(points, counts, indices, target, texture, uvs)
+        return list(points), list(counts), list(indices), None
+    (lp, lc, li, luv), groups = split
+    out_points, out_counts, out_indices, out_colors = [], [], [], []
+    if lc:
+        keep = target if _triangle_count(lc) > target else None
+        colors = None
+        if keep is not None or texture:
+            lp, lc, li, colors = _decimate(lp, lc, li, keep, texture, luv)
+        out_points, out_counts, out_indices = list(lp), list(lc), list(li)
+        out_colors = list(colors) if colors else [None] * len(lp)
+    for gp, gc, gi, guv in groups:
+        colors = _decimate(gp, gc, gi, None, texture, guv)[3] if texture and guv else None
+        corners, color = _card(gp, colors)
+        base = len(out_points)
+        out_points += corners
+        out_counts.append(4)
+        out_indices += [base, base + 1, base + 2, base + 3]
+        out_colors += [color] * 4
+    if all(c is None for c in out_colors):
+        return out_points, out_counts, out_indices, None
+    return out_points, out_counts, out_indices, [c if c is not None else [0.5, 0.5, 0.5] for c in out_colors]
+
+
 def _triangle_count(face_vertex_counts):
     return sum(max(c - 2, 0) for c in face_vertex_counts)
 
@@ -431,9 +591,7 @@ def _add_proxies(stage, target_triangles):
         # one color per point, the way an Attribute from Map SOP would, so a plain grey stand-in
         # is not the only option in the viewport.
         target = target_triangles if _triangle_count(counts) > target_triangles else None
-        colors = None
-        if target is not None or data['texture']:
-            points, counts, indices, colors = _decimate(points, counts, indices, target, data['texture'], data['uvs'])
+        points, counts, indices, colors = _proxy_geometry(points, counts, indices, target, data['texture'], data['uvs'])
 
         name = Tf.MakeValidIdentifier(path.name + '_proxy')
         while path.GetParentPath().AppendChild(name) in taken or stage.GetPrimAtPath(path.GetParentPath().AppendChild(name)):

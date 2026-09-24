@@ -130,6 +130,18 @@ class LibraryTests(unittest.TestCase):
         row=self.lib.assets()[0];self.lib.update(row['id'],tags='wood outdoor',favorite=1,label='Chair')
         self.lib.scan(self.rid);rows=self.lib.assets(search='wood Chair',favorite=True)
         self.assertEqual(len(rows),1);self.assertEqual(row['id'],rows[0]['id'])
+    def test_minus_word_excludes_names_paths_and_tags(self):
+        for rel in ('USD/grass/grass.usd','USD/grass_anim/grass_anim.usd','USD/fern/fern.usd','USD/moss/moss.usd'):
+            self.write(rel)
+        self.lib.scan(self.rid)
+        fern=next(r for r in self.lib.assets() if r['label']=='fern');self.lib.update(fern['id'],tags='anim')
+        labels=lambda s:sorted(r['label'] for r in self.lib.assets(search=s))
+        self.assertEqual(labels('grass -anim'),['grass'])            # excluded by name
+        self.assertEqual(labels('-anim'),['grass','moss'])           # by name and by tag
+        self.assertEqual(labels('-anim -moss'),['grass'])
+        self.assertEqual(labels('-GRASS'),['fern','moss'])           # case-insensitive, like the search
+        self.assertEqual(self.lib.count(search='-anim'),2)
+        self.assertEqual(len(labels('-')),0)                          # a lone "-" is an ordinary word
     def test_old_flat_index_pruned(self):
         self.write('USD/tree/tree.usd');self.write('USD/tree/textures/color.tif')
         with self.lib.connect() as db:

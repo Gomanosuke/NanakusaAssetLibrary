@@ -462,7 +462,12 @@ class Library:
         if favorite:
             clauses.append("a.favorite=1")
         for word in search.split():
-            clauses.append("(a.label LIKE ? ESCAPE '\\' OR a.relpath LIKE ? ESCAPE '\\' OR a.tags LIKE ? ESCAPE '\\')")
+            # "-word" excludes: none of the name, path and tags may contain it (a lone "-" is a word).
+            exclude = word.startswith('-') and len(word) > 1
+            if exclude:
+                word = word[1:]
+            match = "(a.label LIKE ? ESCAPE '\\' OR a.relpath LIKE ? ESCAPE '\\' OR a.tags LIKE ? ESCAPE '\\')"
+            clauses.append("NOT " + match if exclude else match)
             word = word.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             args.extend(['%' + word + '%'] * 3)
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", args

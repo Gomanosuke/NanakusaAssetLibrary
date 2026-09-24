@@ -681,7 +681,7 @@ class LibraryWidget(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         # One toolbar row (search, filters, options, rescan): the list gets the height a title row used to take.
         filters = QtWidgets.QHBoxLayout()
-        self.search = QtWidgets.QLineEdit(); self.search.setPlaceholderText('Search names, paths, tags...  (Ctrl+F)')
+        self.search = QtWidgets.QLineEdit(); self.search.setPlaceholderText('Search names, paths, tags  (-word excludes, Ctrl+F)')
         self.search.setClearButtonEnabled(True)
         self.search_timer = QtCore.QTimer(self); self.search_timer.setSingleShot(True); self.search_timer.setInterval(180)
         self.search.textChanged.connect(lambda: self.search_timer.start())
