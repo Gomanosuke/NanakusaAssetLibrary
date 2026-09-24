@@ -3,7 +3,20 @@
 ## 作業範囲
 
 - Houdini 22 / Solaris向けのPython Panel。材質はKarma XPU向けMaterialXを基本とする。
-- 現行仕様・実装の構成・検証方法はdocs/SPEC.md、利用者向けの説明はREADME.mdを参照する。README.mdは利用者向けに書き、実装の詳細・テスト・移行手順はdocs/SPEC.mdへ置く。名称はNanakusaAssetLibrary、Pythonモジュール名はnanakusa_asset_library。
+- 現行仕様・実装の構成・検証方法はdocs/SPEC.md、利用者向けの説明はREADME.mdを参照する。名称はNanakusaAssetLibrary、Pythonモジュール名はnanakusa_asset_library。
+- README.mdの書き方は下の「README.mdのルール」に従う。
+
+## README.mdのルール
+
+README.mdはGitHubで第三者の利用者が読む文書。AI・エージェント向けの情報を書かない（ユーザー指示、2026-09-24）。
+
+- 書くのは、利用者が操作・判断するのに必要なこと: 機能、動作環境、インストール、UIの操作手順、制限事項、トラブル対処。
+- 書かないもの（docs/SPEC.mdかこのファイルへ置く）: 作業ルール・エージェントへの指示、関数名・内部API・データ構造などの実装の詳細、テスト・検証の手順、不具合の調査経緯や版ごとの修正履歴、ユーザーのスクリーンショットや実素材名を根拠にした事例、移行手順。
+- READMEからAGENTS.mdへリンクしない。開発者向けの案内はdocs/SPEC.mdへのリンク1行に留める。
+- 実素材名・個人のパスを例に使わない。例は汎用名（Chair.usd など）にする。
+- 文体は「です・ます」の自然な日本語。体言止めの羅列や「〜の選択。」のような名詞止めの手順にしない。手順は番号付きで「〜します」と書く。
+- 「現在のバージョン」はpython3.13libs/nanakusa_asset_library/__init__.pyの`__version__`と揃える。
+- 機能を変えたら、README.mdには利用者から見える変化（UI名・操作・保存先・制限）だけを反映し、理由や内部の仕組みはdocs/SPEC.mdへ書く。
 - 作業開始時にgit statusと関連差分を確認し、ユーザーの未コミット変更を保持する。
 - サブエージェントはユーザーが明示的に依頼した場合のみ使用する。
 - 個人PCの絶対パス、実素材名、ダウンロード素材、設定、DB、画像、HIPをGitに入れない。例とテストには汎用名・合成データを使う。
