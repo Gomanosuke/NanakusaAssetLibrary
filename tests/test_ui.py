@@ -850,6 +850,17 @@ class LibraryUiTests(unittest.TestCase):
                 self.assertIsNone(widget.ask_lod_settings())
             widget.lod_job=None;widget.cancel_lods();widget.close();widget.deleteLater()
 
+    def test_all_four_badges_stay_inside_the_icon(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            widget=ui.LibraryWidget(data_dir=Path(folder)/'data')
+            blank=ui.QtGui.QPixmap(256,256);blank.fill(ui.QtGui.QColor(0,0,0))
+            image=widget.variant_badge(ui.QtGui.QIcon(blank),['VARIANT','LOD','PROXY','ANIM']).pixmap(256,256).toImage()
+            found={}
+            for label,rgb in (('VARIANT',(45,95,180)),('LOD',(150,95,30)),('PROXY',(40,130,70)),('ANIM',(135,65,170))):
+                found[label]=any(image.pixelColor(x,y).getRgb()[:3]==rgb for y in range(0,80,2) for x in range(0,256,2))
+            self.assertEqual(found,{'VARIANT':True,'LOD':True,'PROXY':True,'ANIM':True})   # ANIM wraps to a second row
+            widget.close();widget.deleteLater()
+
     def test_wind_menu_job_and_the_new_asset_gets_the_source_tags_and_picture(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
             base=Path(folder);root=base/'asset';plants=root/'USD'/'Grass_OL'

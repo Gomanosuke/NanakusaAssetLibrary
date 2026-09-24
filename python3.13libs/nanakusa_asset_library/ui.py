@@ -1105,13 +1105,14 @@ class LibraryWidget(QtWidgets.QWidget):
         painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.scale(edge/256,edge/256)
         painter.drawPixmap(QtCore.QRect(0,0,256,256),icon.pixmap(edge,edge))
         font=painter.font();font.setBold(True);font.setPixelSize(14);painter.setFont(font)
-        x=6
+        x,y=6,6
         for label in labels:
             width={'VARIANT':96,'LOD':52,'PROXY':82,'ANIM':70}.get(label,96)
+            if x>6 and x+width>250:x,y=6,y+34   # all four do not fit on one row of the 256 icon: wrap
             color={'VARIANT':(45,95,180),'LOD':(150,95,30),'PROXY':(40,130,70),'ANIM':(135,65,170)}.get(label,(90,90,90))
             painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(*color))
-            painter.drawRoundedRect(x,6,width,28,6,6)
-            painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(x,6,width,28),QtCore.Qt.AlignmentFlag.AlignCenter,label)
+            painter.drawRoundedRect(x,y,width,28,6,6)
+            painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(x,y,width,28),QtCore.Qt.AlignmentFlag.AlignCenter,label)
             x+=width+6
         painter.end()
         return QtGui.QIcon(out)

@@ -393,7 +393,7 @@ UI・ジョブ:
 
 - `variant_scan.py`（Houdini同梱のPython、`VariantTagJob`）が、索引の`vstamp`（`"mtime:size"`、索引v6で追加）が現在のファイルと違うUSD資産だけを開き、一番上のプリム（default prim、無ければ最初のルートプリム）のvariant set名を読む。`Usd.Stage.OpenMasked`（そのプリムだけ、payloadなし）なので、実ライブラリー914件で約1.2秒、変更なしなら約0.1秒。
 - `core.sync_auto_tags`: 名前が`lod`で始まる（大文字小文字無視、`core.is_lod_set`）セットがあれば`lod`、それ以外のセットがあれば`variant`を付け、無ければ外す。他の語と順序は保つ。`Library.save_variant_tags`は1トランザクション内で現在のtagsを読み直してから書く（並行してユーザーが編集したタグを失わない）。読めなかったファイルはタグに触れずstampだけ記録する。
-- `proxy`: 一番上のプリムの下（今の選択で合成されるもの）に`purpose=proxy`のGprimがあれば付け、無ければ外す。ProxyJobの成功時（"Proxy added"または"already has a proxy"）にも`set_tag`で付ける。stampは`p2:mtime:size`（`Library.STAMP_VERSION`。読む内容を増やしたら上げ、全USDを1回確認し直させる。p2で`anim`を追加）。バッジはVARIANT（青）・LOD（橙）・PROXY（緑）・ANIM（紫）の順に左上へ並べる。
+- `proxy`: 一番上のプリムの下（今の選択で合成されるもの）に`purpose=proxy`のGprimがあれば付け、無ければ外す。ProxyJobの成功時（"Proxy added"または"already has a proxy"）にも`set_tag`で付ける。stampは`p2:mtime:size`（`Library.STAMP_VERSION`。読む内容を増やしたら上げ、全USDを1回確認し直させる。p2で`anim`を追加）。バッジはVARIANT（青）・LOD（橙）・PROXY（緑）・ANIM（紫）の順に左上へ並べ、アイコン幅（256）に入らない分は2段目へ折り返す（4つ並ぶと約330で、ANIMがはみ出していた）。
 - `anim`: 一番上のプリムの下（今の選択で合成されるもの）の属性のどれかが`ValueMightBeTimeVarying()`（時間サンプルかvalue clipがある）なら付け、無ければ外す。サンプルの有無だけを見るので大きなメッシュも読まない。p2への更新で実ライブラリー1148件を確認し直して約7.5秒、変化は風のアニメーション1件だけだった（他の資産に誤検出なし）。生成ジョブではタグを付けず、出力のスキャン後にこの確認が付ける。
 - 起動時（1.5秒後、`AUTO_TAGS`）とスキャン完了時に実行し、変化があれば一覧を再読み込みする（バッジはタグから描く）。
 - Houdiniのセッションで最初に開いたパネルは、0.8秒後に自動でRescanする（`AUTO_SCAN`、モジュール変数`_session_scanned`で1回だけ。`settings.json`の`rescan_on_first_open`がfalseなら行わない）。その場合の起動時タグ確認は、スキャン完了時のものに任せる。生成ジョブのタグ操作（`set_tag`）とは独立で、ファイルが変わるため次回の確認で同じ結果になる。
