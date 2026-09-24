@@ -66,12 +66,18 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(sync_auto_tags('wood',[],True),'wood proxy')
         self.assertEqual(sync_auto_tags('proxy wood',[],False),'wood')
         self.assertEqual(sync_auto_tags('proxy wood',[]),'proxy wood')   # unknown: the proxy tag is left alone
+        self.assertEqual(sync_auto_tags('grass',['LOD'],True,True),'grass lod proxy anim')
+        self.assertEqual(sync_auto_tags('anim grass',[],None,False),'grass')
+        self.assertEqual(sync_auto_tags('anim grass',[]),'anim grass')   # unknown: the anim tag is left alone
         self.write('USD/a/a.usda');self.lib.scan(self.rid);row=self.lib.assets()[0]
         self.assertEqual([r['id'] for r in self.lib.variant_check_rows()],[row['id']])
         stamp=Library.file_stamp(row)
         self.lib.update(row['id'],tags='mine')   # edited after the worker read the list: kept
         self.assertEqual(self.lib.save_variant_tags([(row['id'],['LOD'],stamp)]),1)
         self.assertEqual(self.lib.assets()[0]['tags'],'mine lod');self.assertEqual(self.lib.variant_check_rows(),[])
+        self.assertEqual(self.lib.save_variant_tags([(row['id'],['LOD'],stamp,False,True)]),1)
+        self.assertEqual(self.lib.assets()[0]['tags'],'mine lod anim')
+        self.assertEqual(self.lib.save_variant_tags([(row['id'],['LOD'],stamp,False,False)]),1)
         self.assertEqual(self.lib.save_variant_tags([(row['id'],None,stamp)]),0)   # unreadable: tags untouched
         self.write('USD/a/a.usda','changed');self.lib.scan(self.rid)
         self.assertEqual(len(self.lib.variant_check_rows()),1)   # a changed file is checked again

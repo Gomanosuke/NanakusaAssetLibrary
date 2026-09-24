@@ -243,11 +243,15 @@ def _find_variant_set(node, wanted):
 def _add_variant_switch(parent, node):
     """Insert a Set Variant LOP after `node` if the placed asset has a variant set to choose from:
     "element" (element_gen.py, a multi-object pack) or else the source's own (e.g. "variant"
-    var_01..), never a level-of-detail set. Pre-wired to that prim and index 0 (the first variant),
-    so a dropped pack is switchable at once. A no-op if there is none."""
+    var_01..), never a level-of-detail set, and the wind animation's "wind_phase" only when nothing
+    else is there. Pre-wired to that prim and index 0 (the first variant), so a dropped pack is
+    switchable at once. A no-op if there is none."""
     def wanted(names):
         others = [n for n in names if not core.is_lod_set(n)]
-        return 'element' if 'element' in others else (others[0] if others else None)
+        if 'element' in others:
+            return 'element'
+        others.sort(key=lambda n: n == 'wind_phase')   # stable: the source's own sets first
+        return others[0] if others else None
     prim, set_name = _find_variant_set(node, wanted)
     if prim is None:
         return node

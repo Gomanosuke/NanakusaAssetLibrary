@@ -126,6 +126,15 @@ README.mdはGitHubで第三者の利用者が読む文書。AI・エージェン
 - メッシュに既に`visibility`がある資産、扱えないprimvarがある資産はスキップ（壊れたLODを書かない）。GeomSubset（面ごとの材質）は現在の素材（1218メッシュ）に無いため未対応。対応する場合は縮小前後で面→subsetを対応づける。
 - proxy_gen.generate_plainは、同じプロセス内で後から開く処理のため、編集したソースレイヤーをReload()で保存時の状態へ戻す（レイヤーレジストリが編集済みのレイヤーを返し、テストで削除結果が狂った）。
 
+## 風のアニメーション
+
+- wind_gen.py（WindJob）は元の資産を書き換えず、別資産`<名前>_Anim.usd`＋`anim/<名前>_Anim_clip.usd`を作る（ユーザー指示 2026-09-24: 後で他の資産にも同じ処理をするので、汎用で高品質な仕組みにする）。仕組み・数値・確認結果はdocs/SPEC.mdの「風のアニメーション」。
+- 形式はUsdSkel（静的ウェイト＋関節回転）＋ループするvalue clip。点キャッシュにしない（この資産で1フレーム16MB、10秒で数GB）。
+- 変えてはいけない点（すべて実機で問題を確認済み）: `SkelRoot`を一番上のプリムにしない（配置側の型で消える）。入口の`rotations`にdefault値を書かない（clipに勝つ）。clip設定は`wind_phase`の各variantの中だけに書く。Skeletonは`visibility=invisible`（Scene Viewが骨を線で描く）。ばら部品はグループ単位で1本の茎へ付ける（部品ごとだと花穂が裂けた）。
+- 風向きを持たせない（ユーザー指示: インスタンスで適当に配置できるよう、周囲から影響を受けて揺れる感じ）。振幅はRMS正規化＋`size_response`で資産間を揃える。
+- 見た目の確認はhusk（Karma XPU）の連番とGIF、Scene Viewは使い捨てhoudinifx.exeで`.hip`の`hou.session`コードからflipbookを書き出して行った（起動スクリプトでは動かなかったが、hou.sessionは読み込み時に実行される）。近いカメラではUsdGeomCameraの既定のnear clip（1m）に注意。
+- `anim`は自動タグ（variant_scan、ValueMightBeTimeVarying）。生成ジョブでは付けない。
+
 ## 複数オブジェクトパックの切り替え
 
 - element_gen.pyが別プロセス（hython）で`element` variant setを追加する。対象資産自身の入口ファイルだけを編集する。

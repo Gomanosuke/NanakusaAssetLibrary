@@ -12,7 +12,7 @@ import time
 import traceback
 from hutil.PySide import QtCore, QtGui, QtWidgets
 import hou
-from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen, element_gen, lod_gen
+from . import core, houdini_ops as ops, dragdrop, storage, organize, pbr, embedded, proxy_gen, element_gen, lod_gen, wind_gen
 from . import reveal as file_browser
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
@@ -433,6 +433,81 @@ class LodDeleteJob(_MeshGenerateJob):
         return f"LODs removed ({len(result['removed_lods'])} prim(s))"
 
 
+class WindJob(QtCore.QThread):
+    """Make "<name>_Anim.usd", a looping wind animation that references the asset (wind_gen.py).
+
+    Unlike the jobs above the source is never written: the worker writes the new entry and its clip
+    (./anim/<name>_Anim_clip.usd) under temporary names next to their final paths, and they are moved
+    into place only after it succeeds - the clip first, so the entry never points at a missing clip.
+    A version made earlier is copied to data/backups/anim first. Replacing a file Houdini has open
+    fails on Windows; the error says so and the previous version stays."""
+    done = QtCore.Signal(str, str, str, str)   # asset_id, output path, message (skip reason or summary), error
+    label = 'Wind animation'
+    timeout = 900
+
+    def __init__(self, asset_id, source, backup_dir, strength, loop_seconds):
+        super().__init__()
+        self.asset_id, self.source, self.backup_dir = asset_id, str(source), Path(backup_dir)
+        self.strength, self.loop_seconds = float(strength), float(loop_seconds)
+        self.output = wind_gen.output_for(source)
+        self.bin = Path(hou.getenv('HFS'))/'bin'
+
+    def run(self):
+        entry_temp, clip_temp = wind_gen.temp_paths(self.output)
+        try:
+            with tempfile.TemporaryDirectory(prefix='nanakusa_wind_') as folder:
+                base = Path(folder)
+                suffix = '.exe' if os.name == 'nt' else ''
+                result_path = base/'result.json'
+                log = base/'generate.log'
+                with log.open('wb') as stream:
+                    process = subprocess.Popen([str(self.bin/('hython'+suffix)), str(Path(__file__).with_name('wind_gen.py')),
+                        self.source, str(self.output), str(result_path), str(self.strength), str(self.loop_seconds)],
+                        stdout=stream, stderr=stream, **background())
+                    started = time.monotonic()
+                    try:
+                        while process.poll() is None:
+                            if self.isInterruptionRequested():
+                                raise RuntimeError(self.label+' cancelled')
+                            if time.monotonic()-started > self.timeout:
+                                raise RuntimeError(self.label+' timed out')
+                            self.msleep(100)
+                    finally:
+                        if process.poll() is None:
+                            process.terminate()
+                            try: process.wait(timeout=5)
+                            except subprocess.TimeoutExpired: process.kill(); process.wait()
+                if process.returncode:
+                    raise RuntimeError(log.read_text(encoding='utf-8', errors='replace')[-2000:])
+                result = json.loads(result_path.read_text(encoding='utf-8'))
+            if result.get('skipped'):
+                self.done.emit(self.asset_id, '', result['skipped'], '')
+                return
+            clip_final = Path(result['clip'])
+            for temporary in (entry_temp, clip_temp):
+                if not temporary.is_file() or temporary.stat().st_size == 0:
+                    raise RuntimeError(self.label+' produced no output')
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            for final in (self.output, clip_final):
+                if final.is_file():
+                    self.backup_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(final, self.backup_dir/(final.stem+'_backup_'+stamp+final.suffix))
+            os.replace(str(clip_temp), str(clip_final))
+            os.replace(str(entry_temp), str(self.output))
+            wind = result['wind']
+            joints = sum(p['joints'] for p in wind['plants'].values())
+            self.done.emit(self.asset_id, str(self.output),
+                           f"Wind animation made: {self.output.name} ({len(wind['plants'])} plant(s), {joints} joints, "
+                           f"{wind['frames']} frame loop)", '')
+        except Exception as exc:
+            self.done.emit(self.asset_id, '', '', str(exc))
+        finally:
+            for temporary in (entry_temp, clip_temp):
+                if temporary.is_file():
+                    try: temporary.unlink()
+                    except OSError: pass
+
+
 class FolderMigrationJob(QtCore.QThread):
     """One-time folder listing for an index made before folders were recorded by the scan.
 
@@ -540,6 +615,11 @@ class LibraryWidget(QtWidgets.QWidget):
         self.lod_delete_pending = set()
         self.lod_delete_failed = set()
         self.lod_delete_job = None
+        self.wind_queue = deque()
+        self.wind_pending = set()
+        self.wind_failed = set()
+        self.wind_job = None
+        self.wind_made = []   # (root id, relpath of the new asset, tags to copy) - listed by the next scan
         self.info_job=None;self.info_pending=None;self.info_key=None;self.info_cache={};self.info_ids={}
         self.metadata_id=None;self.metadata_ids=[];self.pending_tags=None;self.folder_items={};self.folder_kids={};self.folder_roots={};self.folder_migrations=set();self.folder_migration_jobs={};self.row_index={};self.entry_of={};self.item_index={};self.member_index={};self.stream=None;self.total=0;self.icon_cache={};self.no_embedded=set();self.preview_cache=OrderedDict();self.placeholders={}
         self.icon_todo=deque();self.icons_loaded=set();self.page_entries=[];self.scroll_timer=QtCore.QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(30);self.scroll_timer.timeout.connect(self.scrolled);self.icon_timer=QtCore.QTimer(self);self.icon_timer.setSingleShot(True);self.icon_timer.timeout.connect(self.load_icons)
@@ -988,7 +1068,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if len(entry['rows'])>1:icon=self.stacked_icon(icon,len(entry['rows']))
         else:
             words=entry['rep']['tags'].split()
-            labels=[label for tag,label in (('variant','VARIANT'),('lod','LOD'),('proxy','PROXY')) if tag in words]
+            labels=[label for tag,label in (('variant','VARIANT'),('lod','LOD'),('proxy','PROXY'),('anim','ANIM')) if tag in words]
             if labels:icon=self.variant_badge(icon,labels)
         self.items.item(index).setIcon(icon);self.icons_loaded.add(index)
 
@@ -1019,16 +1099,16 @@ class LibraryWidget(QtWidgets.QWidget):
         return QtGui.QIcon(out)
 
     def variant_badge(self,icon,labels=('VARIANT',)):
-        """Small corner markers for a USD carrying the automatic "variant" / "lod" / "proxy" tags,
-        so what it offers is recognisable without opening its info panel."""
+        """Small corner markers for a USD carrying the automatic "variant" / "lod" / "proxy" / "anim"
+        tags, so what it offers is recognisable without opening its info panel."""
         edge=self.icon_edge();out=QtGui.QPixmap(edge,edge);out.fill(QtCore.Qt.GlobalColor.transparent)
         painter=QtGui.QPainter(out);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.scale(edge/256,edge/256)
         painter.drawPixmap(QtCore.QRect(0,0,256,256),icon.pixmap(edge,edge))
         font=painter.font();font.setBold(True);font.setPixelSize(14);painter.setFont(font)
         x=6
         for label in labels:
-            width={'VARIANT':96,'LOD':52,'PROXY':82}.get(label,96)
-            color={'VARIANT':(45,95,180),'LOD':(150,95,30),'PROXY':(40,130,70)}.get(label,(90,90,90))
+            width={'VARIANT':96,'LOD':52,'PROXY':82,'ANIM':70}.get(label,96)
+            color={'VARIANT':(45,95,180),'LOD':(150,95,30),'PROXY':(40,130,70),'ANIM':(135,65,170)}.get(label,(90,90,90))
             painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(*color))
             painter.drawRoundedRect(x,6,width,28,6,6)
             painter.setPen(QtGui.QColor('#ffffff'));painter.drawText(QtCore.QRect(x,6,width,28),QtCore.Qt.AlignmentFlag.AlignCenter,label)
@@ -1086,9 +1166,14 @@ class LibraryWidget(QtWidgets.QWidget):
     def thumbnail_finished(self):
         self.thumb_job=None;self.next_thumbnail()
 
+    def is_wind_output(self,row):
+        """A "<name>_Anim.usd" from Generate Wind Animation: its meshes are skinned, so the proxy / LOD /
+        element generators (which edit the entry file) leave it alone - generate them on the source."""
+        return wind_gen.is_output(Path(row['root_path'])/row['relpath'])
+
     def queue_proxy(self,row,target_triangles):
         aid=row['id']
-        if row['kind']!='usd' or aid in self.proxy_pending or aid in self.proxy_failed:return
+        if row['kind']!='usd' or aid in self.proxy_pending or aid in self.proxy_failed or self.is_wind_output(row):return
         self.proxy_pending.add(aid);self.proxy_queue.append((row,target_triangles))
         QtCore.QTimer.singleShot(0,self.next_proxy)
 
@@ -1115,7 +1200,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def queue_element(self,row):
         aid=row['id']
-        if row['kind']!='usd' or aid in self.element_pending or aid in self.element_failed:return
+        if row['kind']!='usd' or aid in self.element_pending or aid in self.element_failed or self.is_wind_output(row):return
         self.element_pending.add(aid);self.element_queue.append(row)
         QtCore.QTimer.singleShot(0,self.next_element)
 
@@ -1141,7 +1226,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def queue_element_delete(self,row):
         aid=row['id']
-        if row['kind']!='usd' or aid in self.element_delete_pending or aid in self.element_delete_failed:return
+        if row['kind']!='usd' or aid in self.element_delete_pending or aid in self.element_delete_failed or self.is_wind_output(row):return
         self.element_delete_pending.add(aid);self.element_delete_queue.append(row)
         QtCore.QTimer.singleShot(0,self.next_element_delete)
 
@@ -1167,7 +1252,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def queue_lod(self,row,levels,keep):
         aid=row['id']
-        if row['kind']!='usd' or aid in self.lod_pending or aid in self.lod_failed:return
+        if row['kind']!='usd' or aid in self.lod_pending or aid in self.lod_failed or self.is_wind_output(row):return
         self.lod_pending.add(aid);self.lod_queue.append((row,levels,keep))
         QtCore.QTimer.singleShot(0,self.next_lod)
 
@@ -1193,7 +1278,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def queue_lod_delete(self,row):
         aid=row['id']
-        if row['kind']!='usd' or aid in self.lod_delete_pending or aid in self.lod_delete_failed:return
+        if row['kind']!='usd' or aid in self.lod_delete_pending or aid in self.lod_delete_failed or self.is_wind_output(row):return
         self.lod_delete_pending.add(aid);self.lod_delete_queue.append(row)
         QtCore.QTimer.singleShot(0,self.next_lod_delete)
 
@@ -1420,6 +1505,8 @@ class LibraryWidget(QtWidgets.QWidget):
             action('Delete Element Switch',self.generate_element_delete,'Undo the element switch (assets without one are skipped).')
             action('Generate Selected LODs...',self.generate_lods,'Adds a "LOD" variant set (LOD_1 = as is, then reduced copies) for Auto Select LOD, Stage Manager and Set Variant.')
             action('Delete LODs',self.generate_lod_delete,'Undo the LODs, restoring the file as it was (assets without LODs are skipped).')
+            menu.addSection('Animation (makes a new asset; this one is not changed)')
+            action('Generate Wind Animation...',self.generate_wind,'Makes "<name>_Anim.usd": the asset swaying in a light, directionless breeze, looping for any frame. It references this asset, keeps its LOD / variant sets and proxies, and works in a Point Instancer.')
         if len(rows)==1:
             menu.addSeparator()
             action('Publish Static USD...',self.publish_asset)
@@ -1462,7 +1549,25 @@ class LibraryWidget(QtWidgets.QWidget):
         for name,result in results:
             messages.append(name+': '+('Cancel' if result.get('cancelled') else str(result['count'])+' assets')+(' / '+ '; '.join(result['errors'][:3]) if result.get('errors') else ''))
         self.status.setText(' | '.join(messages) or 'No libraries to scan')
+        self.adopt_wind_outputs()
         if self.AUTO_TAGS:self.start_variant_tags()
+        if getattr(self,'wind_rescan',False) and self.wind_made:
+            self.wind_rescan=False;self.scan()   # animations finished while this scan ran
+
+    def adopt_wind_outputs(self):
+        """Give each wind animation the scan has just listed its source's own tags (the automatic
+        lod / variant / proxy / anim ones follow from the file itself, by the tag check after this)."""
+        if not self.wind_made:return
+        waiting=[]
+        for rid,rel,tags in self.wind_made:
+            found=[r for r in self.library.assets(root_id=rid,folder=rel.rsplit('/',1)[0]) if r['relpath']==rel]
+            if not found:
+                waiting.append((rid,rel,tags));continue
+            words=found[0]['tags'].split()
+            merged=' '.join(words+[w for w in tags.split() if w not in words])
+            if merged!=found[0]['tags']:self.library.update(found[0]['id'],tags=merged)
+        self.wind_made=waiting
+        self.refresh()
 
     def first_open_scan(self):
         global _session_scanned
@@ -1484,7 +1589,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.tag_job=None
         if result.get('changed'):
             self.refresh()   # the list holds the old tags; refresh keeps the scroll position
-            self.status.setText(f"Tagged from USD variant sets: {result['changed']} asset(s) got or lost the lod / variant tag"
+            self.status.setText(f"Tagged from the USD files: {result['changed']} asset(s) got or lost the lod / variant / proxy / anim tag"
                                 +(' ('+'; '.join(result['errors'][:2])+')' if result.get('errors') else ''))
         if self.tag_again:
             self.tag_again=False;self.start_variant_tags()
@@ -1509,7 +1614,8 @@ class LibraryWidget(QtWidgets.QWidget):
                 ('Element switches',count(self.element_queue,self.element_job),self.cancel_elements),
                 ('Element switch removals',count(self.element_delete_queue,self.element_delete_job),self.cancel_element_deletes),
                 ('LODs',count(self.lod_queue,self.lod_job),self.cancel_lods),
-                ('LOD removals',count(self.lod_delete_queue,self.lod_delete_job),self.cancel_lod_deletes)]
+                ('LOD removals',count(self.lod_delete_queue,self.lod_delete_job),self.cancel_lod_deletes),
+                ('Wind animations',count(self.wind_queue,self.wind_job),self.cancel_winds)]
 
     def update_jobs_bar(self):
         parts=[f'{label} {n}' for label,n,_ in self.job_counts() if n]
@@ -1777,6 +1883,85 @@ class LibraryWidget(QtWidgets.QWidget):
         self.lod_delete_queue.clear()
         if self.lod_delete_job:self.lod_delete_job.requestInterruption()
         self.status.setText('Cancelled. An active LOD removal will finish first.')
+
+    def ask_wind_settings(self):
+        """(strength, loop seconds) from a small dialog that remembers the last values, or None."""
+        dialog=QtWidgets.QDialog(self);dialog.setWindowTitle('Generate Wind Animation')
+        form=QtWidgets.QFormLayout(dialog)
+        strength=QtWidgets.QDoubleSpinBox();strength.setRange(0.1,3.0);strength.setSingleStep(0.1);strength.setDecimals(2)
+        strength.setValue(float(self.settings.get('wind_strength',wind_gen.STRENGTH)))
+        strength.setToolTip('1 = a light breeze. The sway grows with it; 2-3 is a windy day.')
+        loop=QtWidgets.QDoubleSpinBox();loop.setRange(4.0,30.0);loop.setSingleStep(1.0);loop.setDecimals(1);loop.setSuffix(' s')
+        loop.setValue(float(self.settings.get('wind_loop_seconds',wind_gen.LOOP_SECONDS)))
+        loop.setToolTip('Length of the seamless loop. Longer repeats less visibly and makes a bigger file.')
+        form.addRow('Strength',strength);form.addRow('Loop',loop)
+        form.addRow(QtWidgets.QLabel('Saved as "<name>_Anim.usd" (+ anim/<name>_Anim_clip.usd). An earlier one is backed up first.'))
+        buttons=QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok|QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);form.addRow(buttons)
+        if dialog.exec()!=QtWidgets.QDialog.DialogCode.Accepted:return None
+        self.settings['wind_strength']=strength.value();self.settings['wind_loop_seconds']=loop.value();self.save_settings()
+        return strength.value(),loop.value()
+
+    def generate_wind(self):
+        rows=[r for r in self.selected_rows() if r['kind']=='usd']
+        if not rows:raise ValueError('Select one or more USD assets.')
+        rows=[r for r in rows if not wind_gen.is_output(self.library.resolve(r))]
+        if not rows:raise ValueError('These are wind animations already; select the assets they were made from.')
+        settings=self.ask_wind_settings()
+        if settings is None:return
+        for row in rows:
+            self.wind_failed.discard(row['id'])
+            self.queue_wind(row,*settings)
+        self.status.setText(f'Queued {len(rows)} wind animation job(s) (strength {settings[0]:g}, {settings[1]:g} s loop). The assets are not changed; each gets a new "<name>_Anim.usd", listed by a rescan when done.')
+
+    def queue_wind(self,row,strength,loop_seconds):
+        aid=row['id']
+        if aid in self.wind_pending or aid in self.wind_failed:return
+        self.wind_pending.add(aid);self.wind_queue.append((row,strength,loop_seconds))
+        QtCore.QTimer.singleShot(0,self.next_wind)
+
+    def next_wind(self):
+        if self.wind_job is not None or not self.wind_queue:return
+        row,strength,loop_seconds=self.wind_queue.popleft()
+        source=Path(row['root_path'])/row['relpath']
+        self.wind_job=WindJob(row['id'],source,self.data_dir/'backups'/'anim',strength,loop_seconds)
+        self.wind_job.row=row
+        self.wind_job.done.connect(self.wind_done)
+        self.wind_job.finished.connect(self.wind_finished)
+        _keep_job(self.wind_job)
+
+    def wind_finished(self):
+        self.wind_job=None;self.next_wind()
+        if self.wind_job is None and self.wind_made:
+            # All done: list the new files (tags and thumbnails are given to them after the scan).
+            if self.job and self.job.isRunning():self.wind_rescan=True
+            else:self.scan()
+
+    def wind_done(self,aid,output,message,error):
+        self.wind_pending.discard(aid)
+        row=self.wind_job.row if self.wind_job is not None else None
+        if error:
+            self.wind_failed.add(aid);self.status.setText('Wind animation failed: '+error)
+            return
+        if output and row is not None:
+            root=Path(row['root_path'])
+            rel=Path(output).resolve().relative_to(root.resolve()).as_posix()
+            tags=' '.join(w for w in row['tags'].split() if w not in core.AUTO_TAGS)
+            self.wind_made.append((row['root_id'],rel,tags))
+            # Start with the source's picture until a thumbnail is rendered for the animation.
+            made={'root_path':row['root_path'],'relpath':rel,'kind':'usd','id':'','mtime':0,'size':0}
+            picture=next((p for p in storage.thumbnail_candidates(row,self.data_dir) if p.is_file()),None)
+            target=storage.thumbnail_destination(made,self.data_dir)
+            if picture is not None and picture.suffix.lower()=='.png' and not target.exists():
+                try:shutil.copy2(picture,target)
+                except OSError:pass
+        self.status.setText((message or 'Nothing to animate')+f' ({len(self.wind_queue)} remaining)')
+
+    def cancel_winds(self):
+        for row,_,_ in self.wind_queue:self.wind_pending.discard(row['id'])
+        self.wind_queue.clear()
+        if self.wind_job:self.wind_job.requestInterruption()
+        self.status.setText('Cancelled. An active wind animation will finish first.')
 
     def generate_missing_thumbnails(self):
         if self.missing_scan is not None:return

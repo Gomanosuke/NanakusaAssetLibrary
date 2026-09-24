@@ -850,6 +850,35 @@ class LibraryUiTests(unittest.TestCase):
                 self.assertIsNone(widget.ask_lod_settings())
             widget.lod_job=None;widget.cancel_lods();widget.close();widget.deleteLater()
 
+    def test_wind_menu_job_and_the_new_asset_gets_the_source_tags_and_picture(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
+            base=Path(folder);root=base/'asset';plants=root/'USD'/'Grass_OL'
+            plants.mkdir(parents=True);(plants/'Big.usda').write_text('x');(plants/'Big_thumbnail.png').write_bytes(b'png')
+            widget=ui.LibraryWidget(data_dir=base/'data',initial_root=str(root))
+            widget.library.scan(widget.library.roots()[0]['id']);widget.refresh()
+            widget.items.setCurrentRow(0)
+            self.assertIn('Generate Wind Animation...',[a.text() for a in widget.build_asset_menu().actions()])
+            row=widget.item_row(widget.items.currentItem())
+            widget.library.update(row['id'],tags='meadow lod proxy');row=widget.library.assets_by_ids([row['id']])[0]
+            with patch.object(ui,'WindJob') as job_cls:
+                widget.queue_wind(row,1.5,8.0);self.app.processEvents()
+                job_cls.assert_called_once_with(row['id'],plants/'Big.usda',base/'data'/'backups'/'anim',1.5,8.0)
+            widget.update_jobs_bar();self.assertIn('Wind animations 1',widget.jobs_label.text())
+            # The worker's output appears; the next scan lists it with the source's own tags.
+            (plants/'Big_Anim.usd').write_text('x');(plants/'anim').mkdir();(plants/'anim'/'Big_Anim_clip.usd').write_text('x')
+            widget.wind_job=MagicMock(row=row)
+            widget.wind_done(row['id'],str(plants/'Big_Anim.usd'),'Wind animation made: Big_Anim.usd','')
+            self.assertEqual((plants/'Big_Anim_thumbnail.png').read_bytes(),b'png')
+            widget.library.scan(widget.library.roots()[0]['id']);widget.adopt_wind_outputs()
+            made=[r for r in widget.library.assets() if r['label']=='Big_Anim']
+            self.assertEqual([r['tags'] for r in made],['meadow'])   # automatic tags come from the file later
+            self.assertEqual(widget.wind_made,[])
+            # The output is not edited by the proxy / LOD generators.
+            self.assertTrue(widget.is_wind_output(made[0]));self.assertFalse(widget.is_wind_output(row))
+            with patch.object(ui,'LodJob') as job_cls:
+                widget.queue_lod(made[0],3,50.0);self.app.processEvents();job_cls.assert_not_called()
+            widget.wind_job=None;widget.cancel_winds();widget.close();widget.deleteLater()
+
     def test_show_in_explorer_selects_the_asset_files_themselves(self):
         with tempfile.TemporaryDirectory() as folder,patch.object(ui.LibraryWidget,'request_info'),patch.object(ui.LibraryWidget,'queue_thumbnail'):
             base=Path(folder);root=base/'asset'

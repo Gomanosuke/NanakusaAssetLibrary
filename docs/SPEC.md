@@ -353,11 +353,48 @@ UI:
 - 成功で`lod`タグとバッジ、削除で外す。素材情報にはUSDの一番上のプリムのvariant set（例: `LOD (4), element (5)`）を表示する。
 - D&D / Import Selected: `lod`タグがあれば`houdini_ops._add_lod_select`がAuto Select LODを追加する（Primitives=配置プリム、Variant Set=`LOD`、段数、距離=対角線×4×2^(k-2)、カメラ=上流の最初のカメラ、無ければ`/cameras/camera1`）。
 
-## 自動タグ（lod / variant）
+## 風のアニメーション（Generate Wind Animation）
+
+`wind_gen.py`（別プロセスのhython。pxrとnumpyだけで動く）が、植物USDを風で揺らした**別の資産**`<名前>_Anim.usd`を作る。元ファイルは一切書き換えない。インスタンスでどの向きに置いても成り立つよう、特定の風向きを持たない（周囲から吹く）揺れにする。
+
+出力の形:
+- 入口`<名前>_Anim.usd`: 元ファイルをreferenceし（同じフォルダーなら`./`の相対パス、別ドライブなら絶対パス）、足すのはUsdSkelの情報だけ。一番上のプリム名は`<名前>_Anim`。
+  - `SkelRoot`は全メッシュの共通の親のうち一番上のプリムより下（例: `geo`）。**一番上のプリムにしない**: 配置側（Reference・プロトタイプ）が同じプリムに型を書くと`SkelRoot`が消えてスキニングが止まる（試作で確認）。共通の親が一番上のプリムしかない場合だけ、そこを`SkelRoot`にする（resultの`note`に記録）。
+  - 植物（`variant`の各選択）ごとに`<SkelRoot>/NAL_wind/<メッシュ名>`のSkeletonと`<メッシュ名>_anim`のSkelAnimation。Skeletonは`visibility=invisible`: HoudiniのScene ViewはSkeletonの骨を（purpose=guideでも）数百本の線として描くため。invisibleでもScene ViewとKarmaのスキニングは変わらない（22.0.447で確認、同フレームの差はノイズ程度）。
+  - 各メッシュに`primvars:skel:jointIndices`/`jointWeights`（3影響: 部品に沿った2関節＋地面の関節）。点がLODで変わるメッシュは`LOD` variantの中に、変わらないもの（proxyなど）は外に書く。元の`LOD`/`variant`の選択は書かない（元の選択のまま）。
+- クリップ`anim/<名前>_Anim_clip.usd`: 各SkelAnimationの`rotations`を0〜Lフレーム（Lフレーム目＝0フレーム目）で持つ。入口ではvalue clipとして`times`を`[(kL+o,0),((k+1)L+o,L)]`（k=-100〜999）で並べ、ほぼ全フレーム（Houdiniの1、ショットの1001など）でループさせる。
+  - 入口側の`rotations`は**値なしで宣言だけ**する。同じレイヤースタックにdefault値があるとクリップより強くなり、アニメーションが消える（試作で確認）。
+  - `wind_phase` variant set（`phase_0`〜`phase_3`、既定`phase_0`）: 同じ動きをL/4ずつずらしたクリップ設定。Point Instancerは1プロトタイプ1動作なので、同じ株を並べるときにphase違いのプロトタイプを作ると揃って揺れない。クリップ設定はvariantの中だけに書く（外に書くとvariantより強くなる）。D&Dの自動Set Variantは`wind_phase`より元の`variant`を選ぶ（`houdini_ops._add_variant_switch`）。
+- `customLayerData.nanakusa_wind`に元ファイル名・強さ・ループ長を記録する。
+
+リグ（植物ごと、最も詳細なLODから作る。作業空間はY上向き、Z-upは回転して扱う。`Rig`）:
+1. メッシュを連結成分（部品）に分ける。根元近く（高さの5%以内）から1.5帯以上伸びる部品を「根付き」、残りで大きさが2帯を超える部品を「枝」（茎の途中から出る葉、茎に届いていないスキャンの葉）、それ以外を「ばら」（花穂の小花、種、ごみ）とする。帯＝高さ/14。地面に寝た部品（最高点が1帯未満）は動かない地面の関節（関節0）へ。
+2. 根付き部品は根元（下端付近で株の中心軸に最も近い点）から、枝は根付き部品に最も近い点からの測地距離（辺をたどるダイクストラ）を帯に切り、帯の中でつながった塊を1関節にする。親は最短経路の元の塊（分岐する茎・葉も木構造になる）。枝の根の関節は、付け根の点を最も動かす関節の子。
+3. 点のウェイトは自分の関節と距離方向の前後の関節の線形補間（子が複数なら近い子）。関節は回転だけなので長さが保たれる。高さの6%以下では地面の関節へなめらかに移し、根元・根は動かさない（地面から8mm以内の点の移動0）。
+4. ばら部品は、互いに高さの0.6%以内のものをまとめてグループ（花穂）にし、グループ全体として一番近い（近さで重み付けした多数決）部品を選び、各部品はその部品の最も近い点へ剛体で付く。部品ごとに最寄りへ付けると、別の茎と接する花穂が2本の茎に引き裂かれた（実資産で最大4.6cmずれた。修正後は1cm超0件）。
+5. 他のLOD・proxyは、最も詳細なLODの最寄り点のウェイトを写す（格子バケットの厳密な最近傍、`nearest`）。
+
+動き（`animate`）:
+- 風＝いろいろな方向から来る突風（植物を通り抜ける平面波6本、ゆっくりした強弱の包絡）＋植物の大きさ程度で位相が変わる乱流。平均の向きを持たない。
+- 部品ごとに減衰振動子として応答: 主曲げ（固有振動数は長さ0.5mで1.1Hz、長さの平方根に反比例、小花などが付いて重いほど遅い、上限2.5Hz、減衰0.32）、外側の速い曲げ（主の2.8倍）、ねじれ。力もすべてLで周期的なので、FFTで定常応答を解けばループの継ぎ目が無い。減衰を0.18にした試作は、固有振動が目立ってメトロノームのように見えた。
+- 角度はRMSで正規化する（主曲げの先端RMS 0.2rad×強さ、ソフト上限0.6rad）ので資産が変わっても揃う。さらに植物の高さで弱める（`size_response`: 0.5〜1mで1、小さい株は√(h/0.5)、大きい株は1/√h、下限0.3。7cmの株が草と同じ角度で振れて大げさだった）。数値は`wind_gen.py`冒頭の定数。
+- 生成時に参照メッシュをnumpyでスキニングし、辺の長さの変化（裂け）・沈み込み・ループの差を`checks`に出す。書き出し後に入口を開き、合成エラー・クリップの解決・ループ・スキニング対象を確かめてから、クリップのパスを最終名へ書き換える。
+
+UI・ジョブ:
+- USDの右クリック「Generate Wind Animation...」（強さ0.1〜3、ループ4〜30秒のダイアログ。`settings.json`の`wind_strength`/`wind_loop_seconds`）。`WindJob`が`hython wind_gen.py <元> <出力> <結果JSON> <強さ> <秒>`を実行し、成功後にクリップ→入口の順で一時名から`os.replace`する。以前の出力は`data/backups/anim/`へ複製してから置き換える。Houdiniが開いているファイルはWindowsでは置き換えられずエラーになり、前の版が残る。
+- 出力先（`wind_gen.output_for`）: 共有レイヤーのフォルダー（Big/Smallと`textures`）なら隣、パッケージの入口なら隣に新しいパッケージフォルダー`<名前>_Anim/`、単体`.usdz`なら隣に新しいパッケージフォルダー（ばらの`.usd`を置くと、そのフォルダーが共有レイヤー扱いになり中のフォルダーが一覧から消えるため）。パッケージ・usdzからの出力は`../`で元を参照するので、元だけを移動すると切れる（制限）。
+- 全ジョブが終わると再スキャンし、新しい資産に元の資産のタグ（自動タグ以外）を写す（`adopt_wind_outputs`）。元のサムネイルPNGは`<名前>_Anim_thumbnail.png`として複製する。`anim`などの自動タグはスキャン後の`variant_scan`が付ける。
+- 出力（`wind_gen.is_output`: 名前が`_Anim`で終わり`anim/<名前>_clip.usd`がある）には、proxy・LOD・Element Switchの生成を行わない（入口を編集するとスキニングと合わなくなる）。元の資産で生成し直す。すでにスキニング・アニメーションのあるメッシュは`wind_gen`自体がスキップする。
+- 所要時間: HolcusLanatus Big（98MB、7株×3LOD＋proxy）で約20秒、入口15MB＋クリップ4.5MB（10秒ループ）。
+
+確認済み（22.0.447）: Karma CPU/XPUとScene Viewでスキニングされる。Point Instancerのプロトタイプでも動く（Karma）。1001フレームやループ先でも同じ値。別の形の植物（シダ、キキョウ類、ゴボウの小株）でも生成・レンダーできた。未対応: 木（幹と枝の階層・葉の揺れを分けたモデルは持たない）、モーションブラー用の速度は書かない。
+
+## 自動タグ（lod / variant / proxy / anim）
 
 - `variant_scan.py`（Houdini同梱のPython、`VariantTagJob`）が、索引の`vstamp`（`"mtime:size"`、索引v6で追加）が現在のファイルと違うUSD資産だけを開き、一番上のプリム（default prim、無ければ最初のルートプリム）のvariant set名を読む。`Usd.Stage.OpenMasked`（そのプリムだけ、payloadなし）なので、実ライブラリー914件で約1.2秒、変更なしなら約0.1秒。
 - `core.sync_auto_tags`: 名前が`lod`で始まる（大文字小文字無視、`core.is_lod_set`）セットがあれば`lod`、それ以外のセットがあれば`variant`を付け、無ければ外す。他の語と順序は保つ。`Library.save_variant_tags`は1トランザクション内で現在のtagsを読み直してから書く（並行してユーザーが編集したタグを失わない）。読めなかったファイルはタグに触れずstampだけ記録する。
-- `proxy`: 一番上のプリムの下（今の選択で合成されるもの）に`purpose=proxy`のGprimがあれば付け、無ければ外す。ProxyJobの成功時（"Proxy added"または"already has a proxy"）にも`set_tag`で付ける。stampは`p1:mtime:size`（`Library.STAMP_VERSION`。読む内容を増やしたら上げ、全USDを1回確認し直させる）。バッジはVARIANT（青）・LOD（橙）・PROXY（緑）の順に左上へ並べる。
+- `proxy`: 一番上のプリムの下（今の選択で合成されるもの）に`purpose=proxy`のGprimがあれば付け、無ければ外す。ProxyJobの成功時（"Proxy added"または"already has a proxy"）にも`set_tag`で付ける。stampは`p2:mtime:size`（`Library.STAMP_VERSION`。読む内容を増やしたら上げ、全USDを1回確認し直させる。p2で`anim`を追加）。バッジはVARIANT（青）・LOD（橙）・PROXY（緑）・ANIM（紫）の順に左上へ並べる。
+- `anim`: 一番上のプリムの下（今の選択で合成されるもの）の属性のどれかが`ValueMightBeTimeVarying()`（時間サンプルかvalue clipがある）なら付け、無ければ外す。サンプルの有無だけを見るので大きなメッシュも読まない。p2への更新で実ライブラリー1148件を確認し直して約7.5秒、変化は風のアニメーション1件だけだった（他の資産に誤検出なし）。生成ジョブではタグを付けず、出力のスキャン後にこの確認が付ける。
 - 起動時（1.5秒後、`AUTO_TAGS`）とスキャン完了時に実行し、変化があれば一覧を再読み込みする（バッジはタグから描く）。
 - Houdiniのセッションで最初に開いたパネルは、0.8秒後に自動でRescanする（`AUTO_SCAN`、モジュール変数`_session_scanned`で1回だけ。`settings.json`の`rescan_on_first_open`がfalseなら行わない）。その場合の起動時タグ確認は、スキャン完了時のものに任せる。生成ジョブのタグ操作（`set_tag`）とは独立で、ファイルが変わるため次回の確認で同じ結果になる。
 - D&Dの自動ノード（`houdini_ops._find_variant_set`）は、Referenceで配置したプリム自身→その子孫→（Sublayerでは）ステージ全体の順に探す。Set Variantは`element`を優先し、無ければLOD以外の最初のセット。Auto Select LODは`LOD`、無ければ`is_lod_set`の最初のセット。
@@ -400,7 +437,7 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.10.0ではHoudini 22.0.447 / Windowsで96件のテストが通過しました。
+0.10.0ではHoudini 22.0.447 / Windowsで96件、0.23.0では173件のテストが通過しました。`tests/test_wind.py`は、根元の根・茎の途中の葉・ばらの小花・LOD・proxyを持つ合成の株で、ループ・スキニング・根元の固定・小花の剛体追従・LODの切り替え・phaseのずれ・`anim`タグの検出を確認します。
 約11万ファイルの合成ライブラリーでの測定値: パネルを開く0.14秒、フォルダー切替・全体表示0.03秒、スクロールで200件追加が約3ミリ秒（DB）、スキャン約7秒（別プロセス。その間、UIのイベントループは最大でも0.1秒未満）。
 移動（`organize.py`）は標準Pythonでも検証できます。
 Scene Viewへのドロップ抑止は、実機のマウス操作では未検証です（イベントフィルターの判定のみテスト済み）。
@@ -427,7 +464,8 @@ Scene Viewへのドロップ抑止は、実機のマウス操作では未検証�
 | `thumbnail_scene.py` | 別プロセスのサムネイル用シーン作成（`resources/`のHDRIを使用） |
 | `proxy_gen.py` | 別プロセスでのproxy（`purpose=proxy`）生成。デシメート、色の焼き込み、USDZの展開・再パッケージ |
 | `element_gen.py` | 別プロセスでの複数オブジェクトパックの切り替え（`element` variant set）。proxy_gen.pyのファイル入出力を再利用。`anchor`・`remove_variant_set`はlod_gen.pyと共用 |
-| `variant_scan.py` | 別プロセスでUSDのvariant setを読み、`lod` / `variant`タグを同期（新規・変更分のみ） |
+| `variant_scan.py` | 別プロセスでUSDのvariant set・proxy・アニメーションを読み、`lod` / `variant` / `proxy` / `anim`タグを同期（新規・変更分のみ） |
 | `lod_gen.py` | 別プロセスでのLOD生成・削除（`LOD` variant set、Auto Select LOD / Stage Manager対応） |
+| `wind_gen.py` | 別プロセスでの風のアニメーション生成（UsdSkelのリグ・ループするvalue clip、`<名前>_Anim.usd`） |
 
 モジュールは`python3.13libs/nanakusa_asset_library/`内にあります。
