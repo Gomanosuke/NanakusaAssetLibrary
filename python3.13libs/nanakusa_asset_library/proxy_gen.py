@@ -134,8 +134,12 @@ def _card(points, colors=None):
     import numpy
     points = numpy.asarray(points, dtype=numpy.float64).reshape(-1, 3)
     centre = points.mean(0)
-    axes = numpy.linalg.svd(points - centre, full_matrices=True)[2] if len(points) > 1 else numpy.eye(3)
-    u, v = axes[0], axes[1]
+    # Principal axes from the 3x3 covariance (an SVD of the points themselves with full matrices
+    # asked for an n x n matrix and crashed hython on a seed head of ~100k points).
+    offsets = points - centre
+    values, vectors = numpy.linalg.eigh(offsets.T @ offsets) if len(points) > 1 else (numpy.ones(3), numpy.eye(3))
+    order = numpy.argsort(values)[::-1]
+    u, v = vectors[:, order[0]], vectors[:, order[1]]
     pu, pv = (points - centre) @ u, (points - centre) @ v
     # Full length (the card must still meet its stem), but 5-95 % across: a few florets sticking
     # out must not make the card much wider than the head reads.

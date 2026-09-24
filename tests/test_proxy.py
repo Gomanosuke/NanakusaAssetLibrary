@@ -126,6 +126,11 @@ class ProxyGenTests(unittest.TestCase):
             self.assertAlmostEqual(min(ys),min(p[1] for p in head),delta=0.01)   # covers the head's length
             self.assertAlmostEqual(max(ys),max(p[1] for p in head),delta=0.01)
             self.assertLess(max(xs)-min(xs),0.05)                               # and stays about as narrow
+        # A seed head of many points: the card's plane comes from a 3x3 covariance, never from an
+        # n x n matrix (an SVD with full matrices crashed hython on ~100k points).
+        big=[(0.001*math.sin(k),k*1e-5,0.002*math.cos(k*0.7)) for k in range(200000)]
+        corners,_=proxy_gen._card(big)
+        self.assertAlmostEqual(max(c[1] for c in corners)-min(c[1] for c in corners),2.0,delta=0.1)
         # A light mesh is left as it is (no cards): only meshes over the target are simplified.
         same=proxy_gen._proxy_geometry(points,counts,indices,None)
         self.assertEqual(same[1],list(counts))
