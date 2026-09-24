@@ -552,7 +552,52 @@ def _copy_switching(layer, mesh_path, proxy_path, variant_specs):
             attr.default = visibility.default
 
 
-def _add_proxies(stage, target_triangles):
+def _remove_proxies(stage):
+    """Delete from the root layer every purpose=proxy mesh the asset can show (in any variant), with
+    the "over"s that switch it (_copy_switching), so new ones can be made. Returns the removed prim
+    paths, or None when a proxy remains because it comes from another file (a reference, a payload)."""
+    from pxr import Sdf, UsdGeom
+    proxies = set()
+
+    def look():
+        for prim in stage.Traverse():
+            if (prim.IsA(UsdGeom.Mesh) and not prim.IsInstanceProxy()
+                    and UsdGeom.Imageable(prim).ComputePurpose() == UsdGeom.Tokens.proxy):
+                proxies.add(prim.GetPath())
+    _sweep_variants(stage, look)
+    layer = stage.GetRootLayer()
+    doomed = []
+
+    def walk(spec):
+        for child in list(spec.nameChildren):
+            if child.path.StripAllVariantSelections() in proxies:
+                doomed.append(child.path)
+                continue
+            for variant_set in child.variantSets.values():
+                for variant in variant_set.variants.values():
+                    walk(variant.primSpec)
+            walk(child)
+    walk(layer.pseudoRoot)
+    with Sdf.ChangeBlock():
+        for path in sorted(doomed, key=lambda p: -p.pathElementCount):
+            spec = layer.GetPrimAtPath(path)
+            parent = spec.nameParent if spec is not None else None
+            if parent is None:
+                continue
+            del parent.nameChildren[spec.name]
+            # An "over" left empty by that (only there to reach the proxy) goes too; a variant's own
+            # spec and anything with other content stay.
+            while (parent.path != Sdf.Path.absoluteRootPath and not parent.path.IsPrimVariantSelectionPath()
+                   and parent.specifier == Sdf.SpecifierOver and parent.IsInert() and parent.nameParent is not None):
+                grand = parent.nameParent
+                del grand.nameChildren[parent.name]
+                parent = grand
+    proxies.clear()
+    _sweep_variants(stage, look)
+    return None if proxies else sorted(str(p) for p in doomed)
+
+
+def _add_proxies(stage, target_triangles, replace=False):
     """Author a proxy for every render mesh directly onto an already-open, editable stage.
 
     Returns {'skipped': reason} or {'proxied': [...prim paths...]} - the same shape `generate()`
@@ -567,10 +612,17 @@ def _add_proxies(stage, target_triangles):
 
     A proxy carries only points and displayColor (Houdini's @P and @Cd), and one that would
     otherwise draw with a material bound above it is bound to the proxy look (PROXY_LOOK). An
-    asset that already has proxies only gets that binding where they lack it ({'restyled': [...]}).
+    asset that already has proxies only gets that binding where they lack it ({'restyled': [...]}),
+    unless `replace`: then its proxies are removed (_remove_proxies) and made again ({'proxied':
+    [...], 'replaced': [...]}).
     """
     from pxr import Sdf, Tf, UsdGeom
 
+    replaced = None
+    if replace and any(UsdGeom.Imageable(p).ComputePurpose() == UsdGeom.Tokens.proxy for p in stage.Traverse()):
+        replaced = _remove_proxies(stage)
+        if replaced is None:
+            return {'skipped': 'its proxies come from another file (a reference or payload), which is not edited'}
     if any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue()
            and UsdGeom.Imageable(p).GetPurposeAttr().Get() == UsdGeom.Tokens.proxy
            for p in stage.Traverse()):
@@ -623,7 +675,10 @@ def _add_proxies(stage, target_triangles):
         purpose.default = UsdGeom.Tokens.render
         _mark_lod_copies_render(layer, path, variant_specs)
         proxied.append(str(path))
-    return {'proxied': sorted(proxied)}
+    result = {'proxied': sorted(proxied)}
+    if replaced is not None:
+        result['replaced'] = replaced
+    return result
 
 
 def _mark_lod_copies_render(layer, mesh_path, variant_specs):
@@ -721,8 +776,8 @@ def generate_usdz(source, destination, add_fn):
         shutil.rmtree(extract_dir, ignore_errors=True)
 
 
-def generate(source, destination, target_triangles=TARGET_TRIANGLES):
-    add_fn = lambda stage: _add_proxies(stage, target_triangles)
+def generate(source, destination, target_triangles=TARGET_TRIANGLES, replace=False):
+    add_fn = lambda stage: _add_proxies(stage, target_triangles, replace)
     if Path(source).suffix.lower() == '.usdz':
         return generate_usdz(source, destination, add_fn)
     return generate_plain(source, destination, add_fn)
@@ -732,5 +787,6 @@ if __name__ == '__main__':
     import json
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     target_triangles = int(sys.argv[4]) if len(sys.argv) > 4 else TARGET_TRIANGLES
-    result = generate(sys.argv[1], sys.argv[2], target_triangles)
+    replace = len(sys.argv) > 5 and sys.argv[5] == 'replace'
+    result = generate(sys.argv[1], sys.argv[2], target_triangles, replace)
     Path(sys.argv[3]).write_text(json.dumps(result), encoding='utf-8')

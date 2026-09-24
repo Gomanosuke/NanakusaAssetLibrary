@@ -214,6 +214,27 @@ class ProxyGenVariantTests(unittest.TestCase):
                     # the viewport shows only the chosen version's proxy, a render only its mesh
                     self.assertEqual(shown(stage),([chosen+'_proxy'],[chosen]),(chosen,level))
 
+    def test_replace_makes_the_proxies_again_and_still_switches_them_with_their_meshes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src=self.native_variants(folder);first=Path(folder)/'first.usda';again=Path(folder)/'again.usda'
+            generate(src,first,20)
+            self.assertEqual(generate(first,again,8),{'skipped':'already has a proxy'})   # the bulk path: left alone
+            result=generate(first,again,8,replace=True)
+            self.assertEqual(result['proxied'],['/Plant/geo/var_01','/Plant/geo/var_02','/Plant/geo/var_03'])
+            self.assertEqual(result['replaced'],sorted(result['replaced']))
+            self.assertTrue(result['replaced'])
+            stage=Usd.Stage.Open(str(again));stage.SetEditTarget(stage.GetSessionLayer())
+            sets=stage.GetPrimAtPath('/Plant').GetVariantSets()
+            for chosen in ('var_01','var_02','var_03'):
+                for level in ('LOD_0','LOD_1'):
+                    sets.GetVariantSet('variant').SetVariantSelection(chosen);sets.GetVariantSet('LOD').SetVariantSelection(level)
+                    self.assertEqual(shown(stage),([chosen+'_proxy'],[chosen]),(chosen,level))
+                    proxy=UsdGeom.Mesh(stage.GetPrimAtPath(f'/Plant/geo/{chosen}_proxy'))
+                    self.assertLessEqual(proxy_gen._triangle_count(proxy.GetFaceVertexCountsAttr().Get()),8*1.5)   # the new target
+            # no second proxy and no stale name: exactly one proxy per mesh, under the same names
+            text=stage.GetRootLayer().ExportToString()
+            self.assertNotIn('_proxy_',text)
+
     def test_a_proxy_keeps_standing_in_while_our_own_lod_hides_the_original_mesh(self):
         from nanakusa_asset_library import lod_gen
         with tempfile.TemporaryDirectory() as folder:

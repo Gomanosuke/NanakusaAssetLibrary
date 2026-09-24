@@ -293,13 +293,23 @@ class LibraryUiTests(unittest.TestCase):
                 widget.queue_proxy(usda,300)
                 self.assertIn(usda['id'],widget.proxy_pending)
                 self.app.processEvents()
-                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'proxy',300)
+                job_cls.assert_called_once_with(usda['id'],Path(usda['root_path'])/usda['relpath'],base/'data'/'backups'/'proxy',300,replace=False)
                 self.assertIs(widget.proxy_job,job)
                 job.done.connect.assert_called_once_with(widget.proxy_done)
 
             widget.proxy_done(usda['id'],'Proxy added (1 mesh(es))','')
             self.assertNotIn(usda['id'],widget.proxy_pending)
             self.assertIn('Proxy added',widget.status.text())
+            # Picked by hand, an asset that has a proxy gets it made again (the bulk queue does not ask).
+            widget.proxy_job=None
+            with patch.object(ui,'ProxyJob') as job_cls:
+                widget.queue_proxy(usda,300,replace=True);self.app.processEvents()
+                self.assertTrue(job_cls.call_args.kwargs['replace'])
+            self.assertFalse(widget.proxy_replace)
+            widget.proxy_done(usda['id'],'Proxy replaced (1 mesh(es))','')
+            self.assertIn('proxy',widget.library.assets_by_ids([usda['id']])[0]['tags'].split())
+            self.assertIn('Proxy replaced',widget.status.text())
+            widget.proxy_job=None
 
             widget.proxy_done('missing-id','','disk full')
             self.assertIn('missing-id',widget.proxy_failed)
@@ -401,6 +411,7 @@ class LibraryUiTests(unittest.TestCase):
             with patch.object(ui.QtWidgets.QInputDialog,'getInt',return_value=(150,True)),patch.object(ui.LibraryWidget,'queue_proxy') as queue:
                 widget.generate_proxy()
             queue.assert_called_once()
+            self.assertTrue(queue.call_args.kwargs['replace'])   # Generate Selected Proxies remakes existing ones
             self.assertEqual(widget.settings['proxy_target_triangles'],150)
             with patch.object(ui.QtWidgets.QInputDialog,'getInt') as dlg2:
                 dlg2.return_value=(150,False)

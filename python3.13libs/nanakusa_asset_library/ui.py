@@ -384,13 +384,16 @@ class _MeshGenerateJob(QtCore.QThread):
 
 
 class ProxyJob(_MeshGenerateJob):
-    """Add a decimated purpose=proxy sibling to each render mesh of a USD file (proxy_gen.py)."""
+    """Add a decimated purpose=proxy sibling to each render mesh of a USD file (proxy_gen.py).
+    With `replace`, proxies the file already has are removed and made again."""
     script, label = 'proxy_gen.py', 'Proxy generation'
-    def __init__(self, asset_id, source, backup_dir, target_triangles):
-        super().__init__(asset_id, source, backup_dir, (target_triangles,))
+    def __init__(self, asset_id, source, backup_dir, target_triangles, replace=False):
+        super().__init__(asset_id, source, backup_dir, (target_triangles,) + (('replace',) if replace else ()))
     def summary(self, result):
         if 'restyled' in result:
             return f"Already has a proxy; proxy material fixed ({len(result['restyled'])} mesh(es))"
+        if 'replaced' in result:
+            return f"Proxy replaced ({len(result['proxied'])} mesh(es))"
         return f"Proxy added ({len(result['proxied'])} mesh(es))"
 
 
@@ -597,6 +600,7 @@ class LibraryWidget(QtWidgets.QWidget):
         self.proxy_pending = set()
         self.proxy_failed = set()
         self.proxy_job = None
+        self.proxy_replace = set()   # queued by hand: existing proxies are made again
         self.missing_proxy_scan = None
         self.element_queue = deque()
         self.element_pending = set()
@@ -1172,9 +1176,12 @@ class LibraryWidget(QtWidgets.QWidget):
         element generators (which edit the entry file) leave it alone - generate them on the source."""
         return wind_gen.is_output(Path(row['root_path'])/row['relpath'])
 
-    def queue_proxy(self,row,target_triangles):
+    def queue_proxy(self,row,target_triangles,replace=False):
+        """Queue a proxy job. `replace` (assets picked by hand): proxies the file already has are made
+        again; the bulk Generate Missing Proxies leaves them alone."""
         aid=row['id']
         if row['kind']!='usd' or aid in self.proxy_pending or aid in self.proxy_failed or self.is_wind_output(row):return
+        if replace:self.proxy_replace.add(aid)
         self.proxy_pending.add(aid);self.proxy_queue.append((row,target_triangles))
         QtCore.QTimer.singleShot(0,self.next_proxy)
 
@@ -1182,7 +1189,8 @@ class LibraryWidget(QtWidgets.QWidget):
         if self.proxy_job is not None or not self.proxy_queue:return
         row,target_triangles=self.proxy_queue.popleft()
         source=Path(row['root_path'])/row['relpath']
-        self.proxy_job=ProxyJob(row['id'],source,self.data_dir/'backups'/'proxy',target_triangles)
+        replace=row['id'] in self.proxy_replace;self.proxy_replace.discard(row['id'])
+        self.proxy_job=ProxyJob(row['id'],source,self.data_dir/'backups'/'proxy',target_triangles,replace=replace)
         self.proxy_job.done.connect(self.proxy_done)
         self.proxy_job.finished.connect(self.proxy_finished)
         _keep_job(self.proxy_job)
@@ -1195,8 +1203,13 @@ class LibraryWidget(QtWidgets.QWidget):
         if error:
             self.proxy_failed.add(aid);self.status.setText('Proxy generation failed: '+error)
         else:
-            if message and (message.startswith('Proxy added') or 'already has a proxy' in message.lower()):
+            if message and (message.startswith(('Proxy added','Proxy replaced')) or 'already has a proxy' in message.lower()):
                 self.set_tag(aid,'proxy',True)
+            if message and message.startswith('Proxy replaced'):
+                # A wind animation made from this asset has weights for the old proxy's points.
+                found=self.library.assets_by_ids([aid])
+                if found and wind_gen.output_for(Path(found[0]['root_path'])/found[0]['relpath']).is_file():
+                    message+='. Its wind animation still has the old proxy: run Generate Wind Animation... on it again'
             self.status.setText((message or 'Already has a proxy')+f' ({len(self.proxy_queue)} remaining)')
 
     def queue_element(self,row):
@@ -1501,7 +1514,7 @@ class LibraryWidget(QtWidgets.QWidget):
         if len(rows)==1:action('Choose Thumbnail...',self.choose_thumbnail)
         if usd:
             menu.addSection('USD (edits the file; a backup is kept)')
-            action('Generate Selected Proxies...',self.generate_proxy,'Adds a decimated purpose=proxy copy of each mesh.')
+            action('Generate Selected Proxies...',self.generate_proxy,'Adds a decimated purpose=proxy copy of each mesh. Proxies the file already has are made again.')
             action('Generate Selected Element Switch...',self.generate_element,'Only for packs of alternate objects: adds an "element" variant set.')
             action('Delete Element Switch',self.generate_element_delete,'Undo the element switch (assets without one are skipped).')
             action('Generate Selected LODs...',self.generate_lods,'Adds a "LOD" variant set (LOD_1 = as is, then reduced copies) for Auto Select LOD, Stage Manager and Set Variant.')
@@ -1737,8 +1750,8 @@ class LibraryWidget(QtWidgets.QWidget):
         for row in rows:
             self.library.resolve(row)
             self.proxy_failed.discard(row['id'])
-            self.queue_proxy(row,target)
-        self.status.setText(f'Queued {len(rows)} proxy job(s) (target {target} triangles). Each USD file is overwritten in place (a backup is kept in data/backups/proxy).')
+            self.queue_proxy(row,target,replace=True)
+        self.status.setText(f'Queued {len(rows)} proxy job(s) (target {target} triangles). Existing proxies are made again. Each USD file is overwritten in place (a backup is kept in data/backups/proxy).')
 
     def generate_missing_proxies(self):
         if self.missing_proxy_scan is not None:return
@@ -1770,7 +1783,7 @@ class LibraryWidget(QtWidgets.QWidget):
 
     def cancel_proxies(self):
         self.missing_proxy_scan=None
-        for row,_ in self.proxy_queue:self.proxy_pending.discard(row['id'])
+        for row,_ in self.proxy_queue:self.proxy_pending.discard(row['id']);self.proxy_replace.discard(row['id'])
         self.proxy_queue.clear()
         if self.proxy_job:self.proxy_job.requestInterruption()
         self.status.setText('Cancelled. An active proxy generation will finish first.')

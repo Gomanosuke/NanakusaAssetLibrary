@@ -283,6 +283,7 @@ USDの材質と依存ファイルを参照し、最初のフレームを描画�
   - `fuse`（Snap Distance、対角線の0.02%）でUV・材質境界の分離頂点を結合してから減らす。結合しないと、境界で分かれた各断片が個別に潰れて形が崩れる。
   - `divide`（Convex Polygons、最大3辺）で三角形化してから減らす。`polyreduce`の目標数はプリミティブ数であり、四角形・多角形主体のメッシュのまま渡すと、指定した三角形数のおよそ2倍が残ってしまう。
 - 小さな部品のカード化（`_proxy_geometry`、目標を超えるメッシュのみ）: 同じ位置の点を結合してから連結成分に分け、外接箱の対角がメッシュの対角の3%（`SMALL_PIECE`）未満の部品を、0.5%（`CARD_GAP`）の格子で隣り合うものどうしグループ（穂1本）にまとめ、グループごとに1枚の四角形（主成分分析の面、長さは全範囲・幅は5〜95パーセンタイル、幅の下限は長さの15%）に置き換える。色はそのグループだけにテクスチャを焼き込んだ点の平均。残りの部品はこれまでどおりデシメートする。polyreduceは部品をまとめられないため、小花が約3900個あるHolcusLanatus_463gg_Big（var_01）のproxyは目標300に対して16,597三角形残っていた。カード化で1,046三角形（カード17枚）になった。穂は板として見え、以前のまばらな点より形が分かる。
+- 作り直し（`replace`、ワーカーの第5引数`replace`）: 右クリックの「Generate Selected Proxies...」は`queue_proxy(..., replace=True)`、「Generate Missing Proxies...」は従来どおり`replace=False`（既存のproxyがあればスキップ／束縛だけ直す）。`_remove_proxies`が全variantを見てpurpose=proxyのメッシュのパスを集め、ルートレイヤー内でそのパス（variant選択を除いた形）に当たるspecを、LOD variant内の定義も他variantの`active`/`visibility`の上書きも含めて全部消し、空になった`over`も消してから、新しく作る。消したあともproxyが残る（参照・ペイロード先にある）場合は何も変えずスキップ。結果に`replaced`（消したspec）が入り、UIは"Proxy replaced"と表示する。風のアニメーションがある素材は、そのウェイトが古いproxyの点数のままなので作り直すよう案内する。HolcusLanatus_463gg_Big（proxy作成済み）で70 specを消して7株のproxyを作り直し、各株・各LODでproxyが1つだけ見えることを確認した。
 - 各`UsdGeom.Mesh`を、三角形換算で`target_triangles`（ダイアログで指定、既定`TARGET_TRIANGLES`=300）を超える場合のみデシメートする。小さいメッシュはそのまま複製する。結果は元プリムの兄弟として`<name>_proxy`に追加し、`purpose=proxy`を設定する。元プリムには`purpose=render`を明示する（Scene Viewでproxyが優先されるため）。名前衝突時は`_`を付けて回避する。
   - 元プリムの束縛材質からbase colorテクスチャを検出できた場合（`UsdPreviewSurface`の`diffuseColor`/`baseColor`が`UsdUVTexture`に接続され、`file`が解決できる形）、そのUV primvar（`UsdPrimvarReader`の`varname`、既定`st`。`faceVarying`/`vertex`/`uniform`/`constant`のいずれの補間にも対応）を使い、Houdiniの`attribfrommap`相当でテクスチャ色を頂点（点）ごとにサンプルし、`primvars:displayColor`（vertex補間）としてproxyへ焼き込む。デシメート後も色は点属性としてそのまま補間で引き継がれる（`polyreduce`が境界で多少オーバーシュートすることがあるため0〜1にクランプする）。材質・テクスチャが見つからない場合は無地のまま。
   - proxyに書く属性は`points`・`faceVertexCounts`・`faceVertexIndices`・`purpose`と、色がある時の`primvars:displayColor`だけ（Houdiniでは`@P`と`@Cd`）。UV・法線・不透明度は書かない。
@@ -439,7 +440,7 @@ Houdini 22のhython（作業シーンとは別プロセス）:
 hython -m unittest discover -s tests
 ```
 
-0.10.0ではHoudini 22.0.447 / Windowsで96件、0.24.0では176件のテストが通過しました。`tests/test_wind.py`は、根元の根・茎の途中の葉・ばらの小花・LOD・proxyを持つ合成の株で、ループ・スキニング・根元の固定・小花の剛体追従・LODの切り替え・phaseのずれ・`anim`タグの検出を確認します。
+0.10.0ではHoudini 22.0.447 / Windowsで96件、0.24.1では177件のテストが通過しました。`tests/test_wind.py`は、根元の根・茎の途中の葉・ばらの小花・LOD・proxyを持つ合成の株で、ループ・スキニング・根元の固定・小花の剛体追従・LODの切り替え・phaseのずれ・`anim`タグの検出を確認します。
 約11万ファイルの合成ライブラリーでの測定値: パネルを開く0.14秒、フォルダー切替・全体表示0.03秒、スクロールで200件追加が約3ミリ秒（DB）、スキャン約7秒（別プロセス。その間、UIのイベントループは最大でも0.1秒未満）。
 移動（`organize.py`）は標準Pythonでも検証できます。
 Scene Viewへのドロップ抑止は、実機のマウス操作では未検証です（イベントフィルターの判定のみテスト済み）。
